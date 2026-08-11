@@ -549,7 +549,72 @@ codex --version
 codex app-server --help
 ```
 
-### 13.2. Пользователь и каталоги
+### 13.2. Рекомендуемый путь: Hetzner cloud-init
+
+Для нового Hetzner Cloud VPS используйте Ubuntu 24.04 x86-64, обязательно
+выберите SSH-ключ и вставьте целиком
+[deploy/cloud-init.yaml](deploy/cloud-init.yaml) в поле **Cloud config**. Bootstrap:
+
+- устанавливает Git, curl, rsync, SQLite CLI, UFW и unattended upgrades;
+- устанавливает зафиксированный Node.js 24 LTS из официального binary archive и
+  проверяет SHA-256 по официальному `SHASUMS256.txt`;
+- устанавливает актуальный Codex CLI официальным standalone installer;
+- создаёт непривилегированного пользователя `summate` и каталоги данных;
+- создаёт 4 GiB swap со `swappiness=10` для VPS с 4 GiB RAM;
+- оставляет снаружи только SSH 22/tcp, запрещает password login и сохраняет
+  root login только по SSH-ключу;
+- включает ежедневные security updates;
+- не запускает Summate до загрузки исходников и добавления Telegram credentials.
+
+Cloud-init user-data сохраняется в metadata Hetzner и локально на VPS. Поэтому в
+нём намеренно нет Telegram token, OpenAI credentials, приватного Git deploy key
+или содержимого репозитория.
+
+Репозиторий приватный и не клонируется из cloud-init. Дождитесь окончания
+bootstrap и перенесите текущий checkout вместе с `.git`:
+
+```bash
+summate_server=203.0.113.10
+ssh -i ~/.ssh/summing-deploy root@"${summate_server}" 'cloud-init status --wait'
+rsync -az \
+  --exclude node_modules \
+  --exclude dist \
+  --exclude .pytest_cache \
+  --exclude __pycache__ \
+  --exclude '*.pyc' \
+  --exclude '/.env' \
+  --exclude '/.env.*' \
+  --exclude '/.codex' \
+  --exclude '/config.toml' \
+  --exclude '/summate.env' \
+  --exclude '/data' \
+  -e "ssh -i ~/.ssh/summing-deploy" \
+  ./ root@"${summate_server}":/opt/summate/
+```
+
+`.git` нужен для постоянных worktree, веток и self-change workflow; не заменяйте
+эту передачу архивом только рабочих файлов. После загрузки войдите на VPS,
+заполните два секрета и активируйте инсталляцию:
+
+```bash
+ssh -i ~/.ssh/summing-deploy root@"${summate_server}"
+nano /etc/summate/summate.env
+# TELEGRAM_BOT_TOKEN=...
+# TELEGRAM_OWNER_ID=...
+/opt/summate/deploy/activate.sh
+```
+
+[deploy/activate.sh](deploy/activate.sh) создаёт production config при его
+отсутствии, проверяет credentials, выполняет `npm ci`, lint, тесты, production
+build и `npm prune --omit=dev`, устанавливает unit, включает сервис и ждёт
+успешный loopback health check. Существующие `config.toml` и environment file он
+не перезаписывает, поэтому сценарий можно безопасно повторить после обновления
+кода.
+
+После запуска отправьте боту `/login`, завершите ChatGPT device-code flow, затем
+создайте forum group/topics и выполните `/bind`.
+
+### 13.3. Ручная подготовка пользователя и каталогов
 
 ```bash
 sudo useradd --system --create-home --home-dir /var/lib/summate summate
@@ -561,7 +626,7 @@ sudo install -d -o root -g summate -m 0750 /etc/summate
 `/srv/projects`. Пользователь `summate` должен иметь права на те Workspace,
 которые указаны в конфиге.
 
-### 13.3. Node.js и сборка
+### 13.4. Node.js и сборка
 
 ```bash
 cd /opt/summate
@@ -582,10 +647,10 @@ types нужны только для сборки и тестов. После `n
 SQLite addon и toolchain для его сборки на VPS; используемая синхронная поверхность
 покрыта профильными тестами.
 
-### 13.4. Конфиг и секреты
+### 13.5. Конфиг и секреты
 
 ```bash
-sudo cp config.example.toml /var/lib/summate/data/config.toml
+sudo cp deploy/config.production.toml /var/lib/summate/data/config.toml
 sudo cp summate.env.example /etc/summate/summate.env
 sudo chown summate:summate /var/lib/summate/data/config.toml
 sudo chown root:summate /etc/summate/summate.env
@@ -595,7 +660,7 @@ sudo chmod 0640 /etc/summate/summate.env
 
 Отредактируйте token, owner id, `CODEX_BIN` и пути Workspace.
 
-### 13.5. Systemd
+### 13.6. Systemd
 
 Скопируйте [deploy/summate.service](deploy/summate.service):
 
@@ -605,10 +670,10 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now summate
 ```
 
-Unit запускает `/usr/bin/node --enable-source-maps`, читает
+Unit запускает `/usr/local/bin/node --enable-source-maps`, читает
 `/etc/summate/summate.env`, работает от `summate:summate` с `UMask=0077` и
-останавливает всю process group. Если Node установлен в другой путь, исправьте
-`ExecStart` до первого запуска.
+останавливает всю process group. Cloud-init устанавливает Node именно в этот
+путь. При другом способе установки исправьте `ExecStart` до первого запуска.
 
 Проверка:
 
@@ -816,6 +881,12 @@ tests/
 ├── codex-app-server.test.ts
 ├── telegram-api.test.ts
 └── workspace-manager.test.ts
+
+deploy/
+├── cloud-init.yaml         # bootstrap чистого Ubuntu/Hetzner VPS
+├── activate.sh             # сборка, установка unit и первый запуск
+├── config.production.toml  # минимальный production config для Summate
+└── summate.service         # systemd unit
 ```
 
 Локальные проверки:

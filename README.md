@@ -37,17 +37,63 @@ Project
 persistent threads, streaming и `turn/steer`:
 [Codex App Server documentation](https://developers.openai.com/codex/app-server).
 
-## Установка
+## Установка на Hetzner
+
+Для нового Ubuntu 24.04 x86-64 VPS обязательно выберите SSH-ключ и вставьте
+содержимое [deploy/cloud-init.yaml](deploy/cloud-init.yaml) в поле **Cloud config**
+формы создания сервера. Файл устанавливает системные пакеты, Node.js 24 LTS,
+Codex CLI, пользователя `summate`, 4 GiB swap, UFW и автоматические security
+updates. Секретов в cloud-init нет, сервис автоматически не запускается.
+
+После создания VPS дождитесь bootstrap и загрузите приватный репозиторий вместе
+с `.git`:
+
+```bash
+summate_server=203.0.113.10
+ssh -i ~/.ssh/summing-deploy root@"${summate_server}" 'cloud-init status --wait'
+rsync -az \
+  --exclude node_modules \
+  --exclude dist \
+  --exclude .pytest_cache \
+  --exclude __pycache__ \
+  --exclude '*.pyc' \
+  --exclude '/.env' \
+  --exclude '/.env.*' \
+  --exclude '/.codex' \
+  --exclude '/config.toml' \
+  --exclude '/summate.env' \
+  --exclude '/data' \
+  -e "ssh -i ~/.ssh/summing-deploy" \
+  ./ root@"${summate_server}":/opt/summate/
+ssh -i ~/.ssh/summing-deploy root@"${summate_server}"
+```
+
+На VPS заполните `TELEGRAM_BOT_TOKEN` и `TELEGRAM_OWNER_ID`:
+
+```bash
+nano /etc/summate/summate.env
+/opt/summate/deploy/activate.sh
+```
+
+`activate.sh` создаёт production-конфиг, выполняет `npm ci`, lint, тесты и
+сборку, оставляет только production dependencies, устанавливает systemd unit и
+проверяет локальный health endpoint. Затем отправьте боту `/login` и завершите
+ChatGPT device-code flow. Не помещайте Telegram token, OpenAI credentials или
+приватный deploy key в cloud-init: user-data сохраняется в metadata провайдера и
+самого VPS.
+
+## Ручная установка
 
 ```bash
 npm ci
 npm run build
 npm prune --omit=dev
-cp config.example.toml /var/lib/summate/data/config.toml
+cp deploy/config.production.toml /var/lib/summate/data/config.toml
 ```
 
 Настройте проекты в `config.toml`, секреты в `/etc/summate/summate.env`, затем
-установите [deploy/summate.service](deploy/summate.service).
+установите [deploy/summate.service](deploy/summate.service). Unit ожидает Node.js
+в `/usr/local/bin/node`; при другом способе установки скорректируйте `ExecStart`.
 
 ```bash
 sudo systemctl daemon-reload

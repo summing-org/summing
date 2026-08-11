@@ -1,0 +1,153 @@
+#cloud-config
+
+# Hetzner Cloud user-data for a fresh Ubuntu 24.04 x86_64 server.
+# This file intentionally contains no Telegram token, OpenAI credentials,
+# private repository key, or other secret: cloud-init user-data is retained in
+# provider and instance metadata.
+
+package_update: true
+package_upgrade: true
+timezone: Etc/UTC
+
+packages:
+  - ca-certificates
+  - curl
+  - git
+  - jq
+  - rsync
+  - sqlite3
+  - sudo
+  - ufw
+  - unattended-upgrades
+  - xz-utils
+
+write_files:
+  - path: /usr/local/sbin/summate-bootstrap
+    owner: root:root
+    permissions: "0750"
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      node_version="v24.18.0"
+      node_archive="node-${node_version}-linux-x64.tar.xz"
+      node_dir="/opt/node-${node_version}"
+
+      if ! id summate >/dev/null 2>&1; then
+        useradd \
+          --system \
+          --create-home \
+          --home-dir /var/lib/summate \
+          --shell /usr/sbin/nologin \
+          summate
+      fi
+
+      install -d -o summate -g summate -m 0700 /var/lib/summate/data
+      install -d -o summate -g summate -m 0700 /var/lib/summate/data/codex
+      install -d -o summate -g summate -m 0700 /var/lib/summate/data/worktrees
+      install -d -o root -g summate -m 0750 /etc/summate
+      install -d -o summate -g summate -m 0750 /opt/summate
+      install -d -o summate -g summate -m 0750 /srv/projects
+      chown root:summate /etc/summate/summate.env
+      chmod 0640 /etc/summate/summate.env
+
+      if ! swapon --show=NAME --noheadings | grep -qx /swapfile; then
+        if [ ! -f /swapfile ]; then
+          fallocate -l 4G /swapfile
+          chmod 0600 /swapfile
+          mkswap /swapfile
+        fi
+        swapon /swapfile
+      fi
+      if ! grep -q '^/swapfile ' /etc/fstab; then
+        printf '%s\n' '/swapfile none swap sw 0 0' >> /etc/fstab
+      fi
+      printf '%s\n' 'vm.swappiness=10' > /etc/sysctl.d/60-summate-swap.conf
+      sysctl --system >/dev/null
+
+      if [ ! -x "${node_dir}/bin/node" ]; then
+        download_dir="$(mktemp -d)"
+        trap 'rm -rf "${download_dir}"' EXIT
+        curl -fsSL \
+          "https://nodejs.org/dist/${node_version}/${node_archive}" \
+          -o "${download_dir}/${node_archive}"
+        curl -fsSL \
+          "https://nodejs.org/dist/${node_version}/SHASUMS256.txt" \
+          -o "${download_dir}/SHASUMS256.txt"
+        (
+          cd "${download_dir}"
+          grep " ${node_archive}$" SHASUMS256.txt | sha256sum -c -
+        )
+        install -d -m 0755 "${node_dir}"
+        tar -xJf "${download_dir}/${node_archive}" \
+          -C "${node_dir}" \
+          --strip-components=1
+      fi
+      ln -sfn "${node_dir}/bin/node" /usr/local/bin/node
+      ln -sfn "${node_dir}/bin/npm" /usr/local/bin/npm
+      ln -sfn "${node_dir}/bin/npx" /usr/local/bin/npx
+      ln -sfn "${node_dir}/bin/corepack" /usr/local/bin/corepack
+
+      sudo -u summate \
+        env HOME=/var/lib/summate PATH=/usr/local/bin:/usr/bin:/bin \
+        bash -c \
+        'cd /var/lib/summate && curl -fsSL https://chatgpt.com/codex/install.sh | sh'
+      test -x /var/lib/summate/.local/bin/codex
+      ln -sfn /var/lib/summate/.local/bin/codex /usr/local/bin/codex
+
+      printf '%s\n' \
+        'APT::Periodic::Update-Package-Lists "1";' \
+        'APT::Periodic::Unattended-Upgrade "1";' \
+        > /etc/apt/apt.conf.d/20auto-upgrades
+      systemctl enable --now unattended-upgrades
+
+      ufw default deny incoming
+      ufw default allow outgoing
+      ufw allow 22/tcp
+      ufw --force enable
+
+      printf '%s\n' \
+        'PermitRootLogin prohibit-password' \
+        'PasswordAuthentication no' \
+        'KbdInteractiveAuthentication no' \
+        > /etc/ssh/sshd_config.d/60-summate-hardening.conf
+      sshd -t
+      systemctl reload ssh
+
+      node --version
+      npm --version
+      codex --version
+      git --version
+
+  - path: /etc/summate/summate.env
+    owner: root:root
+    permissions: "0640"
+    content: |
+      SUMMATE_DATA_DIR=/var/lib/summate/data
+      SUMMATE_CONFIG=/var/lib/summate/data/config.toml
+      SUMMATE_WORKTREE_ROOT=/var/lib/summate/data/worktrees
+      CODEX_HOME=/var/lib/summate/data/codex
+      CODEX_BIN=/usr/local/bin/codex
+      TELEGRAM_BOT_TOKEN=
+      TELEGRAM_OWNER_ID=
+      NODE_ENV=production
+
+  - path: /root/SUMMATE_NEXT_STEPS.txt
+    owner: root:root
+    permissions: "0600"
+    content: |
+      Summate host bootstrap is complete.
+
+      1. Upload the private repository, including .git, to /opt/summate.
+      2. Set TELEGRAM_BOT_TOKEN and TELEGRAM_OWNER_ID in:
+         /etc/summate/summate.env
+      3. Run:
+         /opt/summate/deploy/activate.sh
+      4. Send /login to the bot and complete ChatGPT device-code login.
+
+runcmd:
+  - [bash, /usr/local/sbin/summate-bootstrap]
+
+final_message: >-
+  Summate host bootstrap completed. Read /root/SUMMATE_NEXT_STEPS.txt and
+  upload the repository before activating the service.
