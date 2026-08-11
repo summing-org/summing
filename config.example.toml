@@ -1,0 +1,29 @@
+[agent]
+# Empty means the default model selected by Codex.
+model = ""
+effort = "medium"
+max_parallel_conversations = 4
+stream_interval_sec = 1.0
+# Required for git fetch/push and dependency downloads inside a Codex turn.
+network_access = true
+
+[health]
+port = 8765
+
+[projects.summate]
+name = "Summate"
+default_workspace = "repo"
+self_change = true
+
+[projects.summate.workspaces.repo]
+path = "/opt/summate"
+
+[projects.secret-cloud]
+name = "Secret Cloud"
+default_workspace = "web-app"
+
+[projects.secret-cloud.workspaces.web-app]
+path = "/srv/projects/secret-cloud/web-app"
+
+[projects.secret-cloud.workspaces.backend]
+path = "/srv/projects/secret-cloud/backend"

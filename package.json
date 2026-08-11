@@ -1,0 +1,25 @@
+{
+  "name": "summate",
+  "version": "8.0.0",
+  "description": "Persistent Telegram agent backed by the official Codex App Server",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/src/index.js",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test dist/tests/*.test.js",
+    "codex:types": "codex app-server generate-ts --experimental --out .codex-protocol"
+  },
+  "dependencies": {
+    "smol-toml": "^1.7.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "typescript": "^5.9.3"
+  },
+  "license": "MIT"
+}

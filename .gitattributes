@@ -1,0 +1,2 @@
+# Keep SVG sources stable across platforms.
+*.svg text eol=lf
