@@ -52,6 +52,11 @@ systemctl disable --now docker.service docker.socket >/dev/null 2>&1 || true
 if ! id "${runner_user}" >/dev/null 2>&1; then
   useradd --system --create-home --home-dir "${runner_home}" --shell /bin/bash "${runner_user}"
 fi
+runner_group_changed=0
+if ! id -nG "${runner_user}" | tr ' ' '\n' | grep -qx summate; then
+  usermod --append --groups summate "${runner_user}"
+  runner_group_changed=1
+fi
 if ! grep -q "^${runner_user}:" /etc/subuid; then
   usermod --add-subuids 231072-296607 "${runner_user}"
 fi
@@ -60,6 +65,9 @@ if ! grep -q "^${runner_user}:" /etc/subgid; then
 fi
 runner_uid=$(id -u "${runner_user}")
 loginctl enable-linger "${runner_user}"
+if [ "${runner_group_changed}" = 1 ]; then
+  systemctl stop "user@${runner_uid}.service" >/dev/null 2>&1 || true
+fi
 systemctl start "user@${runner_uid}.service"
 
 runner_env=(
@@ -147,7 +155,8 @@ chmod 0640 "${env_file}"
 ufw allow 80/tcp
 ufw allow 443/tcp
 systemctl daemon-reload
-systemctl enable --now summate-runner.service
+systemctl enable summate-runner.service
+systemctl restart summate-runner.service
 systemctl enable caddy.service
 systemctl restart caddy.service
 if [ "${enable_timer}" = 1 ]; then
