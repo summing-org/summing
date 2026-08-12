@@ -1,0 +1,20 @@
+[Unit]
+Description=Enqueue the pinned ash-seo daily job
+After=summate-runner.service
+Requires=summate-runner.service
+
+[Service]
+Type=oneshot
+User=summate
+Group=summate
+Environment=HOME=/var/lib/summate
+Environment=SUMMATE_RUNNER_SOCKET=/run/summate-runner/runner.sock
+ExecStart=/usr/local/bin/node --enable-source-maps /opt/summate/dist/src/project-runner-cli.js /etc/summate-runner/schedules/ash-seo.json
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadOnlyPaths=/var/lib/summate/data/repositories/ash-seo
+LockPersonality=true
+RestrictSUIDSGID=true

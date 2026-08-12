@@ -8,6 +8,7 @@ export function helpMessage(isAdministrator: boolean): string {
     "`/bind <project> [workspace]` — привязать текущий topic",
     "Пример: `/bind shop backend`",
     "`/status` — показать состояние Codex, привязку и очередь",
+    "`/files` — открыть дерево файлов, diff и project runner",
     "",
     "*Работа*",
     "Отправьте задачу обычным сообщением",

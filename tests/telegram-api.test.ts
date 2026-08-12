@@ -13,7 +13,7 @@ test("short message stays single", () => {
   assert.deepEqual(splitMessage("hello"), ["hello"]);
 });
 
-test("sendMessage forwards the MarkdownV2 parse mode", async () => {
+test("sendMessage forwards parse mode and Mini App markup", async () => {
   const api = new TelegramAPI("token");
   let payload: Record<string, unknown> = {};
   api.call = async (method, input) => {
@@ -24,10 +24,16 @@ test("sendMessage forwards the MarkdownV2 parse mode", async () => {
 
   try {
     assert.equal(
-      await api.sendMessage(42, "*Помощь*", { parseMode: "MarkdownV2" }),
+      await api.sendMessage(42, "*Помощь*", {
+        parseMode: "MarkdownV2",
+        replyMarkup: { inline_keyboard: [[{ text: "Open", web_app: { url: "https://example.test" } }]] },
+      }),
       17,
     );
     assert.equal(payload.parse_mode, "MarkdownV2");
+    assert.deepEqual(payload.reply_markup, {
+      inline_keyboard: [[{ text: "Open", web_app: { url: "https://example.test" } }]],
+    });
   } finally {
     await api.close();
   }

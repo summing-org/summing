@@ -18,6 +18,12 @@ max_file_bytes = 20000000
 [health]
 port = 8765
 
+[viewer]
+port = 8766
+public_url = ""
+auth_max_age_sec = 900
+runner_socket = "/run/summate-runner/runner.sock"
+
 # Static projects belong to TELEGRAM_OWNER_ID. Managed client projects are
 # created from the administrator's private Telegram chat.
 [projects.summate]

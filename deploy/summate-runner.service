@@ -1,0 +1,35 @@
+[Unit]
+Description=Summate isolated project runner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=summate-runner
+Group=summate
+SupplementaryGroups=summate-runner
+RuntimeDirectory=summate-runner
+RuntimeDirectoryMode=0750
+StateDirectory=summate-runner
+StateDirectoryMode=0700
+Environment=HOME=/var/lib/summate-runner
+Environment=XDG_RUNTIME_DIR=/run/user/%U
+Environment=DOCKER_HOST=unix:///run/user/%U/docker.sock
+Environment=SUMMATE_RUNNER_SOCKET=/run/summate-runner/runner.sock
+Environment=SUMMATE_RUNNER_DATA=/var/lib/summate-runner/jobs
+Environment=SUMMATE_RUNNER_CONFIG=/etc/summate-runner/projects
+ExecStartPre=/usr/bin/test -S /run/user/%U/docker.sock
+ExecStart=/usr/local/bin/node --enable-source-maps /opt/summate/dist/src/project-runner-main.js
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/summate-runner /run/summate-runner
+LockPersonality=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

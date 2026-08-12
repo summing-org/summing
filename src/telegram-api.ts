@@ -120,6 +120,7 @@ export class TelegramAPI {
       topicId?: number;
       replyTo?: number;
       parseMode?: "MarkdownV2";
+      replyMarkup?: TelegramObject;
     } = {},
   ): Promise<number> {
     const payload: TelegramObject = {
@@ -128,6 +129,7 @@ export class TelegramAPI {
       disable_web_page_preview: true,
     };
     if (options.parseMode) payload.parse_mode = options.parseMode;
+    if (options.replyMarkup) payload.reply_markup = options.replyMarkup;
     if (options.topicId) payload.message_thread_id = options.topicId;
     if (options.replyTo) {
       payload.reply_parameters = {

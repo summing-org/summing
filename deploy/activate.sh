@@ -103,7 +103,21 @@ sudo -u summate \
 install -o root -g root -m 0644 \
   "${repo_dir}/deploy/summate.service" \
   /etc/systemd/system/summate.service
+if id summate-runner >/dev/null 2>&1 && [ -f /etc/systemd/system/summate-runner.service ]; then
+  install -o root -g root -m 0644 \
+    "${repo_dir}/deploy/summate-runner.service" \
+    /etc/systemd/system/summate-runner.service
+  install -o root -g root -m 0644 \
+    "${repo_dir}/deploy/summate-ash-seo.service" \
+    /etc/systemd/system/summate-ash-seo.service
+  install -o root -g root -m 0644 \
+    "${repo_dir}/deploy/summate-ash-seo.timer" \
+    /etc/systemd/system/summate-ash-seo.timer
+fi
 systemctl daemon-reload
+if systemctl is-enabled --quiet summate-runner.service 2>/dev/null; then
+  systemctl restart summate-runner.service
+fi
 systemctl enable summate
 if ! systemctl restart summate; then
   systemctl status summate --no-pager || true

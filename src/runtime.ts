@@ -21,6 +21,8 @@ import { ConfigError, type RuntimeConfig } from "./config.js";
 import { HealthServer } from "./health-server.js";
 import { helpMessage } from "./help-message.js";
 import { ProjectCatalog, ProjectCatalogError } from "./project-catalog.js";
+import { GitInspector } from "./git-inspector.js";
+import { ProjectViewerServer } from "./project-viewer.js";
 import {
   StateStore,
   type Conversation,
@@ -228,6 +230,7 @@ export class SummateRuntime {
   readonly attachments: AttachmentService;
   readonly transcriber: AudioTranscriber;
   readonly health: HealthServer;
+  readonly viewer: ProjectViewerServer;
   private readonly shutdown = new Deferred<void>();
   private readonly shutdownController = new AbortController();
   private stopping = false;
@@ -263,6 +266,7 @@ export class SummateRuntime {
         ? new GroqWhisperTranscriber(config.groqApiKey, config.transcriptionModel)
         : new OpenAITranscriber(config.openaiApiKey, config.transcriptionModel);
     this.health = new HealthServer("127.0.0.1", config.healthPort, () => this.status());
+    this.viewer = new ProjectViewerServer(config, this.state, this.projects);
     this.semaphore = new Semaphore(config.maxParallelConversations);
   }
 
@@ -283,6 +287,7 @@ export class SummateRuntime {
       this.telegramUsername = String(me.username ?? "").replace(/^@/, "").toLowerCase();
       console.info(`Telegram bot connected: @${this.telegramUsername || "unknown"}`);
       await this.health.start();
+      await this.viewer.start();
       for (const conversation of this.state.listConversations()) {
         const queued = this.state.pendingAll(conversation.id);
         if (queued.some((item) => item.responseMode === "ambient")) {
@@ -309,6 +314,7 @@ export class SummateRuntime {
       await Promise.allSettled([...this.provisioning.values()].map((task) => task.promise));
       await Promise.allSettled([...this.processors.values()]);
       await this.health.close();
+      await this.viewer.close();
       this.state.close();
       this.codex.off("event", onEvent);
     }
@@ -328,7 +334,7 @@ export class SummateRuntime {
     const account = record(this.accountState.account);
     return {
       ok: this.codex.running && !this.stopping,
-      version: "8.4.1",
+      version: "8.5.0",
       codex_running: this.codex.running,
       auth: account?.type ?? null,
       plan: account?.planType ?? null,
@@ -338,6 +344,10 @@ export class SummateRuntime {
         model: this.config.transcriptionModel,
       },
       telegram_last_poll: this.lastTelegramPoll,
+      viewer: {
+        port: this.config.viewerPort,
+        public_url: this.config.viewerPublicUrl || null,
+      },
       ...this.state.counts(),
     };
   }
@@ -742,6 +752,26 @@ export class SummateRuntime {
     const conversation = this.state.byTopic(chatId, topicId);
     const isAdministrator = senderId === this.config.telegramOwnerId;
 
+    if (command === "/start" && argument.startsWith("files_")) {
+      if (chatType !== "private") {
+        await this.reply(chatId, topicId, messageId, "Project Viewer открывается через личный чат с ботом.");
+        return;
+      }
+      const targetId = argument.slice("files_".length);
+      let target: Conversation;
+      try {
+        target = this.state.get(targetId);
+      } catch {
+        await this.reply(chatId, topicId, messageId, "Conversation для Project Viewer не найден.");
+        return;
+      }
+      if (!this.projects.canAccess(senderId, target.projectId)) {
+        await this.reply(chatId, topicId, messageId, "Нет доступа к Project Viewer этого проекта.");
+        return;
+      }
+      await this.sendViewerButton(chatId, messageId, target);
+      return;
+    }
     if (command === "/start" || command === "/help") {
       await this.telegram.sendMessage(chatId, helpMessage(isAdministrator), {
         topicId,
@@ -999,6 +1029,38 @@ export class SummateRuntime {
       await this.reply(chatId, topicId, messageId, "Нет доступа к проекту этого topic.");
       return;
     }
+    if (command === "/files") {
+      if (!conversation) {
+        await this.reply(chatId, topicId, messageId, "Сначала привяжите topic к проекту командой /bind.");
+        return;
+      }
+      if (!this.config.viewerPublicUrl) {
+        await this.reply(
+          chatId,
+          topicId,
+          messageId,
+          `Project Viewer доступен через SSH tunnel на 127.0.0.1:${this.config.viewerPort}.\n` +
+            `conversation: ${conversation.id}`,
+        );
+        return;
+      }
+      if (chatType === "private") {
+        await this.sendViewerButton(chatId, messageId, conversation);
+        return;
+      }
+      if (!this.telegramUsername) {
+        await this.reply(chatId, topicId, messageId, "Telegram username бота ещё не определён.");
+        return;
+      }
+      const deepLink = `https://t.me/${this.telegramUsername}?start=files_${conversation.id}`;
+      await this.reply(
+        chatId,
+        topicId,
+        messageId,
+        `Откройте Project Viewer через личный чат с ботом:\n${deepLink}`,
+      );
+      return;
+    }
     if (command === "/status") {
       this.accountState = await this.codex.account();
       const state = this.status();
@@ -1150,6 +1212,28 @@ export class SummateRuntime {
     return this.config.transcriptionProvider === "groq"
       ? this.config.groqApiKey
       : this.config.openaiApiKey;
+  }
+
+  private async sendViewerButton(
+    chatId: number,
+    replyTo: number,
+    conversation: Conversation,
+  ): Promise<void> {
+    if (!this.config.viewerPublicUrl) {
+      await this.telegram.sendMessage(
+        chatId,
+        `Project Viewer пока доступен только через SSH tunnel на порту ${this.config.viewerPort}.`,
+        { replyTo },
+      );
+      return;
+    }
+    const url = `${this.config.viewerPublicUrl}/?conversation=${encodeURIComponent(conversation.id)}`;
+    await this.telegram.sendMessage(chatId, `Project Viewer: ${conversation.projectId}`, {
+      replyTo,
+      replyMarkup: {
+        inline_keyboard: [[{ text: "Открыть Project Viewer", web_app: { url } }]],
+      },
+    });
   }
 
   private async reply(chatId: number, topicId: number, messageId: number, text: string): Promise<void> {
@@ -1354,6 +1438,8 @@ export class SummateRuntime {
     );
     let runId: number | null = null;
     let releaseWorkspace: (() => void) | null = null;
+    let artifactInspector: GitInspector | null = null;
+    let artifactStarted = false;
     try {
       runId = this.state.startRun(
         conversation.id,
@@ -1393,6 +1479,16 @@ export class SummateRuntime {
         workspace,
         this.shutdownController.signal,
       );
+      if (access === "write") {
+        try {
+          const root = await GitInspector.worktreeRoot(prepared.readableRoot);
+          artifactInspector = new GitInspector(root);
+          await this.viewer.artifacts.begin(runId, conversation.id, artifactInspector);
+          artifactStarted = true;
+        } catch (error) {
+          console.error(`could not capture before snapshot for run ${runId}`, error);
+        }
+      }
       const materializedAttachments = this.workspaces.materializeAttachments(
         prepared,
         inputs.flatMap((input) =>
@@ -1523,6 +1619,13 @@ export class SummateRuntime {
         }
         this.state.clearActive(conversationId);
       } finally {
+        if (runId !== null && artifactStarted && artifactInspector) {
+          try {
+            await this.viewer.artifacts.complete(runId, conversation.id, artifactInspector);
+          } catch (error) {
+            console.error(`could not capture after snapshot for run ${runId}`, error);
+          }
+        }
         if (runId !== null) {
           this.attachments.remove(inputs.flatMap((input) => input.attachments));
         }

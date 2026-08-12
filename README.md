@@ -1,4 +1,4 @@
-# Summate 8.4
+# Summate 8.5
 
 Summate — один постоянно живущий агент с одним администратором и назначаемыми
 владельцами проектов. Он работает на Linux VPS, принимает команды из Telegram
@@ -41,8 +41,13 @@ Project
 - voice/audio по умолчанию транскрибируются через OpenAI `gpt-transcribe`;
   Groq Whisper доступен как опция, в Codex передаётся только текст, а локальный
   аудиофайл удаляется;
-- Web UI, CLI, Mini App, Claudexor, swarm, MCP, marketplaces, local models,
-  schedules и автономная Evolution отсутствуют.
+- Project Viewer открывается как Telegram Mini App: показывает дерево, безопасный
+  текст файлов, working/commit/run diff, runner jobs и логи;
+- отдельный rootless Docker runner собирает неизменяемые Git snapshots и
+  выполняет только фиксированные действия `build`, `validate`, `dry-run`, `run`;
+- per-project systemd timer может запускать закреплённый commit SHA; merge/push,
+  Claudexor, swarm, MCP, marketplaces, local models и автономная Evolution
+  отсутствуют.
 
 ## Требования
 
@@ -140,6 +145,7 @@ curl --fail http://127.0.0.1:8765/health
 /projects
 /bind <project> [workspace]
 /status
+/files
 ```
 
 `/project_create` создаёт пустой Git-репозиторий в
@@ -216,6 +222,7 @@ Runtime сохраняет событие `my_chat_member`, поэтому до�
 | `/projects` | Показать доступные отправителю проекты. |
 | `/bind` | Связать текущий topic с Project/Workspace. |
 | `/status` | Проверить Codex, account, binding и runs. |
+| `/files` | Открыть Project Viewer, diff, runner jobs и логи. |
 | `/steer` | Добавить указание в активный turn. |
 | Reply на stream | То же, без команды. |
 | `/cancel` | Прервать активный turn topic. |
@@ -234,6 +241,7 @@ $SUMMATE_DATA_DIR/
 ├── codex/
 ├── memory/identity.md
 ├── projects/<id>/memory.md
+├── run-artifacts/<conversation-id>/<run-id>/
 ├── attachments/<conversation-id>/   # pending private spool
 ├── repositories/<id>/<repo>/
 └── worktrees/<conversation-id>/
@@ -241,6 +249,26 @@ $SUMMATE_DATA_DIR/
 
 Полная архитектура и VPS runbook: [PROJECT_HANDBOOK_RU.md](PROJECT_HANDBOOK_RU.md).
 Конституционные принципы: [BIBLE.md](BIBLE.md).
+
+## Project Viewer и runner
+
+Viewer всегда слушает только `127.0.0.1:8766`. Без публичного URL его можно
+открыть через SSH tunnel; Telegram Mini App требует HTTPS reverse proxy. После
+установки Docker/Caddy вызовите отдельный installer с доменом и закреплённой
+ревизией проекта:
+
+```bash
+SUMMATE_VIEWER_DOMAIN=viewer.example.com \
+ASH_SEO_REVISION=<full-commit-sha> \
+ENABLE_ASH_SEO_TIMER=0 \
+sudo /opt/summate/deploy/install-project-operations.sh
+```
+
+Installer создаёт отдельного `summate-runner`, rootless Docker с лимитом build
+cache 8 ГБ, HTTPS proxy, project config/data и timer unit. Пользователь
+`summate` не получает Docker socket. Перед включением live timer замените
+placeholders в `/etc/summate-runner/projects/ash-seo.env` и проверьте
+`ash-seo.config.json`, затем запустите Validate и Dry run из Viewer.
 
 ## Тесты
 

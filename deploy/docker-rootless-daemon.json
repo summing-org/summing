@@ -1,0 +1,13 @@
+{
+  "builder": {
+    "gc": {
+      "enabled": true,
+      "defaultKeepStorage": "8GB"
+    }
+  },
+  "log-driver": "local",
+  "log-opts": {
+    "max-size": "20m",
+    "max-file": "3"
+  }
+}

@@ -63,6 +63,11 @@ export class RuntimeConfig {
     readonly openaiApiKey = "",
     readonly groqApiKey = "",
     readonly maximumAttachmentBytes = 20_000_000,
+    readonly viewerPort = 8_766,
+    readonly viewerPublicUrl = "",
+    readonly viewerAuthMaxAgeSeconds = 900,
+    readonly viewerLocalToken = "",
+    readonly runnerSocket = "/run/summate-runner/runner.sock",
   ) {}
 
   project(projectId: string): ProjectConfig {
@@ -206,6 +211,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig 
   const agent = table(raw.agent) ?? {};
   const transcription = table(raw.transcription) ?? {};
   const health = table(raw.health) ?? {};
+  const viewer = table(raw.viewer) ?? {};
   const codexHome = expandPath(env.CODEX_HOME || `${dataDir}/codex`, "CODEX_HOME");
   const worktreeRoot = expandPath(
     env.SUMMATE_WORKTREE_ROOT || `${dataDir}/worktrees`,
@@ -237,6 +243,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig 
     throw new ConfigError(
       `transcription.model '${transcriptionModel}' is not supported by ${transcriptionProvider}`,
     );
+  }
+
+  const viewerPublicUrl = String(
+    env.SUMMATE_VIEWER_URL || viewer.public_url || "",
+  ).trim().replace(/\/$/, "");
+  if (viewerPublicUrl && !viewerPublicUrl.startsWith("https://")) {
+    throw new ConfigError("viewer.public_url must use HTTPS");
   }
 
   return new RuntimeConfig(
@@ -290,6 +303,20 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig 
       1,
       20_000_000,
       true,
+    ),
+    boundedNumber(viewer.port ?? 8_766, "viewer.port", 1, 65_535, true),
+    viewerPublicUrl,
+    boundedNumber(
+      viewer.auth_max_age_sec ?? 900,
+      "viewer.auth_max_age_sec",
+      60,
+      86_400,
+      true,
+    ),
+    String(env.SUMMATE_VIEWER_LOCAL_TOKEN || "").trim(),
+    expandPath(
+      env.SUMMATE_RUNNER_SOCKET || viewer.runner_socket || "/run/summate-runner/runner.sock",
+      "viewer.runner_socket",
     ),
   );
 }

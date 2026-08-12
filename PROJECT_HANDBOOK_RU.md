@@ -1,6 +1,6 @@
 # Summate 8.4: архитектура, эксплуатация и разработка
 
-> Версия: **8.4.1**
+> Версия: **8.5.0**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
 > Последняя сверка с кодом: **12 августа 2026 года**.
 
@@ -593,6 +593,44 @@ Summate принадлежит администратору, а значение
 использует тот же persistent Codex thread и тот же именованный permission profile,
 поэтому это не независимый reviewer и не технически read-only режим.
 
+### 9.1. Project Viewer и изолированный runner
+
+Project Viewer — второй loopback HTTP server (`127.0.0.1:8766`). Статический
+mobile-first интерфейс и JSON API показывают:
+
+- tracked/untracked дерево без `.git`, `.summate-runtime`, secrets, dependency,
+  build и persistent-data каталогов;
+- только regular text files до 1 МБ без symlink traversal;
+- working diff относительно `HEAD`, включая синтетический diff untracked files;
+- последние commits и diff commit относительно parent;
+- before/after patch конкретного editor Run;
+- очередь, статусы и журналы project runner.
+
+HTTPS-запрос Mini App должен содержать Telegram `initData`. Backend заново
+проверяет HMAC, `auth_date`, Telegram user id и Project owner ACL; данные из
+`initDataUnsafe` не являются authority. Локальный bearer token предназначен
+только для SSH tunnel. В group topic `/files` выдаёт deep link в личный чат;
+там бот создаёт `web_app` button, поскольку Telegram предоставляет Mini App
+identity именно в private bot chat.
+
+До editor Codex turn host создаёт временный Git commit через отдельный index,
+не меняя branch или настоящий index worktree. После turn создаётся второй
+snapshot и сохраняется patch в `run-artifacts`. Snapshot включает tracked и
+untracked, но соблюдает `.gitignore`.
+
+Runner работает отдельным Unix user `summate-runner` и использует собственный
+rootless Docker daemon. Пользователь `summate` не получает Docker socket. Через
+Unix socket принимаются только project id, одна из четырёх фиксированных
+операций и Git archive до 50 МБ. Runner не читает conversation worktree: Summate
+сам создаёт immutable archive выбранной ревизии и передаёт его в запросе.
+Контейнер запускается read-only, без capabilities, с `no-new-privileges`, PID,
+CPU и memory limits; writable остаётся только project data bind mount.
+
+`validate`, `dry-run` и `build` могут использовать временный snapshot грязного
+worktree. `run` требует чистый committed `HEAD`. Периодический запуск читает
+`/etc/summate-runner/schedules/<project>.json`, поэтому всегда закреплён на
+явном полном SHA и не меняется от последующих commits самопроизвольно.
+
 ## 10. Telegram-команды
 
 | Команда | Поведение |
@@ -606,6 +644,7 @@ Summate принадлежит администратору, а значение
 | `/projects` | Список доступных отправителю Project и Workspace. |
 | `/bind <project> [workspace]` | Привязать текущий topic. |
 | `/status` | Account, plan, binding, active/pending. |
+| `/files` | Deep link в личный чат и Telegram Mini App Project Viewer. |
 | `/steer <текст>` | Направить текст в текущий Codex turn. |
 | `/cancel` | Прервать активный turn topic. |
 | `/new` | Начать новый Codex thread в topic. |
@@ -642,6 +681,8 @@ $SUMMATE_DATA_DIR/
 │       └── memory-conflicts/
 ├── repositories/                  # управляемые локальные Git repositories
 │   └── <project-id>/<repo-id>/
+├── run-artifacts/                 # before/after snapshots и patch каждого editor Run
+│   └── <conversation-id>/<run-id>/
 └── worktrees/                     # default SUMMATE_WORKTREE_ROOT
     └── <conversation-id>/
 ```
@@ -702,6 +743,10 @@ Telegram-проекты находятся в SQLite и не записываю�
 | `transcription.model` | Модель выбранного provider. | `gpt-transcribe` |
 | `transcription.max_file_bytes` | Лимит Telegram download. | 20000000 |
 | `health.port` | Порт health server. | 8765 |
+| `viewer.port` | Loopback-порт Project Viewer. | 8766 |
+| `viewer.public_url` | Публичный HTTPS URL Mini App. | пусто |
+| `viewer.auth_max_age_sec` | Максимальный возраст Telegram initData. | 900 |
+| `viewer.runner_socket` | Unix socket изолированного runner. | `/run/summate-runner/runner.sock` |
 | `projects.<id>.name` | Отображаемое имя. | id |
 | `projects.<id>.default_workspace` | Workspace для короткого `/bind`. | первый |
 | `projects.<id>.self_change` | Пометка собственного репозитория. | false |
@@ -734,6 +779,9 @@ rate-limit window — 10–3600 секунд, health port — 1–65535.
 | `CODEX_HOME` | Выделенное состояние/auth Codex. |
 | `CODEX_BIN` | Путь или executable name команды `codex`. |
 | `NODE_ENV` | Режим Node.js; в production выставляется `production`. |
+| `SUMMATE_VIEWER_URL` | Override публичного HTTPS URL Viewer. |
+| `SUMMATE_VIEWER_LOCAL_TOKEN` | Bearer token только для доступа через SSH tunnel. |
+| `SUMMATE_RUNNER_SOCKET` | Unix socket project runner. |
 
 Значения по умолчанию: `SUMMATE_DATA_DIR=~/Summate/data`, config —
 `<data>/config.toml`, worktrees — `<data>/worktrees`, `CODEX_HOME=<data>/codex`,
@@ -937,7 +985,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "8.4.1",
+  "version": "8.5.0",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",
@@ -995,6 +1043,8 @@ at-least-once recovery: prompt может выполниться повторн�
 - `projects/`;
 - `repositories/` со всеми управляемыми Git refs и незапушенными commits;
 - `SUMMATE_WORKTREE_ROOT`, если нужно сохранить незакоммиченные изменения;
+- `run-artifacts/`, `/etc/summate-runner` и `/var/lib/summate-runs` при
+  использовании Viewer/runner;
 - исходные Git-репозитории и их refs, если они не гарантированно находятся в
   origin.
 
@@ -1125,6 +1175,11 @@ src/
 ├── telegram-api.ts         # минимальный Bot API client на fetch
 ├── codex-app-server.ts     # типизированная JSONL/RPC boundary
 ├── project-catalog.ts      # managed Projects, owners и Git provisioning
+├── git-inspector.ts        # safe tree/file/diff/snapshot/archive boundary
+├── project-viewer.ts       # Mini App static/API loopback server
+├── viewer-auth.ts          # Telegram initData и local bearer validation
+├── project-runner-*.ts     # Unix socket client/server/CLI
+├── run-artifacts.ts        # before/after patches editor Runs
 ├── state-store.ts          # SQLite authority
 ├── workspace-manager.ts    # memory и Git worktrees
 └── health-server.ts        # loopback HTTP
@@ -1132,6 +1187,9 @@ src/
 tests/
 ├── config.test.ts
 ├── project-catalog.test.ts
+├── git-inspector.test.ts
+├── project-runner.test.ts
+├── viewer-auth.test.ts
 ├── attachment-service.test.ts
 ├── runtime-access.test.ts
 ├── runtime-attachments.test.ts
@@ -1143,8 +1201,11 @@ tests/
 deploy/
 ├── cloud-init.yaml         # bootstrap чистого Ubuntu/Hetzner VPS
 ├── activate.sh             # сборка, установка unit и первый запуск
+├── install-project-operations.sh # rootless Docker, Caddy, runner и timer
 ├── config.production.toml  # минимальный production config для Summate
-└── summate.service         # systemd unit
+├── summate.service         # основной Telegram runtime
+├── summate-runner.service  # изолированный Docker runner
+└── summate-ash-seo.timer   # pinned daily schedule
 ```
 
 Локальные проверки:
@@ -1180,7 +1241,7 @@ Telegram/OpenAI/Groq end-to-end теста в репозитории нет.
 - нет multi-host coordination;
 - нет автоматического merge/push;
 - нет смены owner, удаления Project или добавления второго repository через Telegram;
-- нет публичного dashboard;
+- Viewer публикуется только через явно настроенный HTTPS proxy и owner ACL;
 - нет per-message approval UI;
 - non-Git Workspace сериализует Runs, но не изолирует изменения между ними;
 - Project memory — простой Markdown, не vector database;

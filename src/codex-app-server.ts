@@ -105,7 +105,7 @@ export class CodexAppServer extends EventEmitter {
         clientInfo: {
           name: "summate_telegram",
           title: "Summate Telegram",
-          version: "8.4.1",
+          version: "8.5.0",
         },
         capabilities: {
           experimentalApi: true,
