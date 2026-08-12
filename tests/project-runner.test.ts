@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { GitInspector } from "../src/git-inspector.js";
@@ -8,7 +9,7 @@ import { ProjectRunnerClient } from "../src/project-runner-client.js";
 import { ProjectRunnerServer } from "../src/project-runner-server.js";
 
 test("queues an immutable archive and builds it through the isolated runner", async () => {
-  const root = mkdtempSync(join("/private/tmp", "summate-runner-test-"));
+  const root = mkdtempSync(join(tmpdir(), "summate-runner-test-"));
   const repository = join(root, "repo");
   const configRoot = join(root, "config");
   const dataRoot = join(root, "data");
