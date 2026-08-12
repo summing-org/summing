@@ -12,6 +12,7 @@ import {
   realpathSync,
   readdirSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { opendir } from "node:fs/promises";
@@ -369,6 +370,15 @@ export class WorkspaceManager {
     } else {
       mkdirSync(runtimeDir, { recursive: false });
     }
+    const memoryDir = resolve(runtimeDir, "memory");
+    if (existsSync(memoryDir)) {
+      const memoryStat = lstatSync(memoryDir);
+      if (memoryStat.isSymbolicLink() || !memoryStat.isDirectory()) {
+        throw new WorkspaceError(`refusing unsafe runtime memory directory: ${memoryDir}`);
+      }
+    } else {
+      mkdirSync(memoryDir, { recursive: false, mode: 0o700 });
+    }
     const tempDir = resolve(runtimeDir, "tmp");
     if (existsSync(tempDir)) {
       const tempStat = lstatSync(tempDir);
@@ -379,12 +389,22 @@ export class WorkspaceManager {
       mkdirSync(tempDir, { recursive: false, mode: 0o700 });
     }
     try {
+      chmodSync(memoryDir, 0o700);
       chmodSync(tempDir, 0o700);
     } catch {
       // Best effort on filesystems without POSIX permissions.
     }
+    const legacyMemoryPath = resolve(runtimeDir, "PROJECT_MEMORY.md");
+    if (existsSync(legacyMemoryPath)) {
+      // Version 8.3.0 stored this generated snapshot directly under runtimeDir.
+      const legacyMemory = lstatSync(legacyMemoryPath);
+      if (legacyMemory.isSymbolicLink() || !legacyMemory.isFile() || legacyMemory.nlink !== 1) {
+        throw new WorkspaceError(`refusing unsafe legacy project memory file: ${legacyMemoryPath}`);
+      }
+      unlinkSync(legacyMemoryPath);
+    }
     const identity = readFileSync(this.identityPath, "utf8");
-    this.writeRuntimeFile(resolve(runtimeDir, "PROJECT_MEMORY.md"), projectMemory);
+    this.writeRuntimeFile(resolve(memoryDir, "PROJECT_MEMORY.md"), projectMemory);
     this.writeRuntimeFile(
       resolve(runtimeDir, "CONTEXT.md"),
       "# Summate runtime context\n\n" +
@@ -396,7 +416,7 @@ export class WorkspaceManager {
         `## Durable project memory\n\n${projectMemory.trimEnd()}\n\n` +
         "## Memory rule\n\n" +
         "If this run establishes a durable project fact, append it to " +
-        "`.summate-runtime/PROJECT_MEMORY.md`. Do not rewrite or delete existing memory. " +
+        "`.summate-runtime/memory/PROJECT_MEMORY.md`. Do not rewrite or delete existing memory. " +
         "Conversation-specific details belong in the Codex thread, not in project memory. " +
         "Change Summate itself only when the administrator directly asks.\n",
     );
@@ -433,13 +453,17 @@ export class WorkspaceManager {
     prepared: PreparedWorkspace,
   ): Promise<string | null> {
     const runtimeDir = resolve(prepared.path, ".summate-runtime");
-    const localPath = resolve(runtimeDir, "PROJECT_MEMORY.md");
+    const memoryDir = resolve(runtimeDir, "memory");
+    const localPath = resolve(memoryDir, "PROJECT_MEMORY.md");
     if (!existsSync(localPath)) return null;
     const runtimeStat = lstatSync(runtimeDir);
+    const memoryStat = lstatSync(memoryDir);
     const localStat = lstatSync(localPath);
     if (
       runtimeStat.isSymbolicLink() ||
       !runtimeStat.isDirectory() ||
+      memoryStat.isSymbolicLink() ||
+      !memoryStat.isDirectory() ||
       localStat.isSymbolicLink() ||
       !localStat.isFile() ||
       localStat.nlink !== 1

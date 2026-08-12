@@ -1,6 +1,6 @@
 # Summate 8.3: архитектура, эксплуатация и разработка
 
-> Версия: **8.3.0**
+> Версия: **8.3.1**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
 > Последняя сверка с кодом: **12 августа 2026 года**.
 
@@ -360,7 +360,7 @@ $SUMMATE_DATA_DIR/projects/<project-id>/memory.md
 ```
 
 Это общая долговременная память всех Conversations проекта. Перед turn её снимок
-попадает в `.summate-runtime/PROJECT_MEMORY.md`.
+попадает в `.summate-runtime/memory/PROJECT_MEMORY.md`.
 
 Контекст просит агента только добавлять устойчивые факты. После Run Summate
 сравнивает локальный файл со снимком, сделанным перед Run:
@@ -387,7 +387,9 @@ Git worktree.
 ```text
 .summate-runtime/
 ├── CONTEXT.md
-└── PROJECT_MEMORY.md
+├── memory/
+│   └── PROJECT_MEMORY.md
+└── tmp/
 ```
 
 Они исключаются через Git info/exclude и не должны попадать в commit. Это
@@ -447,6 +449,9 @@ device code в группе. Команда доступна только адм
 - `runtimeWorkspaceRoots`, ограниченный conversation worktree;
 - `filesystem.:minimal = read` для необходимых системных путей;
 - read всего текущего worktree и write только текущего Workspace внутри него;
+- служебный `.summate-runtime` доступен на чтение, а запись разрешена только в
+  каталогах `memory/` и `tmp/`; permission profile не использует отдельный файл
+  `PROJECT_MEMORY.md` как writable root;
 - `.git`-указатель worktree доступен на чтение, а project-scoped общий Git
   directory — на запись, чтобы owner мог выполнять `git add`, commit, rebase и
   push без доступа к metadata других репозиториев;
@@ -883,7 +888,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "8.3.0",
+  "version": "8.3.1",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",

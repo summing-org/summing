@@ -97,7 +97,7 @@ test("thread and turn requests use official v2 shapes", async () => {
             workspace: "write",
             ".git": "read",
             "workspace/.summate-runtime": "read",
-            "workspace/.summate-runtime/PROJECT_MEMORY.md": "write",
+            "workspace/.summate-runtime/memory": "write",
             "workspace/.summate-runtime/tmp": "write",
           },
           "/tmp/project-git": "write",
@@ -201,6 +201,28 @@ test("thread and turn requests use official v2 shapes", async () => {
     },
     web_search: "disabled",
   });
+
+  await client.startThread("/tmp/empty-project", "", {
+    networkAccess: false,
+    readableRoots: ["/tmp/empty-project"],
+  });
+  const emptyThreadParams = client.calls[3]?.[1] ?? {};
+  const emptyConfig = emptyThreadParams.config as JsonRecord;
+  const emptyProfiles = emptyConfig.permissions as JsonRecord;
+  const emptyProfile = emptyProfiles["summate-project"] as JsonRecord;
+  const emptyFilesystem = emptyProfile.filesystem as JsonRecord;
+  const emptyWorkspaceRules = emptyFilesystem[":workspace_roots"] as JsonRecord;
+  assert.deepEqual(emptyWorkspaceRules, {
+    ".": "write",
+    ".git": "read",
+    ".summate-runtime": "read",
+    ".summate-runtime/memory": "write",
+    ".summate-runtime/tmp": "write",
+  });
+  assert.equal(
+    Object.keys(emptyWorkspaceRules).some((path) => path.endsWith("PROJECT_MEMORY.md")),
+    false,
+  );
 });
 
 test("refuses shared Codex configuration that could expand project permissions", async () => {

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -104,7 +105,16 @@ test("conversation gets a persistent worktree and project memory", async () => {
     assert.ok(readOnlyDeniedPaths.includes(".git-credentials"));
     assert.ok(readOnlyDeniedPaths.includes("apps/web/.summate-runtime"));
     assert.ok(readOnlyDeniedPaths.includes(deepSecretRelative));
-    const localMemory = join(prepared.path, ".summate-runtime", "PROJECT_MEMORY.md");
+    const legacyMemory = join(prepared.path, ".summate-runtime", "PROJECT_MEMORY.md");
+    writeFileSync(legacyMemory, "legacy runtime memory\n");
+    await manager.prepare(conversation, project, workspace);
+    assert.equal(existsSync(legacyMemory), false);
+    const localMemory = join(
+      prepared.path,
+      ".summate-runtime",
+      "memory",
+      "PROJECT_MEMORY.md",
+    );
     assert.ok(readFileSync(join(prepared.path, ".summate-runtime", "CONTEXT.md"), "utf8"));
     writeFileSync(localMemory, `${readFileSync(localMemory, "utf8")}\n- durable fact\n`);
     assert.equal(await manager.mergeProjectMemory("demo", prepared), null);

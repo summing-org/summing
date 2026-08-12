@@ -85,7 +85,7 @@ export class CodexAppServer extends EventEmitter {
         clientInfo: {
           name: "summate_telegram",
           title: "Summate Telegram",
-          version: "8.3.0",
+          version: "8.3.1",
         },
         capabilities: {
           experimentalApi: true,
@@ -363,7 +363,9 @@ export class CodexAppServer extends EventEmitter {
       workspaceRoots[writableSubpath] = "write";
       workspaceRoots[".git"] = "read";
       workspaceRoots[runtimeSubpath] = "read";
-      workspaceRoots[`${runtimeSubpath}/PROJECT_MEMORY.md`] = "write";
+      // Keep write grants directory-scoped: older App Server builds probe writable
+      // paths for project metadata and cannot probe through a regular file.
+      workspaceRoots[`${runtimeSubpath}/memory`] = "write";
       workspaceRoots[`${runtimeSubpath}/tmp`] = "write";
     } else {
       workspaceRoots[".git"] = "deny";
