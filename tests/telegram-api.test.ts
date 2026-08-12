@@ -50,3 +50,35 @@ test("getUpdates subscribes to messages and bot membership changes", async () =>
     await api.close();
   }
 });
+
+test("downloadFile resolves Telegram file path and enforces byte limit", async () => {
+  const api = new TelegramAPI("secret-token");
+  api.call = async (method, input) => {
+    assert.equal(method, "getFile");
+    assert.equal(input.file_id, "file-1");
+    return { file_path: "voice/audio note.ogg", file_size: 4 };
+  };
+  const originalFetch = globalThis.fetch;
+  let requestedUrl = "";
+  globalThis.fetch = async (input) => {
+    requestedUrl = String(input);
+    return new Response(new Uint8Array([1, 2, 3, 4]), {
+      headers: { "content-length": "4" },
+    });
+  };
+  try {
+    const downloaded = await api.downloadFile("file-1", 10);
+    assert.deepEqual([...downloaded.data], [1, 2, 3, 4]);
+    assert.equal(downloaded.fileSize, 4);
+    assert.equal(downloaded.filePath, "voice/audio note.ogg");
+    assert.equal(
+      requestedUrl,
+      "https://api.telegram.org/file/botsecret-token/voice/audio%20note.ogg",
+    );
+    api.call = async () => ({ file_path: "large.bin", file_size: 11 });
+    await assert.rejects(api.downloadFile("large", 10), /download limit/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await api.close();
+  }
+});

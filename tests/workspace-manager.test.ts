@@ -116,6 +116,42 @@ test("conversation gets a persistent worktree and project memory", async () => {
       "PROJECT_MEMORY.md",
     );
     assert.ok(readFileSync(join(prepared.path, ".summate-runtime", "CONTEXT.md"), "utf8"));
+    const spoolDir = join(root, "data", "attachments", conversation.id);
+    mkdirSync(spoolDir, { recursive: true });
+    const spoolFile = join(spoolDir, "source.zip");
+    writeFileSync(spoolFile, "PK test archive");
+    const materialized = manager.materializeAttachments(prepared, [{
+      inputId: 7,
+      telegramMessageId: 99,
+      attachment: {
+        kind: "document",
+        fileName: "source.zip",
+        mimeType: "application/zip",
+        filePath: spoolFile,
+        size: 15,
+      },
+    }]);
+    assert.deepEqual(materialized.map((item) => item.relativePath), [
+      ".summate-runtime/attachments/99-7-source.zip",
+    ]);
+    assert.equal(
+      readFileSync(join(prepared.path, materialized[0]!.relativePath), "utf8"),
+      "PK test archive",
+    );
+    await assert.rejects(
+      async () => manager.materializeAttachments(prepared, [{
+        inputId: 8,
+        telegramMessageId: 100,
+        attachment: {
+          kind: "document",
+          fileName: "outside.txt",
+          mimeType: "text/plain",
+          filePath: join(root, "outside-secret"),
+          size: 1,
+        },
+      }]),
+      /outside private spool/,
+    );
     writeFileSync(localMemory, `${readFileSync(localMemory, "utf8")}\n- durable fact\n`);
     assert.equal(await manager.mergeProjectMemory("demo", prepared), null);
     assert.match(readFileSync(manager.projectMemoryPath("demo"), "utf8"), /durable fact/);

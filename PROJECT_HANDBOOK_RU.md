@@ -1,6 +1,6 @@
-# Summate 8.3: архитектура, эксплуатация и разработка
+# Summate 8.4: архитектура, эксплуатация и разработка
 
-> Версия: **8.3.1**
+> Версия: **8.4.0**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
 > Последняя сверка с кодом: **12 августа 2026 года**.
 
@@ -291,6 +291,33 @@ Updates обрабатываются последовательно. После 
 offset сохраняется в SQLite. Поэтому такая ошибка не приводит к автоматическому
 повтору того же Telegram update.
 
+### 4.7. Документы, архивы и аудио
+
+Сообщение может содержать `document`, `voice` или `audio`. Runtime сначала
+проверяет binding, ACL и participant rate limit, затем вызывает Telegram
+`getFile` и скачивает не более 20 МБ в приватный
+`$SUMMATE_DATA_DIR/attachments/<conversation-id>/`. Имя очищается от path
+components и управляющих символов; pending input хранит типизированные metadata,
+поэтому вложение переживает рестарт до начала Run.
+
+Документ перед Run копируется в
+`.summate-runtime/attachments/<message-id>-<input-id>-<name>`. Каталог исключён
+из Git и доступен Codex только на чтение, в том числе в guest profile. ZIP не
+распаковывается host-процессом: это исключает zip-slip и decompression bomb на
+privileged boundary. Editor может распаковать проверенный архив только в
+`.summate-runtime/tmp`; read-only thread ограничивается `unzip -l`/`unzip -p` и
+другими не меняющими состояние inspection-командами.
+
+Voice, Telegram audio и аудиодокумент поддерживаемого формата отправляются по
+multipart HTTPS выбранному transcription provider. По умолчанию это OpenAI
+endpoint `/v1/audio/transcriptions` и точная модель `gpt-transcribe`; опционально
+можно выбрать Groq endpoint `/openai/v1/audio/transcriptions` и
+`whisper-large-v3-turbo`/`whisper-large-v3`. Ключ берётся только из
+`OPENAI_API_KEY` либо `GROQ_API_KEY` host-процесса и не попадает в Codex App
+Server или shell. В очередь передаётся полученный transcript, а локальный
+аудиофайл сразу удаляется. При отсутствующем ключе пользователь получает явную
+инструкцию по настройке.
+
 ## 5. Параллельность и Git worktree
 
 Несколько topics одного репозитория могут одновременно менять файлы. Использовать
@@ -389,6 +416,7 @@ Git worktree.
 ├── CONTEXT.md
 ├── memory/
 │   └── PROJECT_MEMORY.md
+├── attachments/
 └── tmp/
 ```
 
@@ -450,7 +478,8 @@ device code в группе. Команда доступна только адм
 - `filesystem.:minimal = read` для необходимых системных путей;
 - read всего текущего worktree и write только текущего Workspace внутри него;
 - служебный `.summate-runtime` доступен на чтение, а запись разрешена только в
-  каталогах `memory/` и `tmp/`; permission profile не использует отдельный файл
+  каталогах `memory/` и `tmp/`; `attachments/` доступен только на чтение;
+  permission profile не использует отдельный файл
   `PROJECT_MEMORY.md` как writable root;
 - `.git`-указатель worktree доступен на чтение, а project-scoped общий Git
   directory — на запись, чтобы owner мог выполнять `git add`, commit, rebase и
@@ -471,7 +500,7 @@ device code в группе. Команда доступна только адм
 
 Read-only Q&A thread получает `summate-project-readonly`: Workspace доступен
 только на чтение, network, web search, Browser и Computer Use выключены, а
-`.summate-runtime`, `.env`, `.envrc`, `.ssh`, Git/package/cloud credentials,
+`.summate-runtime` (кроме read-only `attachments/`), `.env`, `.envrc`, `.ssh`, Git/package/cloud credentials,
 private keys, certificates и symlinks перед каждым guest run рекурсивно
 обнаруживаются host-процессом и закрываются точными deny-путями без ограничения
 глубины. Его prompt дополнительно
@@ -618,7 +647,8 @@ SQLite хранит:
 - binding `chat_id/topic_id → project/workspace`;
 - editor и read-only Codex thread id;
 - активный turn и Telegram stream message id;
-- pending steer/follow-up с `access_mode`, `response_mode` и Telegram user id;
+- pending steer/follow-up с `access_mode`, `response_mode`, Telegram user id и
+  типизированными metadata вложений;
 - историю Run: access/response mode, prompt, response, status, error и timestamps;
 - управляемые Projects, Workspaces и Telegram owner id;
 - обнаруженные Telegram chats/topics и последний membership event бота;
@@ -629,7 +659,7 @@ SQLite хранит:
 | Таблица | Содержимое |
 |---|---|
 | `conversations` | Binding, editor/read-only threads, active turn, stream message и worktree path. |
-| `pending_inputs` | Очередь, access/response mode, Telegram user id и состояние обработки. |
+| `pending_inputs` | Очередь, access/response mode, Telegram user id, attachment JSON и состояние обработки. |
 | `runs` | Access/response mode, prompt, response, status, error и время выполнения. |
 | `runtime_state` | Сейчас только Telegram update offset. |
 | `managed_projects` | Динамический Project, его owner и default Workspace. |
@@ -659,6 +689,9 @@ Telegram-проекты находятся в SQLite и не записываю�
 | `agent.participant_rate_limit_messages` | Сообщений одного участника на окно. | 12 |
 | `agent.participant_rate_limit_window_sec` | Длина rate-limit окна. | 60 |
 | `agent.network_access` | Сеть внутри Codex sandbox. | true |
+| `transcription.provider` | `openai` или опциональный `groq`. | `openai` |
+| `transcription.model` | Модель выбранного provider. | `gpt-transcribe` |
+| `transcription.max_file_bytes` | Лимит Telegram download. | 20000000 |
 | `health.port` | Порт health server. | 8765 |
 | `projects.<id>.name` | Отображаемое имя. | id |
 | `projects.<id>.default_workspace` | Workspace для короткого `/bind`. | первый |
@@ -682,6 +715,10 @@ rate-limit window — 10–3600 секунд, health port — 1–65535.
 |---|---|
 | `TELEGRAM_BOT_TOKEN` | Обязательный BotFather token. |
 | `TELEGRAM_OWNER_ID` | Обязательный numeric user id администратора. |
+| `TRANSCRIPTION_PROVIDER` | Override provider: `openai` или `groq`. |
+| `TRANSCRIPTION_MODEL` | Override модели выбранного provider. |
+| `OPENAI_API_KEY` | Секрет OpenAI для дефолтной транскрипции voice/audio. |
+| `GROQ_API_KEY` | Секрет Groq для транскрипции voice/audio. |
 | `SUMMATE_DATA_DIR` | Корень durable state. |
 | `SUMMATE_CONFIG` | Путь к TOML. |
 | `SUMMATE_WORKTREE_ROOT` | Каталог conversation worktrees. |
@@ -714,10 +751,11 @@ rate-limit window — 10–3600 секунд, health port — 1–65535.
 - Linux с systemd;
 - Node.js 24+ и npm;
 - Git;
-- curl;
+- curl, `file`, `unzip`;
+- system `bubblewrap` и AppArmor profile `bwrap-userns-restrict` на Ubuntu 24.04;
 - Codex CLI с командой `app-server`;
 - исходные репозитории на локальном диске VPS;
-- исходящий HTTPS к Telegram и OpenAI.
+- исходящий HTTPS к Telegram, OpenAI/Codex и выбранному transcription provider.
 
 Установите Codex по [официальной инструкции](https://developers.openai.com/codex/cli)
 и проверьте:
@@ -733,7 +771,8 @@ codex app-server --help
 выберите SSH-ключ и вставьте целиком
 [deploy/cloud-init.yaml](deploy/cloud-init.yaml) в поле **Cloud config**. Bootstrap:
 
-- устанавливает Git, curl, rsync, SQLite CLI, UFW и unattended upgrades;
+- устанавливает Git, curl, rsync, SQLite CLI, `file`, `unzip`, system
+  `bubblewrap`, AppArmor profiles, UFW и unattended upgrades;
 - устанавливает зафиксированный Node.js 24 LTS из официального binary archive и
   проверяет SHA-256 по официальному `SHASUMS256.txt`;
 - устанавливает актуальный Codex CLI официальным standalone installer;
@@ -742,10 +781,10 @@ codex app-server --help
 - оставляет снаружи только SSH 22/tcp, запрещает password login и сохраняет
   root login только по SSH-ключу;
 - включает ежедневные security updates;
-- не запускает Summate до загрузки исходников и добавления Telegram credentials.
+- не запускает Summate до загрузки исходников и добавления credentials.
 
 Cloud-init user-data сохраняется в metadata Hetzner и локально на VPS. Поэтому в
-нём намеренно нет Telegram token, OpenAI credentials, приватного Git deploy key
+нём намеренно нет Telegram token, transcription credentials, приватного Git deploy key
 или содержимого репозитория.
 
 Репозиторий приватный и не клонируется из cloud-init. Дождитесь окончания
@@ -772,13 +811,14 @@ rsync -az \
 
 `.git` нужен для постоянных worktree, веток и self-change workflow; не заменяйте
 эту передачу архивом только рабочих файлов. После загрузки войдите на VPS,
-заполните два секрета и активируйте инсталляцию:
+заполните credentials и активируйте инсталляцию:
 
 ```bash
 ssh -i ~/.ssh/summing-deploy root@"${summate_server}"
 nano /etc/summate/summate.env
 # TELEGRAM_BOT_TOKEN=...
 # TELEGRAM_OWNER_ID=...
+# OPENAI_API_KEY=...
 /opt/summate/deploy/activate.sh
 ```
 
@@ -888,10 +928,15 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "8.3.1",
+  "version": "8.4.0",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",
+  "transcription": {
+    "provider": "openai",
+    "configured": true,
+    "model": "gpt-transcribe"
+  },
   "telegram_last_poll": 1786450000.0,
   "conversations": 4,
   "active": 2,
@@ -1065,6 +1110,7 @@ sudo systemctl start summate
 src/
 ├── index.ts                # signals и process entry
 ├── config.ts               # TOML/env validation
+├── attachment-service.ts   # Telegram spool + OpenAI/Groq transcription boundary
 ├── runtime.ts              # Telegram ↔ Conversation ↔ Codex orchestration
 ├── async-primitives.ts     # semaphore и deferred completion
 ├── telegram-api.ts         # минимальный Bot API client на fetch
@@ -1077,7 +1123,9 @@ src/
 tests/
 ├── config.test.ts
 ├── project-catalog.test.ts
+├── attachment-service.test.ts
 ├── runtime-access.test.ts
+├── runtime-attachments.test.ts
 ├── state-store.test.ts
 ├── codex-app-server.test.ts
 ├── telegram-api.test.ts
@@ -1098,12 +1146,12 @@ make test
 make lint
 ```
 
-`make test` сначала компилирует TypeScript, затем запускает 14 тестов через
+`make test` сначала компилирует TypeScript, затем запускает test suite через
 стандартный `node:test`. Они проверяют config, SQLite/restart recovery, Telegram
 splitting, project-owner ACL, JSONL-протокол и формы Codex v2, создание и clone
 управляемых repositories, локальный Git worktree и merge project memory. Для
-suite не нужен Telegram token, OpenAI account или сеть; полноценного
-Telegram/OpenAI end-to-end теста в репозитории нет.
+suite не нужен Telegram token, OpenAI/Groq account или сеть; полноценного
+Telegram/OpenAI/Groq end-to-end теста в репозитории нет.
 
 При изменении протокола Codex необходимо сверяться с актуальной официальной
 документацией. `npm run codex:types` генерирует в игнорируемый каталог
@@ -1118,7 +1166,7 @@ Telegram/OpenAI end-to-end теста в репозитории нет.
 
 - один Telegram administrator id и один owner id на управляемый Project;
 - один общий ChatGPT/Codex account администратора;
-- текст и caption принимаются; само вложение в Codex не передаётся;
+- documents/ZIP и voice/audio принимаются до Telegram download limit 20 МБ;
 - один бот и один SQLite;
 - нет multi-host coordination;
 - нет автоматического merge/push;

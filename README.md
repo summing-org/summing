@@ -1,4 +1,4 @@
-# Summate 8.3
+# Summate 8.4
 
 Summate — один постоянно живущий агент с одним администратором и назначаемыми
 владельцами проектов. Он работает на Linux VPS, принимает команды из Telegram
@@ -35,6 +35,12 @@ Project
 - ответы участникам идут через отдельный persistent read-only thread без записи,
   сети, web search, plugins/connectors и доступа к runtime memory или файлам
   секретов;
+- Telegram documents до 20 МБ скачиваются в приватный spool и перед Run
+  копируются в исключённый из Git `.summate-runtime/attachments`; ZIP сначала
+  инспектируется как архив и не распаковывается автоматически на хосте;
+- voice/audio по умолчанию транскрибируются через OpenAI `gpt-transcribe`;
+  Groq Whisper доступен как опция, в Codex передаётся только текст, а локальный
+  аудиофайл удаляется;
 - Web UI, CLI, Mini App, Claudexor, swarm, MCP, marketplaces, local models,
   schedules и автономная Evolution отсутствуют.
 
@@ -43,10 +49,13 @@ Project
 - Linux;
 - Node.js 24+ и npm;
 - Git;
+- `bubblewrap`, AppArmor profile для него, `file` и `unzip`;
 - установленный `codex` с командой `codex app-server`;
 - Telegram bot token;
 - Telegram user ID администратора;
-- ChatGPT plan с доступом к Codex.
+- ChatGPT plan с доступом к Codex;
+- OpenAI API key для voice/audio transcription (либо Groq API key при выборе
+  Groq-провайдера).
 
 Официальный Codex App Server поддерживает ChatGPT browser и device-code login,
 persistent threads, streaming и `turn/steer`:
@@ -83,8 +92,8 @@ rsync -az \
 ssh -i ~/.ssh/summing-deploy root@"${summate_server}"
 ```
 
-На VPS заполните `TELEGRAM_BOT_TOKEN` и Telegram ID администратора в
-`TELEGRAM_OWNER_ID`:
+На VPS заполните `TELEGRAM_BOT_TOKEN`, Telegram ID администратора в
+`TELEGRAM_OWNER_ID` и отдельный `OPENAI_API_KEY`:
 
 ```bash
 nano /etc/summate/summate.env
@@ -94,7 +103,7 @@ nano /etc/summate/summate.env
 `activate.sh` создаёт production-конфиг, выполняет `npm ci`, lint, тесты и
 сборку, оставляет только production dependencies, устанавливает systemd unit и
 проверяет локальный health endpoint. Затем отправьте боту `/login` и завершите
-ChatGPT device-code flow. Не помещайте Telegram token, OpenAI credentials или
+ChatGPT device-code flow. Не помещайте Telegram token, API credentials или
 приватный deploy key в cloud-init: user-data сохраняется в metadata провайдера и
 самого VPS.
 
@@ -153,6 +162,18 @@ Codex-turn получает restricted read roots своего conversation work
 отклоняет; технически такой run отделён от рабочего thread владельца и запускается
 с read-only filesystem, выключенной сетью и `approvalPolicy = "never"`. Все
 slash-команды гостя блокируются runtime до обращения к Codex.
+
+Документ можно отправить с caption или без него. Summate сохранит его внутри
+runtime-каталога conversation и передаст Codex точный относительный путь. Архивы
+не исполняются и не распаковываются автоматически. Voice, Telegram audio и
+аудиодокументы поддерживаемых форматов по умолчанию отправляются в
+[OpenAI Transcription API](https://developers.openai.com/api/reference/resources/audio/subresources/transcriptions/methods/create)
+с моделью `gpt-transcribe`; результат становится обычным текстовым запросом.
+Для Groq достаточно выбрать `provider = "groq"`, модель
+`whisper-large-v3-turbo` или `whisper-large-v3` и добавить `GROQ_API_KEY`.
+Локальная копия аудио удаляется сразу после транскрипции. Аудио покидает сервер
+и обрабатывается выбранным API-провайдером; примените подходящие вашей
+организации data controls.
 
 Тегать бота необязательно. Обычные сообщения накапливаются в тихой очереди и
 раз в `participant_batch_sec` секунд отправляются одним read-only пакетом на
@@ -213,6 +234,7 @@ $SUMMATE_DATA_DIR/
 ├── codex/
 ├── memory/identity.md
 ├── projects/<id>/memory.md
+├── attachments/<conversation-id>/   # pending private spool
 ├── repositories/<id>/<repo>/
 └── worktrees/<conversation-id>/
 ```

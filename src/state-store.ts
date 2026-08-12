@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
+import type { StoredAttachment } from "./attachment-service.js";
 
 export interface Conversation {
   id: string;
@@ -28,6 +29,7 @@ export interface PendingInput {
   access: RunAccess;
   senderId: number;
   responseMode: ResponseMode;
+  attachments: StoredAttachment[];
   createdAt: number;
 }
 
@@ -76,6 +78,36 @@ export interface TelegramTopicRecord {
 }
 
 type Row = Record<string, string | number | bigint | null>;
+
+function storedAttachments(value: unknown): StoredAttachment[] {
+  if (!Array.isArray(value)) return [];
+  const attachments: StoredAttachment[] = [];
+  for (const item of value) {
+    if (item === null || typeof item !== "object" || Array.isArray(item)) continue;
+    const candidate = item as Record<string, unknown>;
+    if (
+      (candidate.kind !== "document" && candidate.kind !== "audio") ||
+      typeof candidate.fileName !== "string" ||
+      typeof candidate.mimeType !== "string" ||
+      typeof candidate.filePath !== "string" ||
+      !candidate.fileName ||
+      !candidate.filePath ||
+      typeof candidate.size !== "number" ||
+      !Number.isSafeInteger(candidate.size) ||
+      candidate.size < 0
+    ) {
+      continue;
+    }
+    attachments.push({
+      kind: candidate.kind,
+      fileName: candidate.fileName,
+      mimeType: candidate.mimeType,
+      filePath: candidate.filePath,
+      size: candidate.size,
+    });
+  }
+  return attachments;
+}
 
 export class StateStore {
   readonly path: string;
@@ -134,6 +166,7 @@ export class StateStore {
           telegram_user_id INTEGER NOT NULL DEFAULT 0,
           response_mode TEXT NOT NULL DEFAULT 'direct'
             CHECK(response_mode IN ('direct', 'ambient')),
+          attachments_json TEXT NOT NULL DEFAULT '[]',
           run_id INTEGER,
           state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending', 'consumed')),
           created_at REAL NOT NULL
@@ -220,6 +253,11 @@ export class StateStore {
         this.db.exec(
           "ALTER TABLE pending_inputs ADD COLUMN response_mode TEXT NOT NULL DEFAULT 'direct' " +
             "CHECK(response_mode IN ('direct', 'ambient'))",
+        );
+      }
+      if (!pendingColumns.some((column) => column.name === "attachments_json")) {
+        this.db.exec(
+          "ALTER TABLE pending_inputs ADD COLUMN attachments_json TEXT NOT NULL DEFAULT '[]'",
         );
       }
       if (!pendingColumns.some((column) => column.name === "run_id")) {
@@ -630,13 +668,14 @@ export class StateStore {
     access: RunAccess = "write",
     senderId = 0,
     responseMode: ResponseMode = "direct",
+    attachments: StoredAttachment[] = [],
   ): number {
     return this.transaction(() => {
       const result = this.db.prepare(`
         INSERT INTO pending_inputs
           (conversation_id, telegram_message_id, text, mode, access_mode, telegram_user_id,
-           response_mode, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           response_mode, attachments_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         conversationId,
         telegramMessageId,
@@ -645,6 +684,7 @@ export class StateStore {
         access,
         senderId,
         responseMode,
+        JSON.stringify(attachments),
         Date.now() / 1000,
       );
       return Number(result.lastInsertRowid);
@@ -658,7 +698,7 @@ export class StateStore {
   ): PendingInput[] {
     const rows = this.db.prepare(`
       SELECT id, conversation_id, telegram_message_id, text, mode, access_mode,
-             telegram_user_id, response_mode, created_at
+             telegram_user_id, response_mode, attachments_json, created_at
       FROM pending_inputs
       WHERE conversation_id = ? AND mode = ? AND access_mode = ? AND state = 'pending'
       ORDER BY created_at, id
@@ -669,7 +709,7 @@ export class StateStore {
   pendingAll(conversationId: string): PendingInput[] {
     const rows = this.db.prepare(`
       SELECT id, conversation_id, telegram_message_id, text, mode, access_mode,
-             telegram_user_id, response_mode, created_at
+             telegram_user_id, response_mode, attachments_json, created_at
       FROM pending_inputs
       WHERE conversation_id = ? AND state = 'pending'
       ORDER BY created_at, id
@@ -678,6 +718,13 @@ export class StateStore {
   }
 
   private toPending(row: Row): PendingInput {
+    let attachments: StoredAttachment[] = [];
+    try {
+      const value = JSON.parse(String(row.attachments_json ?? "[]"));
+      attachments = storedAttachments(value);
+    } catch {
+      console.warn(`discarding invalid attachment metadata for pending input ${String(row.id)}`);
+    }
     return {
       id: Number(row.id),
       conversationId: String(row.conversation_id),
@@ -687,6 +734,7 @@ export class StateStore {
       access: String(row.access_mode) as RunAccess,
       senderId: Number(row.telegram_user_id),
       responseMode: String(row.response_mode) as ResponseMode,
+      attachments,
       createdAt: Number(row.created_at),
     };
   }
@@ -728,6 +776,12 @@ export class StateStore {
   attachTurn(runId: number, turnId: string): void {
     this.transaction(() => {
       this.db.prepare("UPDATE runs SET turn_id = ? WHERE id = ?").run(turnId, runId);
+    });
+  }
+
+  setRunPrompt(runId: number, prompt: string): void {
+    this.transaction(() => {
+      this.db.prepare("UPDATE runs SET prompt = ? WHERE id = ?").run(prompt, runId);
     });
   }
 

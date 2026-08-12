@@ -10,6 +10,11 @@ participant_rate_limit_messages = 12
 participant_rate_limit_window_sec = 60
 network_access = true
 
+[transcription]
+provider = "openai"
+model = "gpt-transcribe"
+max_file_bytes = 20000000
+
 [health]
 port = 8765
 

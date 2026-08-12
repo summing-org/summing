@@ -22,7 +22,10 @@ lines.on("line", (line) => {
   }
   if (message.id) process.stdout.write(JSON.stringify({ id: message.id, result: { ok: true } }) + "\\n");
   if (message.method === "initialized") {
-    const delta = process.env.SUMMATE_TEST_SECRET ? "secret leaked" : "hello";
+    const delta =
+      process.env.SUMMATE_TEST_SECRET || process.env.OPENAI_API_KEY || process.env.GROQ_API_KEY
+        ? "secret leaked"
+        : "hello";
     process.stdout.write(JSON.stringify({ method: "item/agentMessage/delta", params: { delta } }) + "\\n");
   }
 });
@@ -31,6 +34,8 @@ lines.on("line", (line) => {
   chmodSync(executable, 0o755);
   const client = new CodexAppServer(executable, join(root, "home"));
   process.env.SUMMATE_TEST_SECRET = "must-not-reach-codex";
+  process.env.OPENAI_API_KEY = "must-not-reach-codex";
+  process.env.GROQ_API_KEY = "must-not-reach-codex";
   try {
     const eventPromise = once(client, "event");
     await client.start();
@@ -40,6 +45,8 @@ lines.on("line", (line) => {
     assert.equal(event.params.delta, "hello");
   } finally {
     delete process.env.SUMMATE_TEST_SECRET;
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.GROQ_API_KEY;
     await client.close(true);
     rmSync(root, { recursive: true, force: true });
   }
@@ -99,6 +106,7 @@ test("thread and turn requests use official v2 shapes", async () => {
             "workspace/.summate-runtime": "read",
             "workspace/.summate-runtime/memory": "write",
             "workspace/.summate-runtime/tmp": "write",
+            "workspace/.summate-runtime/attachments": "read",
           },
           "/tmp/project-git": "write",
         },
@@ -165,6 +173,7 @@ test("thread and turn requests use official v2 shapes", async () => {
             ".": "read",
             ".git": "deny",
             "workspace/.summate-runtime": "deny",
+            "workspace/.summate-runtime/attachments": "read",
             "workspace/deep/secrets/.env": "deny",
           },
         },
@@ -218,6 +227,7 @@ test("thread and turn requests use official v2 shapes", async () => {
     ".summate-runtime": "read",
     ".summate-runtime/memory": "write",
     ".summate-runtime/tmp": "write",
+    ".summate-runtime/attachments": "read",
   });
   assert.equal(
     Object.keys(emptyWorkspaceRules).some((path) => path.endsWith("PROJECT_MEMORY.md")),

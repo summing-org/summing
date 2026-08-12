@@ -4,8 +4,17 @@ import { isAbsolute, resolve } from "node:path";
 import { parse } from "smol-toml";
 
 const ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+const TRANSCRIPTION_PROVIDERS = new Set(["openai", "groq"]);
+const OPENAI_TRANSCRIPTION_MODELS = new Set([
+  "gpt-transcribe",
+  "gpt-4o-transcribe",
+  "gpt-4o-mini-transcribe",
+]);
+const GROQ_TRANSCRIPTION_MODELS = new Set(["whisper-large-v3-turbo", "whisper-large-v3"]);
 
 export class ConfigError extends Error {}
+
+export type TranscriptionProvider = "openai" | "groq";
 
 export interface WorkspaceConfig {
   id: string;
@@ -49,6 +58,11 @@ export class RuntimeConfig {
     readonly participantBatchSeconds = 20,
     readonly participantMessagesPerWindow = 12,
     readonly participantRateLimitWindowSeconds = 60,
+    readonly transcriptionProvider: TranscriptionProvider = "openai",
+    readonly transcriptionModel = "gpt-transcribe",
+    readonly openaiApiKey = "",
+    readonly groqApiKey = "",
+    readonly maximumAttachmentBytes = 20_000_000,
   ) {}
 
   project(projectId: string): ProjectConfig {
@@ -190,12 +204,40 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig 
   if (!token) throw new ConfigError("TELEGRAM_BOT_TOKEN is required");
   const ownerId = telegramUserId(env.TELEGRAM_OWNER_ID, "TELEGRAM_OWNER_ID");
   const agent = table(raw.agent) ?? {};
+  const transcription = table(raw.transcription) ?? {};
   const health = table(raw.health) ?? {};
   const codexHome = expandPath(env.CODEX_HOME || `${dataDir}/codex`, "CODEX_HOME");
   const worktreeRoot = expandPath(
     env.SUMMATE_WORKTREE_ROOT || `${dataDir}/worktrees`,
     "SUMMATE_WORKTREE_ROOT",
   );
+  const configuredTranscriptionProvider = String(transcription.provider || "openai").trim();
+  const transcriptionProvider = String(
+    env.TRANSCRIPTION_PROVIDER || configuredTranscriptionProvider,
+  ).trim();
+  if (!TRANSCRIPTION_PROVIDERS.has(transcriptionProvider)) {
+    throw new ConfigError("transcription.provider must be 'openai' or 'groq'");
+  }
+  const defaultTranscriptionModel =
+    transcriptionProvider === "groq" ? "whisper-large-v3-turbo" : "gpt-transcribe";
+  const configuredTranscriptionModel =
+    transcriptionProvider === configuredTranscriptionProvider
+      ? String(transcription.model || "").trim()
+      : "";
+  const transcriptionModel = String(
+    env.TRANSCRIPTION_MODEL ||
+      configuredTranscriptionModel ||
+      defaultTranscriptionModel,
+  ).trim();
+  const allowedModels =
+    transcriptionProvider === "groq"
+      ? GROQ_TRANSCRIPTION_MODELS
+      : OPENAI_TRANSCRIPTION_MODELS;
+  if (!allowedModels.has(transcriptionModel)) {
+    throw new ConfigError(
+      `transcription.model '${transcriptionModel}' is not supported by ${transcriptionProvider}`,
+    );
+  }
 
   return new RuntimeConfig(
     dataDir,
@@ -237,6 +279,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig 
       10,
       3_600,
       false,
+    ),
+    transcriptionProvider as TranscriptionProvider,
+    transcriptionModel,
+    String(env.OPENAI_API_KEY || "").trim(),
+    String(env.GROQ_API_KEY || "").trim(),
+    boundedNumber(
+      transcription.max_file_bytes ?? 20_000_000,
+      "transcription.max_file_bytes",
+      1,
+      20_000_000,
+      true,
     ),
   );
 }

@@ -12,6 +12,13 @@ participant_rate_limit_window_sec = 60
 # Required for git fetch/push and dependency downloads inside a Codex turn.
 network_access = true
 
+[transcription]
+# OpenAI is the default; set provider = "groq" and a Groq Whisper model to switch.
+provider = "openai"
+model = "gpt-transcribe"
+# Telegram Bot API downloads are currently limited to 20 MB.
+max_file_bytes = 20000000
+
 [health]
 port = 8765
 

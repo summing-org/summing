@@ -16,9 +16,10 @@ import {
   writeFileSync,
 } from "node:fs";
 import { opendir } from "node:fs/promises";
-import { relative, resolve, sep } from "node:path";
+import { basename, relative, resolve, sep } from "node:path";
 import { spawn } from "node:child_process";
 import type { ProjectConfig, RuntimeConfig, WorkspaceConfig } from "./config.js";
+import type { StoredAttachment } from "./attachment-service.js";
 import type { Conversation } from "./state-store.js";
 
 export interface PreparedWorkspace {
@@ -26,6 +27,14 @@ export interface PreparedWorkspace {
   readableRoot: string;
   gitMetadataRoots: string[];
   projectMemorySnapshot: string;
+}
+
+export interface MaterializedAttachment {
+  relativePath: string;
+  fileName: string;
+  mimeType: string;
+  size: number;
+  kind: StoredAttachment["kind"];
 }
 
 export class WorkspaceError extends Error {}
@@ -271,6 +280,64 @@ export class WorkspaceManager {
     return [...denied].sort();
   }
 
+  materializeAttachments(
+    prepared: PreparedWorkspace,
+    items: Array<{ inputId: number; telegramMessageId: number; attachment: StoredAttachment }>,
+  ): MaterializedAttachment[] {
+    const spoolRoot = resolve(this.config.dataDir, "attachments");
+    const destinationRoot = resolve(prepared.path, ".summate-runtime", "attachments");
+    this.ensureRuntimeDirectory(destinationRoot, 0o700);
+    return items.map(({ inputId, telegramMessageId, attachment }) => {
+      const requestedSource = resolve(attachment.filePath);
+      const sourceRelative = relative(spoolRoot, requestedSource);
+      if (
+        sourceRelative === ".." ||
+        sourceRelative.startsWith(`..${sep}`) ||
+        sourceRelative.startsWith("/") ||
+        !existsSync(requestedSource)
+      ) {
+        throw new WorkspaceError(`refusing attachment outside private spool: ${requestedSource}`);
+      }
+      if (lstatSync(requestedSource).isSymbolicLink()) {
+        throw new WorkspaceError(`refusing unsafe attachment spool file: ${requestedSource}`);
+      }
+      const source = realpathSync(requestedSource);
+      const actualSourceRelative = relative(realpathSync(spoolRoot), source);
+      if (
+        actualSourceRelative === ".." ||
+        actualSourceRelative.startsWith(`..${sep}`) ||
+        actualSourceRelative.startsWith("/")
+      ) {
+        throw new WorkspaceError(`refusing attachment outside private spool: ${requestedSource}`);
+      }
+      const sourceStat = lstatSync(source);
+      if (
+        sourceStat.isSymbolicLink() ||
+        !sourceStat.isFile() ||
+        sourceStat.nlink !== 1 ||
+        sourceStat.size !== attachment.size ||
+        sourceStat.size > this.config.maximumAttachmentBytes
+      ) {
+        throw new WorkspaceError(`refusing unsafe attachment spool file: ${source}`);
+      }
+      const safeName = basename(attachment.fileName) || "telegram-file";
+      const destinationName = `${telegramMessageId}-${inputId}-${safeName}`;
+      const destination = resolve(destinationRoot, destinationName);
+      const destinationRelative = relative(destinationRoot, destination);
+      if (destinationRelative.startsWith(`..${sep}`) || destinationRelative === "..") {
+        throw new WorkspaceError(`refusing unsafe attachment name: ${attachment.fileName}`);
+      }
+      this.writeRuntimeFile(destination, readFileSync(source));
+      return {
+        relativePath: relative(prepared.path, destination).split(sep).join("/"),
+        fileName: attachment.fileName,
+        mimeType: attachment.mimeType,
+        size: attachment.size,
+        kind: attachment.kind,
+      };
+    });
+  }
+
   private async gitRoot(path: string, signal?: AbortSignal): Promise<string | null> {
     const result = await runProcess("git", ["-C", path, "rev-parse", "--show-toplevel"], 60_000, signal);
     return result.code === 0 ? realpathSync(result.stdout.trim()) : null;
@@ -371,29 +438,11 @@ export class WorkspaceManager {
       mkdirSync(runtimeDir, { recursive: false });
     }
     const memoryDir = resolve(runtimeDir, "memory");
-    if (existsSync(memoryDir)) {
-      const memoryStat = lstatSync(memoryDir);
-      if (memoryStat.isSymbolicLink() || !memoryStat.isDirectory()) {
-        throw new WorkspaceError(`refusing unsafe runtime memory directory: ${memoryDir}`);
-      }
-    } else {
-      mkdirSync(memoryDir, { recursive: false, mode: 0o700 });
-    }
     const tempDir = resolve(runtimeDir, "tmp");
-    if (existsSync(tempDir)) {
-      const tempStat = lstatSync(tempDir);
-      if (tempStat.isSymbolicLink() || !tempStat.isDirectory()) {
-        throw new WorkspaceError(`refusing unsafe runtime temp directory: ${tempDir}`);
-      }
-    } else {
-      mkdirSync(tempDir, { recursive: false, mode: 0o700 });
-    }
-    try {
-      chmodSync(memoryDir, 0o700);
-      chmodSync(tempDir, 0o700);
-    } catch {
-      // Best effort on filesystems without POSIX permissions.
-    }
+    const attachmentsDir = resolve(runtimeDir, "attachments");
+    this.ensureRuntimeDirectory(memoryDir, 0o700);
+    this.ensureRuntimeDirectory(tempDir, 0o700);
+    this.ensureRuntimeDirectory(attachmentsDir, 0o700);
     const legacyMemoryPath = resolve(runtimeDir, "PROJECT_MEMORY.md");
     if (existsSync(legacyMemoryPath)) {
       // Version 8.3.0 stored this generated snapshot directly under runtimeDir.
@@ -422,7 +471,23 @@ export class WorkspaceManager {
     );
   }
 
-  private writeRuntimeFile(path: string, content: string): void {
+  private ensureRuntimeDirectory(path: string, mode: number): void {
+    if (existsSync(path)) {
+      const existing = lstatSync(path);
+      if (existing.isSymbolicLink() || !existing.isDirectory()) {
+        throw new WorkspaceError(`refusing unsafe runtime directory: ${path}`);
+      }
+    } else {
+      mkdirSync(path, { recursive: false, mode });
+    }
+    try {
+      chmodSync(path, mode);
+    } catch {
+      // Best effort on filesystems without POSIX permissions.
+    }
+  }
+
+  private writeRuntimeFile(path: string, content: string | Uint8Array): void {
     if (existsSync(path)) {
       const existing = lstatSync(path);
       if (existing.isSymbolicLink() || !existing.isFile() || existing.nlink !== 1) {
@@ -442,7 +507,8 @@ export class WorkspaceManager {
       if (!opened.isFile() || opened.nlink !== 1) {
         throw new WorkspaceError(`refusing unsafe runtime file: ${path}`);
       }
-      writeFileSync(descriptor, content, "utf8");
+      if (typeof content === "string") writeFileSync(descriptor, content, "utf8");
+      else writeFileSync(descriptor, content);
     } finally {
       closeSync(descriptor);
     }

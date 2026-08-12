@@ -24,6 +24,36 @@ if [ ! -x /usr/local/bin/node ] || [ ! -x /usr/local/bin/codex ]; then
   exit 2
 fi
 
+required_packages=(
+  apparmor-profiles
+  apparmor-utils
+  bubblewrap
+  file
+  unzip
+)
+missing_packages=()
+for package in "${required_packages[@]}"; do
+  if ! dpkg-query -W -f='${Status}' "${package}" 2>/dev/null | grep -q 'install ok installed'; then
+    missing_packages+=("${package}")
+  fi
+done
+if [ "${#missing_packages[@]}" -gt 0 ]; then
+  apt-get update
+  DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing_packages[@]}"
+fi
+
+bwrap_profile_source=/usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+bwrap_profile_target=/etc/apparmor.d/bwrap-userns-restrict
+if [ -f "${bwrap_profile_source}" ]; then
+  install -o root -g root -m 0644 "${bwrap_profile_source}" "${bwrap_profile_target}"
+  apparmor_parser -r "${bwrap_profile_target}"
+fi
+if ! sudo -u summate bwrap --ro-bind / / --dev /dev --proc /proc /bin/true; then
+  printf '%s\n' \
+    'bubblewrap user namespaces are unavailable; check the bwrap AppArmor profile.' >&2
+  exit 2
+fi
+
 install -d -o summate -g summate -m 0700 "${data_dir}"
 install -d -o summate -g summate -m 0700 "${data_dir}/codex"
 install -d -o summate -g summate -m 0700 "${data_dir}/worktrees"

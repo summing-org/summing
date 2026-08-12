@@ -32,6 +32,13 @@ test("binding, input queues, and Telegram offset", () => {
       "read-only",
       55,
       "ambient",
+      [{
+        kind: "document",
+        fileName: "source.zip",
+        mimeType: "application/zip",
+        filePath: "/private/spool/source.zip",
+        size: 27,
+      }],
     );
     assert.deepEqual(store.pending(conversation.id, "steer").map((item) => item.id), [steerId]);
     assert.deepEqual(store.pending(conversation.id, "followup").map((item) => item.id), [followId]);
@@ -41,11 +48,12 @@ test("binding, input queues, and Telegram offset", () => {
         item.access,
         item.senderId,
         item.responseMode,
+        item.attachments.map((attachment) => attachment.fileName),
       ]),
       [
-        [steerId, "write", 0, "direct"],
-        [followId, "write", 0, "direct"],
-        [viewerId, "read-only", 55, "ambient"],
+        [steerId, "write", 0, "direct", []],
+        [followId, "write", 0, "direct", []],
+        [viewerId, "read-only", 55, "ambient", ["source.zip"]],
       ],
     );
     assert.deepEqual(store.counts(), { conversations: 1, active: 1, pending: 3 });
@@ -166,6 +174,13 @@ test("restart restores original ambient batch inputs and reply ids", () => {
     "read-only",
     42,
     "ambient",
+    [{
+      kind: "document",
+      fileName: "context.txt",
+      mimeType: "text/plain",
+      filePath: "/private/spool/context.txt",
+      size: 12,
+    }],
   );
   store.startRun(
     conversation.id,
@@ -184,10 +199,11 @@ test("restart restores original ambient batch inputs and reply ids", () => {
         item.text,
         item.senderId,
         item.responseMode,
+        item.attachments.map((attachment) => attachment.fileName),
       ]),
       [
-        [101, "Первое сообщение", 41, "ambient"],
-        [102, "Второе сообщение", 42, "ambient"],
+        [101, "Первое сообщение", 41, "ambient", []],
+        [102, "Второе сообщение", 42, "ambient", ["context.txt"]],
       ],
     );
   } finally {
@@ -251,6 +267,7 @@ test("migrates existing conversations to separate read-only state", () => {
     assert.equal(migrated.pendingAll("legacy")[0]?.access, "write");
     assert.equal(migrated.pendingAll("legacy")[0]?.senderId, 0);
     assert.equal(migrated.pendingAll("legacy")[0]?.responseMode, "direct");
+    assert.deepEqual(migrated.pendingAll("legacy")[0]?.attachments, []);
     const viewerId = migrated.enqueueInput(
       "legacy",
       10,

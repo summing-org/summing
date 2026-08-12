@@ -20,6 +20,11 @@ participant_batch_sec = 25
 participant_rate_limit_messages = 8
 participant_rate_limit_window_sec = 90
 
+[transcription]
+provider = "openai"
+model = "gpt-transcribe"
+max_file_bytes = 123456
+
 [health]
 port = 9876
 
@@ -42,12 +47,17 @@ test("loads the explicit project model", () => {
       SUMMATE_CONFIG: configPath,
       TELEGRAM_BOT_TOKEN: "test-token",
       TELEGRAM_OWNER_ID: "42",
+      OPENAI_API_KEY: "openai-test-key",
     });
     assert.equal(config.telegramOwnerId, 42);
     assert.equal(config.maxParallelConversations, 3);
     assert.equal(config.participantBatchSeconds, 25);
     assert.equal(config.participantMessagesPerWindow, 8);
     assert.equal(config.participantRateLimitWindowSeconds, 90);
+    assert.equal(config.transcriptionProvider, "openai");
+    assert.equal(config.openaiApiKey, "openai-test-key");
+    assert.equal(config.transcriptionModel, "gpt-transcribe");
+    assert.equal(config.maximumAttachmentBytes, 123_456);
     assert.equal(config.project("demo").workspace().path, workspace);
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -65,6 +75,45 @@ test("fails loudly without an owner", () => {
           TELEGRAM_BOT_TOKEN: "test-token",
         }),
       (error) => error instanceof ConfigError && error.message.includes("TELEGRAM_OWNER_ID"),
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("supports Groq Whisper as an explicit transcription provider", () => {
+  const { root, configPath } = fixture();
+  try {
+    const config = loadConfig({
+      SUMMATE_DATA_DIR: join(root, "data"),
+      SUMMATE_CONFIG: configPath,
+      TELEGRAM_BOT_TOKEN: "test-token",
+      TELEGRAM_OWNER_ID: "42",
+      TRANSCRIPTION_PROVIDER: "groq",
+      GROQ_API_KEY: "groq-test-key",
+    });
+    assert.equal(config.transcriptionProvider, "groq");
+    assert.equal(config.transcriptionModel, "whisper-large-v3-turbo");
+    assert.equal(config.groqApiKey, "groq-test-key");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("rejects a transcription model that is unsupported by its provider", () => {
+  const { root, configPath } = fixture();
+  try {
+    assert.throws(
+      () =>
+        loadConfig({
+          SUMMATE_DATA_DIR: join(root, "data"),
+          SUMMATE_CONFIG: configPath,
+          TELEGRAM_BOT_TOKEN: "test-token",
+          TELEGRAM_OWNER_ID: "42",
+          TRANSCRIPTION_PROVIDER: "groq",
+          TRANSCRIPTION_MODEL: "gpt-transcribe",
+        }),
+      (error) => error instanceof ConfigError && error.message.includes("transcription.model"),
     );
   } finally {
     rmSync(root, { recursive: true, force: true });

@@ -14,11 +14,13 @@ function record(value: unknown): TelegramObject | null {
 
 export class TelegramAPI {
   private readonly baseUrl: string;
+  private readonly fileBaseUrl: string;
   private readonly controller = new AbortController();
   private closed = false;
 
   constructor(token: string) {
     this.baseUrl = `https://api.telegram.org/bot${token}`;
+    this.fileBaseUrl = `https://api.telegram.org/file/bot${token}`;
   }
 
   async close(): Promise<void> {
@@ -74,6 +76,41 @@ export class TelegramAPI {
 
   async getMe(): Promise<TelegramObject> {
     return record(await this.call("getMe", {})) ?? {};
+  }
+
+  async downloadFile(
+    fileId: string,
+    maximumBytes: number,
+  ): Promise<{ data: Uint8Array; filePath: string; fileSize: number }> {
+    const file = record(await this.call("getFile", { file_id: fileId }));
+    const filePath = typeof file?.file_path === "string" ? file.file_path : "";
+    if (!filePath) throw new TelegramError("Telegram getFile did not return file_path");
+    const announcedSize = Number(file?.file_size ?? 0);
+    if (Number.isFinite(announcedSize) && announcedSize > maximumBytes) {
+      throw new TelegramError(`Telegram file exceeds the ${maximumBytes}-byte download limit`);
+    }
+    const safePath = filePath.split("/").map(encodeURIComponent).join("/");
+    let response: Response;
+    try {
+      response = await fetch(`${this.fileBaseUrl}/${safePath}`, {
+        signal: AbortSignal.any([this.controller.signal, AbortSignal.timeout(120_000)]),
+      });
+    } catch {
+      if (this.closed) throw new TelegramError("Telegram client is closed");
+      throw new TelegramError("Telegram file download transport failed");
+    }
+    if (!response.ok) {
+      throw new TelegramError(`Telegram file download: ${response.status} ${response.statusText}`);
+    }
+    const contentLength = Number(response.headers.get("content-length") ?? 0);
+    if (Number.isFinite(contentLength) && contentLength > maximumBytes) {
+      throw new TelegramError(`Telegram file exceeds the ${maximumBytes}-byte download limit`);
+    }
+    const data = new Uint8Array(await response.arrayBuffer());
+    if (data.byteLength > maximumBytes) {
+      throw new TelegramError(`Telegram file exceeds the ${maximumBytes}-byte download limit`);
+    }
+    return { data, filePath, fileSize: data.byteLength };
   }
 
   async sendMessage(

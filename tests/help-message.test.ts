@@ -8,6 +8,7 @@ test("help describes everyday commands with examples", () => {
   assert.match(help, /^\*Помощь по Summate\*/);
   assert.match(help, /Пример: `\/bind shop backend`/);
   assert.match(help, /Пример: `\/steer Не меняй публичный API`/);
+  assert.match(help, /Voice и audio транскрибируются через OpenAI gpt-transcribe/);
   assert.match(help, /Пример: `\/remember Все даты в API передаём в UTC`/);
   assert.doesNotMatch(help, /Только для администратора|project_create/);
   assert.ok(help.length <= 4_096);

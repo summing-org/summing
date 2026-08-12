@@ -1,7 +1,7 @@
 #cloud-config
 
 # Hetzner Cloud user-data for a fresh Ubuntu 24.04 x86_64 server.
-# This file intentionally contains no Telegram token, OpenAI credentials,
+# This file intentionally contains no Telegram token or transcription credentials,
 # private repository key, or other secret: cloud-init user-data is retained in
 # provider and instance metadata.
 
@@ -10,15 +10,20 @@ package_upgrade: true
 timezone: Etc/UTC
 
 packages:
+  - apparmor-profiles
+  - apparmor-utils
+  - bubblewrap
   - ca-certificates
   - curl
   - git
+  - file
   - jq
   - rsync
   - sqlite3
   - sudo
   - ufw
   - unattended-upgrades
+  - unzip
   - xz-utils
 
 write_files:
@@ -158,6 +163,10 @@ write_files:
       CODEX_BIN=/usr/local/bin/codex
       TELEGRAM_BOT_TOKEN=
       TELEGRAM_OWNER_ID=
+      TRANSCRIPTION_PROVIDER=openai
+      TRANSCRIPTION_MODEL=gpt-transcribe
+      OPENAI_API_KEY=
+      GROQ_API_KEY=
       NODE_ENV=production
 
   - path: /root/SUMMATE_NEXT_STEPS.txt
@@ -167,7 +176,7 @@ write_files:
       Summate host bootstrap is complete.
 
       1. Upload the private repository, including .git, to /opt/summate.
-      2. Set TELEGRAM_BOT_TOKEN and the administrator TELEGRAM_OWNER_ID in:
+      2. Set TELEGRAM_BOT_TOKEN, TELEGRAM_OWNER_ID and OPENAI_API_KEY in:
          /etc/summate/summate.env
       3. Run:
          /opt/summate/deploy/activate.sh

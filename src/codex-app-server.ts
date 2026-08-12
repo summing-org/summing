@@ -85,7 +85,7 @@ export class CodexAppServer extends EventEmitter {
         clientInfo: {
           name: "summate_telegram",
           title: "Summate Telegram",
-          version: "8.3.1",
+          version: "8.4.0",
         },
         capabilities: {
           experimentalApi: true,
@@ -358,6 +358,7 @@ export class CodexAppServer extends EventEmitter {
         ? ".summate-runtime"
         : `${writableSubpath}/.summate-runtime`;
     const runtimeTempPath = resolve(cwd, ".summate-runtime", "tmp");
+    const runtimeAttachmentsSubpath = `${runtimeSubpath}/attachments`;
     const workspaceRoots: JsonRecord = { ".": "read" };
     if (!options.readOnly) {
       workspaceRoots[writableSubpath] = "write";
@@ -367,9 +368,11 @@ export class CodexAppServer extends EventEmitter {
       // paths for project metadata and cannot probe through a regular file.
       workspaceRoots[`${runtimeSubpath}/memory`] = "write";
       workspaceRoots[`${runtimeSubpath}/tmp`] = "write";
+      workspaceRoots[runtimeAttachmentsSubpath] = "read";
     } else {
       workspaceRoots[".git"] = "deny";
       workspaceRoots[runtimeSubpath] = "deny";
+      workspaceRoots[runtimeAttachmentsSubpath] = "read";
       for (const deniedPath of options.deniedPaths ?? []) {
         if (
           deniedPath &&
