@@ -1,16 +1,19 @@
-# Summate 8
+# Summate 8.2
 
-Summate — один постоянно живущий агент для одного владельца. Он работает на Linux
-VPS, принимает команды из Telegram forum topics и исполняет их через официальный
-Codex App Server с авторизацией ChatGPT subscription.
+Summate — один постоянно живущий агент с одним администратором и назначаемыми
+владельцами проектов. Он работает на Linux VPS, принимает команды из Telegram
+forum topics и исполняет их через общий официальный Codex App Server с
+авторизацией ChatGPT subscription администратора.
 
 ## Модель
 
 ```text
 Project
+  ├── Owner: Telegram user ID
   ├── Workspace: local Git repository
   └── Conversation: Telegram topic
-        ├── Codex thread
+        ├── Editor Codex thread: administrator / Project owner
+        ├── Read-only Codex thread: other group participants
         └── Active run: 0..1
 ```
 
@@ -20,6 +23,13 @@ Project
 - остальные сообщения объединяются в следующий turn;
 - каждая conversation получает постоянный Git worktree и ветку;
 - project memory общая для всех topics проекта;
+- администратор создаёт локальные проекты из личного чата, а владелец видит и
+  использует только назначенные ему проекты;
+- остальные участники уже привязанного group topic могут задавать вопросы о
+  реализации обычными сообщениями, но не могут выполнять slash-команды;
+- ответы участникам идут через отдельный persistent read-only thread без записи,
+  сети, web search, plugins/connectors и доступа к runtime memory или файлам
+  секретов;
 - Web UI, CLI, Mini App, Claudexor, swarm, MCP, marketplaces, local models,
   schedules и автономная Evolution отсутствуют.
 
@@ -30,7 +40,7 @@ Project
 - Git;
 - установленный `codex` с командой `codex app-server`;
 - Telegram bot token;
-- Telegram user ID владельца;
+- Telegram user ID администратора;
 - ChatGPT plan с доступом к Codex.
 
 Официальный Codex App Server поддерживает ChatGPT browser и device-code login,
@@ -68,7 +78,8 @@ rsync -az \
 ssh -i ~/.ssh/summing-deploy root@"${summate_server}"
 ```
 
-На VPS заполните `TELEGRAM_BOT_TOKEN` и `TELEGRAM_OWNER_ID`:
+На VPS заполните `TELEGRAM_BOT_TOKEN` и Telegram ID администратора в
+`TELEGRAM_OWNER_ID`:
 
 ```bash
 nano /etc/summate/summate.env
@@ -89,9 +100,12 @@ npm ci
 npm run build
 npm prune --omit=dev
 cp deploy/config.production.toml /var/lib/summate/data/config.toml
+sudo install -d -m 0755 /etc/codex
+sudo install -m 0644 deploy/codex-requirements.toml /etc/codex/requirements.toml
 ```
 
-Настройте проекты в `config.toml`, секреты в `/etc/summate/summate.env`, затем
+Настройте статические администраторские проекты в `config.toml`, секреты в
+`/etc/summate/summate.env`, затем
 установите [deploy/summate.service](deploy/summate.service). Unit ожидает Node.js
 в `/usr/local/bin/node`; при другом способе установки скорректируйте `ExecStart`.
 
@@ -107,17 +121,42 @@ curl --fail http://127.0.0.1:8765/health
 
 ```text
 /login
+/project_create client_name 123456789 repo_name
+# либо: /project_clone client_name 123456789 repo_name <git_url>
 /projects
 /bind <project> [workspace]
 /status
 ```
 
+`/project_create` создаёт пустой Git-репозиторий в
+`$SUMMATE_DATA_DIR/repositories/<project>/<repo>`. `/project_clone` клонирует
+существующий remote туда же. Обе команды принимает только личный чат
+администратора; перезапуск не нужен. Не передавайте token в Git URL — настройте
+SSH/credential helper для системного пользователя `summate`.
+Идентификатор проекта должен соответствовать `[a-z0-9][a-z0-9._-]{0,63}`;
+последовательность `..` и окончание `.lock` запрещены, потому что ID входит в
+имя рабочей Git-ветки.
+
+Назначенный владелец должен сначала открыть бота и отправить `/start`. После
+этого ему доступны `/projects`, `/bind` и рабочие команды его проектов. Все
+владельцы используют общий ChatGPT/Codex account администратора, но каждый
+Codex-turn получает restricted read roots своего conversation worktree.
+
+После `/bind` любой другой пользователь, который пишет в этом group topic,
+получает только Q&A-доступ: бот может читать исходники и объяснять реализацию.
+Запросы на изменение кода, запуск сборки/тестов/серверов и другие действия он
+отклоняет; технически такой run отделён от рабочего thread владельца и запускается
+с read-only filesystem, выключенной сетью и `approvalPolicy = "never"`. Все
+slash-команды гостя блокируются runtime до обращения к Codex.
+
 ## Управление
 
 | Команда | Назначение |
 |---|---|
-| `/login` | ChatGPT device-code login в принадлежащем Summate Codex home. |
-| `/projects` | Показать проекты из TOML. |
+| `/login` | ChatGPT device-code login; только администратор в личном чате. |
+| `/project_create <project> <owner_id> <repo>` | Создать локальный проект; только администратор в личном чате. |
+| `/project_clone <project> <owner_id> <repo> <git_url>` | Клонировать проект; только администратор в личном чате. |
+| `/projects` | Показать доступные отправителю проекты. |
 | `/bind` | Связать текущий topic с Project/Workspace. |
 | `/status` | Проверить Codex, account, binding и runs. |
 | `/steer` | Добавить указание в активный turn. |
@@ -126,8 +165,8 @@ curl --fail http://127.0.0.1:8765/health
 | `/new` | Начать новый Codex thread в topic. |
 | `/remember` | Добавить факт в общую память проекта. |
 | `/review` | Один review текущих изменений. |
-| `/restart` | Завершиться с кодом 42; systemd поднимет процесс. |
-| `/panic` | Полностью остановиться с кодом 99; systemd не перезапустит. |
+| `/restart` | Завершиться с кодом 42; только администратор. |
+| `/panic` | Полностью остановиться с кодом 99; только администратор. |
 
 ## Данные
 
@@ -138,6 +177,7 @@ $SUMMATE_DATA_DIR/
 ├── codex/
 ├── memory/identity.md
 ├── projects/<id>/memory.md
+├── repositories/<id>/<repo>/
 └── worktrees/<conversation-id>/
 ```
 

@@ -63,12 +63,26 @@ function table(value: unknown): Table | undefined {
     : undefined;
 }
 
-function identifier(value: unknown, field: string): string {
+export function normalizeIdentifier(value: unknown, field: string): string {
   const text = String(value ?? "").trim().toLowerCase();
   if (!ID_PATTERN.test(text)) {
     throw new ConfigError(`${field} must match '${ID_PATTERN.source}'; got ${String(value)}`);
   }
   return text;
+}
+
+export function normalizeProjectIdentifier(value: unknown, field: string): string {
+  const text = normalizeIdentifier(value, field);
+  if (text.includes("..") || text.endsWith(".lock")) {
+    throw new ConfigError(
+      `${field} must also be a valid Git branch component; '..' and a '.lock' suffix are forbidden`,
+    );
+  }
+  return text;
+}
+
+export function telegramUserId(value: unknown, field = "Telegram user id"): number {
+  return boundedNumber(value, field, 1, Number.MAX_SAFE_INTEGER, true);
 }
 
 function boundedNumber(
@@ -102,7 +116,7 @@ function loadProjects(value: unknown): ReadonlyMap<string, ProjectConfig> {
   }
   const projects = new Map<string, ProjectConfig>();
   for (const [rawProjectId, rawProjectValue] of Object.entries(raw)) {
-    const projectId = identifier(rawProjectId, "project id");
+    const projectId = normalizeProjectIdentifier(rawProjectId, "project id");
     const project = table(rawProjectValue);
     if (!project) throw new ConfigError(`projects.${projectId} must be a table`);
     const rawWorkspaces = table(project.workspaces);
@@ -111,7 +125,7 @@ function loadProjects(value: unknown): ReadonlyMap<string, ProjectConfig> {
     }
     const workspaces = new Map<string, WorkspaceConfig>();
     for (const [rawWorkspaceId, rawWorkspaceValue] of Object.entries(rawWorkspaces)) {
-      const workspaceId = identifier(rawWorkspaceId, "workspace id");
+      const workspaceId = normalizeIdentifier(rawWorkspaceId, "workspace id");
       const workspace = table(rawWorkspaceValue);
       if (!workspace) {
         throw new ConfigError(`projects.${projectId}.workspaces.${workspaceId} must be a table`);
@@ -125,7 +139,7 @@ function loadProjects(value: unknown): ReadonlyMap<string, ProjectConfig> {
       });
     }
     const firstWorkspace = workspaces.keys().next().value as string;
-    const defaultWorkspace = identifier(
+    const defaultWorkspace = normalizeIdentifier(
       project.default_workspace || firstWorkspace,
       `projects.${projectId}.default_workspace`,
     );
@@ -171,13 +185,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig 
 
   const token = String(env.TELEGRAM_BOT_TOKEN || "").trim();
   if (!token) throw new ConfigError("TELEGRAM_BOT_TOKEN is required");
-  const ownerId = boundedNumber(
-    env.TELEGRAM_OWNER_ID,
-    "TELEGRAM_OWNER_ID",
-    1,
-    Number.MAX_SAFE_INTEGER,
-    true,
-  );
+  const ownerId = telegramUserId(env.TELEGRAM_OWNER_ID, "TELEGRAM_OWNER_ID");
   const agent = table(raw.agent) ?? {};
   const health = table(raw.health) ?? {};
   const codexHome = expandPath(env.CODEX_HOME || `${dataDir}/codex`, "CODEX_HOME");

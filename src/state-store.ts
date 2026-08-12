@@ -10,10 +10,13 @@ export interface Conversation {
   projectId: string;
   workspaceId: string;
   codexThreadId: string | null;
+  readOnlyCodexThreadId: string | null;
   activeTurnId: string | null;
   streamMessageId: number | null;
   worktreePath: string | null;
 }
+
+export type RunAccess = "write" | "read-only";
 
 export interface PendingInput {
   id: number;
@@ -21,6 +24,16 @@ export interface PendingInput {
   telegramMessageId: number;
   text: string;
   mode: "steer" | "followup";
+  access: RunAccess;
+  createdAt: number;
+}
+
+export interface ManagedProject {
+  id: string;
+  name: string;
+  ownerId: number;
+  defaultWorkspaceId: string;
+  workspaces: Array<{ id: string; path: string }>;
   createdAt: number;
 }
 
@@ -65,6 +78,7 @@ export class StateStore {
           project_id TEXT NOT NULL,
           workspace_id TEXT NOT NULL,
           codex_thread_id TEXT,
+          readonly_codex_thread_id TEXT,
           active_turn_id TEXT,
           stream_message_id INTEGER,
           worktree_path TEXT,
@@ -78,6 +92,7 @@ export class StateStore {
           telegram_message_id INTEGER NOT NULL,
           text TEXT NOT NULL,
           mode TEXT NOT NULL CHECK(mode IN ('steer', 'followup')),
+          access_mode TEXT NOT NULL DEFAULT 'write' CHECK(access_mode IN ('write', 'read-only')),
           state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending', 'consumed')),
           created_at REAL NOT NULL
         );
@@ -88,6 +103,7 @@ export class StateStore {
           conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
           turn_id TEXT,
           status TEXT NOT NULL,
+          access_mode TEXT NOT NULL DEFAULT 'write' CHECK(access_mode IN ('write', 'read-only')),
           prompt TEXT NOT NULL,
           response TEXT NOT NULL DEFAULT '',
           error TEXT,
@@ -98,25 +114,112 @@ export class StateStore {
           key TEXT PRIMARY KEY,
           value TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS managed_projects (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          owner_id INTEGER NOT NULL,
+          default_workspace_id TEXT NOT NULL,
+          created_at REAL NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS managed_workspaces (
+          project_id TEXT NOT NULL REFERENCES managed_projects(id) ON DELETE CASCADE,
+          id TEXT NOT NULL,
+          path TEXT NOT NULL,
+          created_at REAL NOT NULL,
+          PRIMARY KEY(project_id, id)
+        );
+        CREATE INDEX IF NOT EXISTS managed_projects_owner
+          ON managed_projects(owner_id, id);
       `);
+      const conversationColumns = this.db.prepare("PRAGMA table_info(conversations)").all() as Row[];
+      if (!conversationColumns.some((column) => column.name === "readonly_codex_thread_id")) {
+        this.db.exec("ALTER TABLE conversations ADD COLUMN readonly_codex_thread_id TEXT");
+      }
+      const pendingColumns = this.db.prepare("PRAGMA table_info(pending_inputs)").all() as Row[];
+      if (!pendingColumns.some((column) => column.name === "access_mode")) {
+        this.db.exec(
+          "ALTER TABLE pending_inputs ADD COLUMN access_mode TEXT NOT NULL DEFAULT 'write' " +
+            "CHECK(access_mode IN ('write', 'read-only'))",
+        );
+      }
+      this.db.exec(`
+        CREATE INDEX IF NOT EXISTS pending_inputs_access_lookup
+        ON pending_inputs(conversation_id, access_mode, state, id)
+      `);
+      const runColumns = this.db.prepare("PRAGMA table_info(runs)").all() as Row[];
+      if (!runColumns.some((column) => column.name === "access_mode")) {
+        this.db.exec(
+          "ALTER TABLE runs ADD COLUMN access_mode TEXT NOT NULL DEFAULT 'write' " +
+            "CHECK(access_mode IN ('write', 'read-only'))",
+        );
+      }
     });
+  }
+
+  createManagedProject(project: ManagedProject): void {
+    this.transaction(() => {
+      this.db.prepare(`
+        INSERT INTO managed_projects
+          (id, name, owner_id, default_workspace_id, created_at)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(
+        project.id,
+        project.name,
+        project.ownerId,
+        project.defaultWorkspaceId,
+        project.createdAt,
+      );
+      const insertWorkspace = this.db.prepare(`
+        INSERT INTO managed_workspaces (project_id, id, path, created_at)
+        VALUES (?, ?, ?, ?)
+      `);
+      for (const workspace of project.workspaces) {
+        insertWorkspace.run(project.id, workspace.id, workspace.path, project.createdAt);
+      }
+    });
+  }
+
+  listManagedProjects(): ManagedProject[] {
+    const projects = this.db.prepare(`
+      SELECT id, name, owner_id, default_workspace_id, created_at
+      FROM managed_projects
+      ORDER BY id
+    `).all() as Row[];
+    const workspaceQuery = this.db.prepare(`
+      SELECT id, path FROM managed_workspaces WHERE project_id = ? ORDER BY id
+    `);
+    return projects.map((project) => ({
+      id: String(project.id),
+      name: String(project.name),
+      ownerId: Number(project.owner_id),
+      defaultWorkspaceId: String(project.default_workspace_id),
+      workspaces: (workspaceQuery.all(project.id as SQLInputValue) as Row[]).map((workspace) => ({
+        id: String(workspace.id),
+        path: String(workspace.path),
+      })),
+      createdAt: Number(project.created_at),
+    }));
   }
 
   private recoverAfterRestart(): void {
     const now = Date.now() / 1000;
     this.transaction(() => {
       const abandoned = this.db
-        .prepare("SELECT conversation_id, prompt, started_at FROM runs WHERE status = 'running'")
+        .prepare(
+          "SELECT conversation_id, prompt, access_mode, started_at " +
+            "FROM runs WHERE status = 'running'",
+        )
         .all() as Row[];
       const enqueue = this.db.prepare(`
         INSERT INTO pending_inputs
-          (conversation_id, telegram_message_id, text, mode, created_at)
-        VALUES (?, 0, ?, 'followup', ?)
+          (conversation_id, telegram_message_id, text, mode, access_mode, created_at)
+        VALUES (?, 0, ?, 'followup', ?, ?)
       `);
       for (const row of abandoned) {
         enqueue.run(
           row.conversation_id as SQLInputValue,
           row.prompt as SQLInputValue,
+          row.access_mode as SQLInputValue,
           Number(row.started_at) - 0.000_001,
         );
       }
@@ -157,11 +260,23 @@ export class StateStore {
           project_id = excluded.project_id,
           workspace_id = excluded.workspace_id,
           codex_thread_id = CASE WHEN ? THEN NULL ELSE codex_thread_id END,
+          readonly_codex_thread_id = CASE WHEN ? THEN NULL ELSE readonly_codex_thread_id END,
           active_turn_id = NULL,
           stream_message_id = NULL,
           worktree_path = CASE WHEN ? THEN NULL ELSE worktree_path END,
           updated_at = excluded.updated_at
-      `).run(conversationId, chatId, topicId, projectId, workspaceId, now, now, changed ? 1 : 0, changed ? 1 : 0);
+      `).run(
+        conversationId,
+        chatId,
+        topicId,
+        projectId,
+        workspaceId,
+        now,
+        now,
+        changed ? 1 : 0,
+        changed ? 1 : 0,
+        changed ? 1 : 0,
+      );
       if (changed) {
         this.db.prepare(
           "UPDATE pending_inputs SET state = 'consumed' WHERE conversation_id = ? AND state = 'pending'",
@@ -197,14 +312,20 @@ export class StateStore {
       projectId: String(row.project_id),
       workspaceId: String(row.workspace_id),
       codexThreadId: row.codex_thread_id === null ? null : String(row.codex_thread_id),
+      readOnlyCodexThreadId:
+        row.readonly_codex_thread_id === null ? null : String(row.readonly_codex_thread_id),
       activeTurnId: row.active_turn_id === null ? null : String(row.active_turn_id),
       streamMessageId: row.stream_message_id === null ? null : Number(row.stream_message_id),
       worktreePath: row.worktree_path === null ? null : String(row.worktree_path),
     };
   }
 
-  setThread(conversationId: string, threadId: string | null): void {
-    this.updateConversation(conversationId, "codex_thread_id", threadId);
+  setThread(conversationId: string, threadId: string | null, access: RunAccess = "write"): void {
+    this.updateConversation(
+      conversationId,
+      access === "read-only" ? "readonly_codex_thread_id" : "codex_thread_id",
+      threadId,
+    );
   }
 
   setWorktree(conversationId: string, path: string): void {
@@ -226,7 +347,7 @@ export class StateStore {
 
   private updateConversation(
     conversationId: string,
-    field: "codex_thread_id" | "worktree_path",
+    field: "codex_thread_id" | "readonly_codex_thread_id" | "worktree_path",
     value: SQLInputValue,
   ): void {
     this.transaction(() => {
@@ -241,30 +362,35 @@ export class StateStore {
     telegramMessageId: number,
     text: string,
     mode: "steer" | "followup",
+    access: RunAccess = "write",
   ): number {
     return this.transaction(() => {
       const result = this.db.prepare(`
         INSERT INTO pending_inputs
-          (conversation_id, telegram_message_id, text, mode, created_at)
-        VALUES (?, ?, ?, ?, ?)
-      `).run(conversationId, telegramMessageId, text, mode, Date.now() / 1000);
+          (conversation_id, telegram_message_id, text, mode, access_mode, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(conversationId, telegramMessageId, text, mode, access, Date.now() / 1000);
       return Number(result.lastInsertRowid);
     });
   }
 
-  pending(conversationId: string, mode: "steer" | "followup"): PendingInput[] {
+  pending(
+    conversationId: string,
+    mode: "steer" | "followup",
+    access: RunAccess = "write",
+  ): PendingInput[] {
     const rows = this.db.prepare(`
-      SELECT id, conversation_id, telegram_message_id, text, mode, created_at
+      SELECT id, conversation_id, telegram_message_id, text, mode, access_mode, created_at
       FROM pending_inputs
-      WHERE conversation_id = ? AND mode = ? AND state = 'pending'
+      WHERE conversation_id = ? AND mode = ? AND access_mode = ? AND state = 'pending'
       ORDER BY created_at, id
-    `).all(conversationId, mode) as Row[];
+    `).all(conversationId, mode, access) as Row[];
     return rows.map((row) => this.toPending(row));
   }
 
   pendingAll(conversationId: string): PendingInput[] {
     const rows = this.db.prepare(`
-      SELECT id, conversation_id, telegram_message_id, text, mode, created_at
+      SELECT id, conversation_id, telegram_message_id, text, mode, access_mode, created_at
       FROM pending_inputs
       WHERE conversation_id = ? AND state = 'pending'
       ORDER BY created_at, id
@@ -279,6 +405,7 @@ export class StateStore {
       telegramMessageId: Number(row.telegram_message_id),
       text: String(row.text),
       mode: String(row.mode) as PendingInput["mode"],
+      access: String(row.access_mode) as RunAccess,
       createdAt: Number(row.created_at),
     };
   }
@@ -293,12 +420,17 @@ export class StateStore {
     });
   }
 
-  startRun(conversationId: string, prompt: string, inputIds: number[] = []): number {
+  startRun(
+    conversationId: string,
+    prompt: string,
+    inputIds: number[] = [],
+    access: RunAccess = "write",
+  ): number {
     return this.transaction(() => {
       const result = this.db.prepare(`
-        INSERT INTO runs (conversation_id, status, prompt, started_at)
-        VALUES (?, 'running', ?, ?)
-      `).run(conversationId, prompt, Date.now() / 1000);
+        INSERT INTO runs (conversation_id, status, access_mode, prompt, started_at)
+        VALUES (?, 'running', ?, ?, ?)
+      `).run(conversationId, access, prompt, Date.now() / 1000);
       if (inputIds.length > 0) {
         const placeholders = inputIds.map(() => "?").join(",");
         this.db.prepare(

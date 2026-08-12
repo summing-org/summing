@@ -1,0 +1,30 @@
+# Summate delegates one ChatGPT/Codex login to multiple Telegram project owners.
+# Keep account-level extensions unavailable; project code still has the filesystem
+# and network permissions selected by Summate for its own worktree.
+
+allow_login_shell = false
+allow_managed_hooks_only = true
+
+[features]
+apps = false
+browser_use = false
+browser_use_external = false
+browser_use_full_cdp_access = false
+computer_use = false
+hooks = false
+image_generation = false
+in_app_browser = false
+memories = false
+multi_agent = false
+plugins = false
+remote_plugin = false
+skill_mcp_dependency_install = false
+skill_search = false
+workspace_dependencies = false
+
+# Empty managed allowlists disable every configured MCP server, including ones
+# bundled by plugins. These are requirements, so project/user config cannot widen
+# them.
+[mcp_servers]
+
+[plugins]

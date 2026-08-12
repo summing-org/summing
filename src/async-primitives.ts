@@ -42,3 +42,36 @@ export class Semaphore {
     else this.available += 1;
   }
 }
+
+interface MutexEntry {
+  references: number;
+  tail: Promise<void>;
+}
+
+export class KeyedMutex {
+  private readonly entries = new Map<string, MutexEntry>();
+
+  async acquire(key: string): Promise<() => void> {
+    let entry = this.entries.get(key);
+    if (!entry) {
+      entry = { references: 0, tail: Promise.resolve() };
+      this.entries.set(key, entry);
+    }
+    entry.references += 1;
+    const previous = entry.tail;
+    let unlock!: () => void;
+    const current = new Promise<void>((resolveCurrent) => {
+      unlock = resolveCurrent;
+    });
+    entry.tail = previous.then(() => current);
+    await previous;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      unlock();
+      entry!.references -= 1;
+      if (entry!.references === 0) this.entries.delete(key);
+    };
+  }
+}

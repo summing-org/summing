@@ -10,6 +10,8 @@ network_access = true
 [health]
 port = 8765
 
+# Static projects belong to TELEGRAM_OWNER_ID. The administrator can also create
+# managed projects under $SUMMATE_DATA_DIR/repositories with /project_create.
 [projects.summate]
 name = "Summate"
 default_workspace = "repo"

@@ -28,6 +28,10 @@ install -d -o summate -g summate -m 0700 "${data_dir}"
 install -d -o summate -g summate -m 0700 "${data_dir}/codex"
 install -d -o summate -g summate -m 0700 "${data_dir}/worktrees"
 install -d -o root -g summate -m 0750 /etc/summate
+install -d -o root -g root -m 0755 /etc/codex
+install -o root -g root -m 0644 \
+  "${repo_dir}/deploy/codex-requirements.toml" \
+  /etc/codex/requirements.toml
 if [ ! -f "${config_file}" ]; then
   install -o summate -g summate -m 0600 \
     "${repo_dir}/deploy/config.production.toml" \

@@ -1,7 +1,9 @@
 import { EventEmitter, once } from "node:events";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
+import { parse } from "smol-toml";
 
 export type JsonRecord = Record<string, unknown>;
 
@@ -26,6 +28,17 @@ interface RpcMessage extends JsonRecord {
 
 export class CodexProtocolError extends Error {}
 
+const PROJECT_PERMISSION_PROFILE = "summate-project";
+const READ_ONLY_PERMISSION_PROFILE = "summate-project-readonly";
+
+interface WorkspacePermissionOptions {
+  deniedPaths?: string[];
+  gitMetadataRoots?: string[];
+  networkAccess?: boolean;
+  readableRoots?: string[];
+  readOnly?: boolean;
+}
+
 export class CodexAppServer extends EventEmitter {
   private process: ChildProcessWithoutNullStreams | null = null;
   private readonly pending = new Map<number, PendingRequest>();
@@ -46,10 +59,11 @@ export class CodexAppServer extends EventEmitter {
   async start(): Promise<void> {
     if (this.running) return;
     mkdirSync(this.codexHome, { recursive: true });
+    this.assertSafeCodexHomeConfig();
     this.closed = false;
     try {
       this.process = spawn(this.binary, ["app-server"], {
-        env: { ...process.env, CODEX_HOME: this.codexHome },
+        env: this.appServerEnvironment(),
         stdio: ["pipe", "pipe", "pipe"],
       });
       await Promise.race([
@@ -71,7 +85,11 @@ export class CodexAppServer extends EventEmitter {
         clientInfo: {
           name: "summate_telegram",
           title: "Summate Telegram",
-          version: "8.0.0",
+          version: "8.2.0",
+        },
+        capabilities: {
+          experimentalApi: true,
+          requestAttestation: false,
         },
       },
       30_000,
@@ -190,7 +208,7 @@ export class CodexAppServer extends EventEmitter {
       return;
     }
     if (method === "item/permissions/requestApproval") {
-      await this.send({ id, result: { permissions: {} } });
+      await this.send({ id, result: { permissions: {}, scope: "turn" } });
       console.warn("declined unexpected Codex permission request");
       return;
     }
@@ -243,12 +261,23 @@ export class CodexAppServer extends EventEmitter {
     );
   }
 
-  async startThread(cwd: string, model = ""): Promise<string> {
+  async startThread(
+    cwd: string,
+    model = "",
+    options: WorkspacePermissionOptions = {},
+  ): Promise<string> {
+    const permissionProfile = options.readOnly
+      ? READ_ONLY_PERMISSION_PROFILE
+      : PROJECT_PERMISSION_PROFILE;
     const params: JsonRecord = {
       cwd,
+      runtimeWorkspaceRoots: options.readableRoots ?? [cwd],
       approvalPolicy: "never",
-      sandbox: "workspace-write",
+      permissions: permissionProfile,
+      config: this.permissionConfig(cwd, options),
       serviceName: "summate_telegram",
+      dynamicTools: [],
+      selectedCapabilityRoots: [],
     };
     if (model) params.model = model;
     const result = this.record(await this.request("thread/start", params));
@@ -256,31 +285,52 @@ export class CodexAppServer extends EventEmitter {
     if (typeof thread.id !== "string") {
       throw new CodexProtocolError("thread/start did not return a thread id");
     }
+    if (
+      !Array.isArray(result.runtimeWorkspaceRoots) ||
+      result.runtimeWorkspaceRoots.length === 0
+    ) {
+      throw new CodexProtocolError(
+        "thread/start did not preserve any runtime workspace roots",
+      );
+    }
     return thread.id;
   }
 
-  async resumeThread(threadId: string, cwd: string): Promise<void> {
-    await this.request("thread/resume", { threadId, cwd });
+  async resumeThread(
+    threadId: string,
+    cwd: string,
+    options: WorkspacePermissionOptions = {},
+  ): Promise<void> {
+    const permissionProfile = options.readOnly
+      ? READ_ONLY_PERMISSION_PROFILE
+      : PROJECT_PERMISSION_PROFILE;
+    await this.request("thread/resume", {
+      threadId,
+      cwd,
+      runtimeWorkspaceRoots: options.readableRoots ?? [cwd],
+      approvalPolicy: "never",
+      permissions: permissionProfile,
+      config: this.permissionConfig(cwd, options),
+    });
   }
 
   async startTurn(
     threadId: string,
     prompt: string,
     cwd: string,
-    options: { model?: string; effort?: string; networkAccess?: boolean } = {},
+    options: {
+      model?: string;
+      effort?: string;
+      networkAccess?: boolean;
+      readableRoots?: string[];
+    } = {},
   ): Promise<string> {
     const params: JsonRecord = {
       threadId,
       input: [{ type: "text", text: prompt }],
       cwd,
+      runtimeWorkspaceRoots: options.readableRoots ?? [cwd],
       approvalPolicy: "never",
-      sandboxPolicy: {
-        type: "workspaceWrite",
-        writableRoots: [cwd],
-        networkAccess: options.networkAccess ?? true,
-        excludeTmpdirEnvVar: false,
-        excludeSlashTmp: false,
-      },
       effort: options.effort ?? "medium",
       summary: "concise",
     };
@@ -291,6 +341,161 @@ export class CodexAppServer extends EventEmitter {
       throw new CodexProtocolError("turn/start did not return a turn id");
     }
     return turn.id;
+  }
+
+  private permissionConfig(cwd: string, options: WorkspacePermissionOptions): JsonRecord {
+    const readableRoot = resolve(options.readableRoots?.[0] ?? cwd);
+    const writableSubpath = relative(readableRoot, resolve(cwd)) || ".";
+    if (writableSubpath === ".." || writableSubpath.startsWith("../")) {
+      throw new CodexProtocolError(
+        `Codex cwd must be inside its readable project root: ${cwd} is outside ${readableRoot}`,
+      );
+    }
+    const runtimeSubpath =
+      writableSubpath === "."
+        ? ".summate-runtime"
+        : `${writableSubpath}/.summate-runtime`;
+    const runtimeTempPath = resolve(cwd, ".summate-runtime", "tmp");
+    const workspaceRoots: JsonRecord = { ".": "read" };
+    if (!options.readOnly) {
+      workspaceRoots[writableSubpath] = "write";
+      workspaceRoots[".git"] = "read";
+      workspaceRoots[runtimeSubpath] = "read";
+      workspaceRoots[`${runtimeSubpath}/PROJECT_MEMORY.md`] = "write";
+      workspaceRoots[`${runtimeSubpath}/tmp`] = "write";
+    } else {
+      workspaceRoots[".git"] = "deny";
+      workspaceRoots[runtimeSubpath] = "deny";
+      for (const deniedPath of options.deniedPaths ?? []) {
+        if (
+          deniedPath &&
+          deniedPath !== "." &&
+          deniedPath !== ".." &&
+          !deniedPath.startsWith("../") &&
+          !deniedPath.startsWith("/")
+        ) {
+          workspaceRoots[deniedPath] = "deny";
+        }
+      }
+    }
+    const projects: JsonRecord = {};
+    for (const root of new Set([readableRoot, resolve(cwd)])) {
+      projects[root] = { trust_level: "untrusted" };
+    }
+    const permissionProfile = options.readOnly
+      ? READ_ONLY_PERMISSION_PROFILE
+      : PROJECT_PERMISSION_PROFILE;
+    const network = !options.readOnly && (options.networkAccess ?? true);
+    const filesystem: JsonRecord = {
+      ":minimal": "read",
+      ":workspace_roots": workspaceRoots,
+    };
+    if (!options.readOnly) {
+      for (const gitMetadataRoot of options.gitMetadataRoots ?? []) {
+        filesystem[resolve(gitMetadataRoot)] = "write";
+      }
+    }
+    const shellEnvironment: JsonRecord = {
+      LANG: process.env.LANG ?? "C.UTF-8",
+      PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+    };
+    if (!options.readOnly) {
+      shellEnvironment.TMPDIR = runtimeTempPath;
+      shellEnvironment.TMP = runtimeTempPath;
+      shellEnvironment.TEMP = runtimeTempPath;
+    }
+    const config: JsonRecord = {
+      default_permissions: permissionProfile,
+      permissions: {
+        [permissionProfile]: {
+          description: options.readOnly
+            ? "Read project files without writes or network access"
+            : "Write the active project worktree and read only its project root",
+          filesystem,
+          network: network
+            ? { enabled: true, domains: { "*": "allow" } }
+            : { enabled: false },
+        },
+      },
+      shell_environment_policy: {
+        inherit: "none",
+        set: shellEnvironment,
+      },
+      projects,
+      features: {
+        apps: false,
+        browser_use: false,
+        browser_use_external: false,
+        browser_use_full_cdp_access: false,
+        computer_use: false,
+        hooks: false,
+        image_generation: false,
+        in_app_browser: false,
+        memories: false,
+        plugins: false,
+        remote_plugin: false,
+        multi_agent: false,
+        skill_search: false,
+        skill_mcp_dependency_install: false,
+        workspace_dependencies: false,
+      },
+    };
+    if (options.readOnly) config.web_search = "disabled";
+    return config;
+  }
+
+  private assertSafeCodexHomeConfig(): void {
+    const configPath = resolve(this.codexHome, "config.toml");
+    if (!existsSync(configPath)) return;
+    let config: JsonRecord;
+    try {
+      config = parse(readFileSync(configPath, "utf8")) as JsonRecord;
+    } catch (error) {
+      throw new CodexProtocolError(`cannot parse ${configPath}: ${String(error)}`);
+    }
+    for (const key of [
+      "mcp_servers",
+      "hooks",
+      "sandbox_mode",
+      "sandbox_workspace_write",
+      "default_permissions",
+      "permissions",
+    ]) {
+      const value = config[key];
+      const configured =
+        typeof value === "string"
+          ? value.length > 0
+          : value !== null && typeof value === "object" && !Array.isArray(value)
+            ? Object.keys(value).length > 0
+            : value !== undefined;
+      if (configured) {
+        throw new CodexProtocolError(
+          `Summate CODEX_HOME must not define ${key}; use a dedicated auth-only CODEX_HOME`,
+        );
+      }
+    }
+  }
+
+  private appServerEnvironment(): NodeJS.ProcessEnv {
+    const environment: NodeJS.ProcessEnv = { CODEX_HOME: this.codexHome };
+    for (const key of [
+      "HOME",
+      "USER",
+      "LOGNAME",
+      "PATH",
+      "LANG",
+      "LC_ALL",
+      "TMPDIR",
+      "HTTP_PROXY",
+      "HTTPS_PROXY",
+      "NO_PROXY",
+      "SSL_CERT_FILE",
+      "SSL_CERT_DIR",
+    ]) {
+      const value = process.env[key];
+      if (value !== undefined) environment[key] = value;
+    }
+    return environment;
   }
 
   async steer(threadId: string, turnId: string, text: string): Promise<void> {

@@ -1,8 +1,8 @@
-# Summate 8: архитектура, эксплуатация и разработка
+# Summate 8.2: архитектура, эксплуатация и разработка
 
-> Версия: **8.0.0**
-> Целевая среда: один Linux VPS, один владелец, один Telegram-бот.
-> Последняя сверка с кодом: **11 августа 2026 года**.
+> Версия: **8.2.0**
+> Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
+> Последняя сверка с кодом: **12 августа 2026 года**.
 
 Это единый технический документ о проекте. Он описывает продуктовую модель,
 архитектуру, состояние на диске, протокол выполнения, авторизацию ChatGPT,
@@ -14,9 +14,10 @@
 
 ## 1. Что это за проект
 
-Summate — постоянно работающий агент одного владельца. Владелец общается с ним
-через Telegram, а фактический агентный цикл выполняет официальный Codex App
-Server.
+Summate — постоянно работающий агент с одним администратором и назначаемыми
+владельцами проектов. Они общаются с ним через Telegram, а фактический агентный
+цикл выполняет один общий официальный Codex App Server, авторизованный ChatGPT
+account администратора.
 
 Summate не реализует собственную LLM, набор shell-инструментов или очередной
 универсальный agent framework. Его задача значительно уже:
@@ -28,16 +29,17 @@ Summate не реализует собственную LLM, набор shell-и�
 5. стримить ответ обратно в Telegram;
 6. развести параллельные диалоги по отдельным Git worktree;
 7. хранить минимальную общую память проекта;
-8. дать владельцу простое операционное управление.
+8. разделить рабочий доступ владельцев и read-only Q&A участников group topic;
+9. дать администратору простое операционное управление.
 
 В результате граница ответственности выглядит так:
 
 ```text
 Telegram и Summate                  Codex App Server
 ---------------------------------  ---------------------------------
-владелец и topic                    модель и agent loop
-binding topic → project             чтение и изменение файлов
-очередь steer/follow-up             shell, Git и другие Codex tools
+администратор/owner/participant     модель и agent loop
+binding topic → project             editor/read-only Codex threads
+очередь access/steer/follow-up      sandboxed inspection or project work
 SQLite-состояние                    sandbox конкретного turn
 стрим Telegram                      persistent Codex thread
 project memory                      рассуждение и итоговый ответ
@@ -57,8 +59,8 @@ npm start
 
 1. читаются переменные окружения и один TOML-конфиг;
 2. проверяются обязательные секреты и структура Projects/Workspaces;
-3. открывается SQLite в WAL-режиме;
-4. создаются каталоги данных, identity и project memory, если их ещё нет;
+3. открывается SQLite в WAL-режиме и загружаются управляемые Projects;
+4. создаются каталоги данных, repositories, identity и project memory, если их ещё нет;
 5. запускается дочерний процесс `codex app-server`;
 6. выполняется JSON-RPC handshake `initialize/initialized`;
 7. читается состояние ChatGPT-account;
@@ -71,9 +73,9 @@ health port, процесс не имитирует успешный запус�
 попадает в journal.
 
 При старте runtime также ищет сохранённые `pending_inputs` и возобновляет их
-обработку. Поэтому после рестарта работа может начаться без нового сообщения
-владельца. Если очередь пуста, runtime только ждёт Telegram updates и события
-Codex; публичный HTTP-сервис не запускается.
+обработку. Поэтому после рестарта работа может начаться без нового сообщения.
+Если очередь пуста, runtime только ждёт Telegram updates и события Codex;
+публичный HTTP-сервис не запускается.
 
 ## 3. Продуктовая модель
 
@@ -86,6 +88,7 @@ Project объединяет несколько диалогов, одну до�
 
 ```text
 Project: Secret Cloud
+├── Owner: Telegram user 123456789
 ├── Workspace: web-app
 ├── Workspace: backend
 ├── Conversation: Telegram topic «Auth»
@@ -93,13 +96,21 @@ Project: Secret Cloud
 └── Conversation: Telegram topic «Frontend»
 ```
 
-Project задаётся владельцем в TOML. Создание Project через Telegram специально
-не поддерживается: пути к репозиториям — операторская конфигурация, а не
-пользовательский ввод.
+Есть два источника Projects:
+
+- статические Projects из TOML принадлежат администратору;
+- управляемые Projects администратор создаёт в личном Telegram-чате через
+  `/project_create` или `/project_clone`; они хранятся в SQLite и получают одного
+  назначенного Telegram owner.
+
+Администратор имеет рабочий доступ ко всем Projects. Project owner видит,
+привязывает и изменяет только назначенные ему Projects. Остальные участники уже
+привязанного group topic могут задавать вопросы о текущем Project, но не получают
+команд или write-доступа. Перезапуск после создания не нужен.
 
 ### 3.2. Workspace
 
-Workspace — именованный абсолютный путь к уже существующему локальному каталогу:
+Workspace — именованный абсолютный путь к локальному каталогу:
 
 ```toml
 [projects.secret-cloud.workspaces.web-app]
@@ -112,9 +123,17 @@ path = "/srv/projects/secret-cloud/web-app"
 - подкаталогом monorepo;
 - обычным каталогом без Git.
 
-Репозитории клонирует и настраивает владелец. Summate не содержит GitHub App,
-PR/release pipeline или собственного remote manager. Обычные remotes,
-credentials и правила push принадлежат локальному Git/Codex.
+Для TOML-проектов каталог заранее готовит администратор. Для управляемых проектов
+Summate сам создаёт или клонирует Git-репозиторий в
+`$SUMMATE_DATA_DIR/repositories/<project-id>/<repo-id>`. Он настраивает локальную
+Git identity `Summate <summate@localhost>` и гарантирует существование начального
+commit, чтобы conversation worktree можно было создать даже для нового или
+пустого remote.
+
+Summate не содержит GitHub App или PR/release pipeline. Обычные remotes,
+credentials и правила push принадлежат локальному Git/Codex. Token нельзя
+встраивать в Git URL: для приватного remote следует настроить SSH или credential
+helper пользователя systemd `summate`.
 
 ### 3.3. Conversation
 
@@ -127,11 +146,22 @@ telegram chat_id + message_thread_id
                 ↓
        project_id/workspace_id
                 ↓
-      Codex thread + Git worktree
+      Git worktree
+       ├── editor Codex thread
+       └── read-only Q&A Codex thread
 ```
 
 Telegram topic не равен Project. Несколько topics могут быть привязаны к одному
 Project и даже к одному Workspace. История у них разная, память Project общая.
+Перепривязать уже занятый topic может только владелец текущего Project или
+администратор.
+
+Внутри привязанного group topic есть два независимых контекста. Администратор и
+назначенный Project owner работают в editor thread. Любой другой Telegram user,
+от которого Bot API получил сообщение в этом topic, работает в общем для topic
+read-only Q&A thread. Он может спрашивать об исходниках и реализации, но все его
+slash-команды блокируются до Codex. Read-only thread не видит editor history,
+runtime identity/project memory, `.env` и файлы ключей.
 
 В обычном приватном чате `message_thread_id` равен нулю, поэтому весь чат является
 одной Conversation. Для нескольких параллельных контекстов предназначена
@@ -139,19 +169,25 @@ Telegram forum group.
 
 ### 3.4. Run
 
-Run — один пользовательский turn внутри Conversation.
+Run — один пользовательский turn внутри Conversation. Каждый Run имеет
+`access_mode`: `write` для администратора/owner или `read-only` для участника.
 
 Инварианты:
 
 - у Conversation одновременно не более одного активного Run;
 - разные Conversations могут работать параллельно;
+- Runs одного non-Git Workspace выполняются последовательно, чтобы read-only
+  снимок запрещённых путей не гонялся с editor-записью;
 - глобальный предел задаёт `max_parallel_conversations`;
 - Run не является отдельным долго живущим task-объектом;
 - история Run хранится для диагностики, а смысловой контекст хранит Codex thread.
 
 ## 4. Новые сообщения во время Run
 
-Пока Codex работает, сообщения владельца делятся на два типа.
+Пока editor Codex работает, сообщения владельца делятся на два типа. Сообщения
+read-only участников всегда являются follow-up и никогда не могут steer editor
+turn. Очередь сохраняет общий порядок, но соседние inputs разных `access_mode`
+запускаются отдельными Run и никогда не объединяются в один prompt.
 
 ### 4.1. Steer
 
@@ -246,8 +282,9 @@ Summate не делает автоматически merge, rebase, commit, push
 веток остаётся явным решением.
 
 Если Workspace не является Git-репозиторием, используется исходный каталог
-напрямую. В таком режиме несколько Conversations не изолированы друг от друга;
-для параллельной разработки рекомендуется Git. Автоматическое добавление
+напрямую. Runs одного такого Workspace сериализуются: это сохраняет целостность
+read-only профиля, но не даёт изоляции незавершённых изменений между
+Conversations. Для параллельной разработки рекомендуется Git. Автоматическое добавление
 `.summate-runtime/` в Git `info/exclude` выполняется только для Git worktree.
 
 ## 6. Контекст и память
@@ -337,7 +374,9 @@ input автоматически в очередь не возвращается
 повторно.
 
 Для входа отправьте боту `/login` в **личном чате**. Summate не показывает
-device code в группе. После подтверждения проверьте `/status`.
+device code в группе. Команда доступна только администратору. После подтверждения
+проверьте `/status`. Все Project owners используют этот общий account и не
+выполняют отдельный login.
 
 Официальные источники:
 
@@ -346,34 +385,83 @@ device code в группе. После подтверждения провер�
 
 ## 8. Sandbox и полномочия
 
-Каждый `turn/start` получает:
+Клиент включает experimental App Server API и при `thread/start` или
+`thread/resume` выбирает один из двух именованных профилей. Editor thread получает
+`summate-project`, в который входят:
 
 - `approvalPolicy = never`;
-- `sandboxPolicy.type = workspaceWrite`;
-- явный `writableRoots = [cwd текущего Workspace]`;
-- явный флаг network access из TOML.
+- `runtimeWorkspaceRoots`, ограниченный conversation worktree;
+- `filesystem.:minimal = read` для необходимых системных путей;
+- read всего текущего worktree и write только текущего Workspace внутри него;
+- `.git`-указатель worktree доступен на чтение, а project-scoped общий Git
+  directory — на запись, чтобы owner мог выполнять `git add`, commit, rebase и
+  push без доступа к metadata других репозиториев;
+- временные файлы editor создаются в `.summate-runtime/tmp` текущего worktree,
+  а не в общем системном `/tmp`;
+- network выключен или, при `agent.network_access = true`, явно разрешены все
+  домены;
+- `shell_environment_policy.inherit = none`: shell получает только безопасные
+  `PATH` и `LANG`, но не Telegram token и прочие service secrets;
+- каждый project root помечен для Codex как `untrusted`, поэтому project-local
+  `.codex/config.toml`, hooks и rules не загружаются;
+- Apps, Browser/Computer Use, Image Generation, hooks, memories, plugins,
+  multi-agent и skill discovery выключены;
+- системный `/etc/codex/requirements.toml` содержит пустые managed allowlists
+  MCP/plugin servers, поэтому user/project config не может вернуть интеграции
+  общего account администратора.
 
-Поля `excludeTmpdirEnvVar` и `excludeSlashTmp` передаются как `false`, поэтому
-нельзя считать Workspace буквально единственным writable path sandbox: правила
-временных каталогов остаются стандартными для Codex.
+Read-only Q&A thread получает `summate-project-readonly`: Workspace доступен
+только на чтение, network, web search, Browser и Computer Use выключены, а
+`.summate-runtime`, `.env`, `.envrc`, `.ssh`, Git/package/cloud credentials,
+private keys, certificates и symlinks перед каждым guest run рекурсивно
+обнаруживаются host-процессом и закрываются точными deny-путями без ограничения
+глубины. Его prompt дополнительно
+запрещает builds, tests, servers, package managers, scripts и любые команды с
+побочными эффектами. Этот prompt управляет поведением, а именованный permission
+profile и `approvalPolicy = never` являются технической границей, которая не даёт
+записать изменения или запросить расширение прав.
+
+`turn/start` повторяет `runtimeWorkspaceRoots` и наследует профиль thread. Поля
+legacy `sandbox`/`sandboxPolicy` вместе с именованным профилем не передаются.
 
 У Summate нет Telegram-интерфейса подтверждений. Если управляемая политика всё же
 присылает command/file approval request, клиент отвечает `decline`; permission
 request получает пустой набор permissions, а legacy approvals — явный отказ.
 Любой другой server-initiated request получает ошибку `-32601`.
 
+App Server запускается с минимальным allowlist переменных окружения, а shell
+получает отдельную ещё более узкую политику. Форма именованного permission profile
+сверена с официальной документацией Codex App Server и реальным установленным
+сервером.
+
+`CODEX_HOME` должен быть выделен только Summate и использоваться для auth/state.
+Runtime откажется запускаться, если его `config.toml` содержит MCP servers или
+hooks. `deploy/activate.sh` при каждом развёртывании обновляет системные Codex
+requirements из [deploy/codex-requirements.toml](deploy/codex-requirements.toml).
+
 Дополнительные границы:
 
-- принимаются сообщения только от `TELEGRAM_OWNER_ID`;
-- конфиг задаёт локальные пути заранее;
+- `TELEGRAM_OWNER_ID` идентифицирует администратора;
+- вне привязанного group topic сообщения принимаются только от администратора или
+  owner существующего Project;
+- owner может увидеть, привязать и выполнять команды только в своём Project;
+- остальные участники привязанного group topic могут отправлять только обычные
+  Q&A-сообщения; все slash-команды блокируются;
+- Q&A использует отдельный persistent thread и именованный профиль с read-only
+  project root, выключенными network/web search/extensions и denied secrets;
+- создание/клонирование Projects, `/login`, `/restart` и `/panic` доступны только
+  администратору;
+- управляемые пути строятся самим runtime, а не принимаются из Telegram;
 - health API слушает loopback;
 - OAuth state, Telegram token и SQLite защищаются Unix-permissions/UMask;
 - публичная публикация сервисов не входит в runtime;
 - неожиданные протокольные состояния завершаются ошибкой.
 
-Рекомендуется отдельная owner-only forum group. Проверка sender id запрещает
-другим участникам управлять агентом, но они всё равно могут видеть сообщения
-бота в общей группе.
+Участник group topic получает возможность узнавать содержимое Project через
+ответы бота. Поэтому Telegram membership/ACL определяет круг читателей, и
+администратор должен добавлять в forum group только тех, кому разрешено видеть
+реализацию Project. Read-only sandbox запрещает изменения и внешние действия, но
+не является механизмом сокрытия исходного кода от участников topic.
 
 ## 9. Самоизменение
 
@@ -386,15 +474,16 @@ self_change = true
 
 Флаг лишь сообщает контексту, что Workspace является телом Summate. Отдельного
 механизма автоматического самоизменения он не включает. Изменять код разрешено
-только по прямой команде владельца.
+только по прямой команде администратора.
 
-`self_change` не является техническим authorization gate. Его значение только
-попадает в `.summate-runtime/CONTEXT.md`; прямой запрос владельца обеспечивается
-конституцией и инструкцией модели.
+`self_change` не является единственным authorization gate. Статический проект
+Summate принадлежит администратору, а значение флага попадает в
+`.summate-runtime/CONTEXT.md`; прямой запрос администратора дополнительно
+обеспечивается конституцией и инструкцией модели.
 
 Ожидаемый процесс:
 
-1. владелец формулирует изменение в привязанном topic;
+1. администратор формулирует изменение в привязанном topic;
 2. Codex работает в отдельном conversation worktree;
 3. запускает профильные тесты;
 4. показывает проверяемый итог и diff;
@@ -402,7 +491,7 @@ self_change = true
 6. commit/merge/push выполняются как обычные Git-операции.
 
 `/review` добавляет обычный follow-up prompt с инструкцией не менять файлы. Он
-использует тот же persistent Codex thread и тот же `workspaceWrite` sandbox,
+использует тот же persistent Codex thread и тот же именованный permission profile,
 поэтому это не независимый reviewer и не технически read-only режим.
 
 ## 10. Telegram-команды
@@ -410,8 +499,10 @@ self_change = true
 | Команда | Поведение |
 |---|---|
 | `/start`, `/help` | Короткая справка. |
-| `/login` | Device-code login; только личный чат. |
-| `/projects` | Список Project и Workspace из TOML. |
+| `/login` | Device-code login; только администратор в личном чате. |
+| `/project_create <project> <owner_id> <repo>` | Создать пустой управляемый Git Project; только администратор в личном чате. |
+| `/project_clone <project> <owner_id> <repo> <git_url>` | Клонировать управляемый Git Project; только администратор в личном чате. |
+| `/projects` | Список доступных отправителю Project и Workspace. |
 | `/bind <project> [workspace]` | Привязать текущий topic. |
 | `/status` | Account, plan, binding, active/pending. |
 | `/steer <текст>` | Направить текст в текущий Codex turn. |
@@ -419,10 +510,12 @@ self_change = true
 | `/new` | Начать новый Codex thread в topic. |
 | `/remember <факт>` | Добавить факт в Project memory. |
 | `/review` | Follow-up с просьбой проверить незакоммиченные изменения и не менять файлы. |
-| `/restart` | Выйти с кодом 42; systemd перезапустит. |
-| `/panic` | Немедленно выйти с кодом 99 без ожидания Telegram acknowledgement и без автоматического рестарта. |
+| `/restart` | Выйти с кодом 42; только администратор, systemd перезапустит. |
+| `/panic` | Только администратор; немедленно выйти с кодом 99 без acknowledgement и автоматического рестарта. |
 
 При `/bind` без Workspace используется `default_workspace` Project.
+Project owner не может перепривязать topic, уже принадлежащий другому Project;
+администратор может работать со всеми bindings.
 Перепривязка topic к другому Project/Workspace сбрасывает Codex thread и путь
 worktree в SQLite, очищает active state и помечает ожидающие inputs как
 `consumed`, потому что старый контекст не должен пересекать границу проекта.
@@ -446,6 +539,8 @@ $SUMMATE_DATA_DIR/
 │   └── <project-id>/
 │       ├── memory.md
 │       └── memory-conflicts/
+├── repositories/                  # управляемые локальные Git repositories
+│   └── <project-id>/<repo-id>/
 └── worktrees/                     # default SUMMATE_WORKTREE_ROOT
     └── <conversation-id>/
 ```
@@ -458,20 +553,23 @@ $SUMMATE_DATA_DIR/
 SQLite хранит:
 
 - binding `chat_id/topic_id → project/workspace`;
-- Codex thread id;
+- editor и read-only Codex thread id;
 - активный turn и Telegram stream message id;
-- pending steer/follow-up;
-- историю Run: prompt, response, status, error и timestamps;
+- pending steer/follow-up с `access_mode`;
+- историю Run: access, prompt, response, status, error и timestamps;
+- управляемые Projects, Workspaces и Telegram owner id;
 - последний подтверждённый Telegram update offset.
 
-Физически это четыре таблицы:
+Основные таблицы:
 
 | Таблица | Содержимое |
 |---|---|
-| `conversations` | Binding, Codex thread, active turn, stream message и worktree path. |
-| `pending_inputs` | Очередь `steer`/`followup` со статусом `pending` или `consumed`. |
-| `runs` | Prompt, response, status, error и время выполнения. |
+| `conversations` | Binding, editor/read-only threads, active turn, stream message и worktree path. |
+| `pending_inputs` | Очередь `steer`/`followup`, access и состояние обработки. |
+| `runs` | Access, prompt, response, status, error и время выполнения. |
 | `runtime_state` | Сейчас только Telegram update offset. |
+| `managed_projects` | Динамический Project, его owner и default Workspace. |
+| `managed_workspaces` | Абсолютные пути управляемых repositories. |
 
 WAL сохраняет совместимость с существующей базой и допускает независимое чтение
 диагностическими инструментами. В самом runtime короткие синхронные SQLite-запросы
@@ -480,6 +578,8 @@ WAL сохраняет совместимость с существующей б
 ## 12. Конфигурация
 
 Полный пример находится в [config.example.toml](config.example.toml).
+TOML остаётся authority для статических администраторских проектов. Управляемые
+Telegram-проекты находятся в SQLite и не записываются обратно в TOML.
 
 ### 12.1. TOML
 
@@ -511,7 +611,7 @@ Project и один Workspace в нём. Пути проверяются на а
 | Переменная | Назначение |
 |---|---|
 | `TELEGRAM_BOT_TOKEN` | Обязательный BotFather token. |
-| `TELEGRAM_OWNER_ID` | Обязательный numeric user id владельца. |
+| `TELEGRAM_OWNER_ID` | Обязательный numeric user id администратора. |
 | `SUMMATE_DATA_DIR` | Корень durable state. |
 | `SUMMATE_CONFIG` | Путь к TOML. |
 | `SUMMATE_WORKTREE_ROOT` | Каталог conversation worktrees. |
@@ -523,7 +623,15 @@ Project и один Workspace в нём. Пути проверяются на а
 `<data>/config.toml`, worktrees — `<data>/worktrees`, `CODEX_HOME=<data>/codex`,
 `CODEX_BIN=codex`. `CODEX_BIN` также можно задать как `agent.codex_binary` в TOML,
 но environment имеет приоритет. `TELEGRAM_OWNER_ID` должен быть положительным
-безопасным JavaScript integer. `NODE_ENV` самим runtime не читается.
+безопасным JavaScript integer. Все управляемые repositories создаются внутри
+`<data>/repositories`; отдельная переменная пути намеренно не предусмотрена.
+`NODE_ENV` самим runtime не читается.
+
+Не используйте общий пользовательский `~/.codex` как `CODEX_HOME`: Summate
+ожидает отдельный auth-only каталог. Для ручной установки обязательно установите
+[deploy/codex-requirements.toml](deploy/codex-requirements.toml) в
+`/etc/codex/requirements.toml`; `cloud-init` и `deploy/activate.sh` делают это
+автоматически.
 
 Для unit-файла из примера EnvironmentFile должен принадлежать `root:summate` и
 иметь mode `0640`; `config.toml` принадлежит пользователю `summate` и имеет mode
@@ -612,7 +720,9 @@ build и `npm prune --omit=dev`, устанавливает unit, включае
 кода.
 
 После запуска отправьте боту `/login`, завершите ChatGPT device-code flow, затем
-создайте forum group/topics и выполните `/bind`.
+в личном чате создайте управляемый Project через `/project_create` или
+`/project_clone`. Назначенный owner должен отправить боту `/start`, после чего
+можно создать forum group/topics и выполнить `/bind`.
 
 ### 13.3. Ручная подготовка пользователя и каталогов
 
@@ -622,9 +732,9 @@ sudo install -d -o summate -g summate -m 0700 /var/lib/summate/data
 sudo install -d -o root -g summate -m 0750 /etc/summate
 ```
 
-Расположите код, например, в `/opt/summate`, а проектные репозитории — в
-`/srv/projects`. Пользователь `summate` должен иметь права на те Workspace,
-которые указаны в конфиге.
+Расположите код, например, в `/opt/summate`, а статические проектные репозитории —
+в `/srv/projects`. Пользователь `summate` должен иметь права на Workspace из
+конфига. Управляемые Telegram-repositories runtime создаёт сам внутри data dir.
 
 ### 13.4. Node.js и сборка
 
@@ -658,7 +768,8 @@ sudo chmod 0600 /var/lib/summate/data/config.toml
 sudo chmod 0640 /etc/summate/summate.env
 ```
 
-Отредактируйте token, owner id, `CODEX_BIN` и пути Workspace.
+Отредактируйте token, Telegram ID администратора, `CODEX_BIN` и пути статических
+Workspace.
 
 ### 13.6. Systemd
 
@@ -684,8 +795,8 @@ curl --fail http://127.0.0.1:8765/health
 ```
 
 После первого запуска откройте личный чат с ботом, отправьте `/login`, завершите
-ChatGPT device-code flow, затем создайте forum group/topics и выполните
-`/bind`.
+ChatGPT device-code flow, создайте Project через `/project_create` или
+`/project_clone`, затем создайте forum group/topics и выполните `/bind`.
 
 ## 14. Операционное управление
 
@@ -707,7 +818,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "8.0.0",
+  "version": "8.2.0",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",
@@ -758,6 +869,7 @@ at-least-once recovery: prompt может выполниться повторн�
 - `CODEX_HOME`;
 - `memory/`;
 - `projects/`;
+- `repositories/` со всеми управляемыми Git refs и незапушенными commits;
 - `SUMMATE_WORKTREE_ROOT`, если нужно сохранить незакоммиченные изменения;
 - исходные Git-репозитории и их refs, если они не гарантированно находятся в
   origin.
@@ -812,18 +924,31 @@ login под другим Unix-user/Home.
 
 ### Topic не отвечает
 
-1. проверить sender id и `TELEGRAM_OWNER_ID`;
+1. для администратора проверить sender id и `TELEGRAM_OWNER_ID`, для Project
+   owner — назначение проекта через администраторский `/projects`;
 2. выполнить `/projects`;
 3. выполнить `/bind <project> [workspace]`;
 4. проверить `/status`;
 5. посмотреть journal;
 6. проверить, не достигнут ли глобальный предел параллельности.
 
+### `/project_create` или `/project_clone` не сработал
+
+Обе команды принимаются только от `TELEGRAM_OWNER_ID` в личном чате. ID Project
+и repository должны соответствовать `[a-z0-9][a-z0-9._-]{0,63}`, owner id должен
+быть положительным числом. Если каталог
+`$SUMMATE_DATA_DIR/repositories/<project>/<repo>` остался после прерванной
+операции, runtime намеренно не удаляет его и просит администратора сначала
+проверить содержимое. Для private clone проверьте non-interactive credentials
+пользователя `summate`; `GIT_TERMINAL_PROMPT=0` запрещает зависнуть на запросе
+пароля.
+
 ### Обычное сообщение «пропало» во время ответа
 
-Оно поставлено без acknowledgement в follow-up queue. `/status` покажет общий
-для всей базы счётчик `pending`, а не счётчик только текущего topic. После
-текущего Run сообщения этого topic будут объединены в следующий turn.
+Оно поставлено без acknowledgement в follow-up queue. Для Project owner
+`/status` показывает `pending` текущего topic; для администратора — глобальный
+счётчик всей базы. После текущего Run сообщения этого topic будут объединены в
+следующий turn.
 
 ### Steer не изменил текущий ответ
 
@@ -853,7 +978,7 @@ git -C /path/to/repo branch --list 'summate/*'
 systemctl status summate
 ```
 
-Вернуть сервис может только владелец:
+Вернуть сервис может только администратор:
 
 ```bash
 sudo systemctl start summate
@@ -871,12 +996,15 @@ src/
 ├── async-primitives.ts     # semaphore и deferred completion
 ├── telegram-api.ts         # минимальный Bot API client на fetch
 ├── codex-app-server.ts     # типизированная JSONL/RPC boundary
+├── project-catalog.ts      # managed Projects, owners и Git provisioning
 ├── state-store.ts          # SQLite authority
 ├── workspace-manager.ts    # memory и Git worktrees
 └── health-server.ts        # loopback HTTP
 
 tests/
 ├── config.test.ts
+├── project-catalog.test.ts
+├── runtime-access.test.ts
 ├── state-store.test.ts
 ├── codex-app-server.test.ts
 ├── telegram-api.test.ts
@@ -897,11 +1025,12 @@ make test
 make lint
 ```
 
-`make test` сначала компилирует TypeScript, затем запускает 10 тестов через
+`make test` сначала компилирует TypeScript, затем запускает 14 тестов через
 стандартный `node:test`. Они проверяют config, SQLite/restart recovery, Telegram
-splitting, JSONL-протокол и формы Codex v2, а также создание локального Git
-worktree и merge project memory. Для suite не нужен Telegram token, OpenAI
-account или сеть; полноценного Telegram/OpenAI end-to-end теста в репозитории нет.
+splitting, project-owner ACL, JSONL-протокол и формы Codex v2, создание и clone
+управляемых repositories, локальный Git worktree и merge project memory. Для
+suite не нужен Telegram token, OpenAI account или сеть; полноценного
+Telegram/OpenAI end-to-end теста в репозитории нет.
 
 При изменении протокола Codex необходимо сверяться с актуальной официальной
 документацией. `npm run codex:types` генерирует в игнорируемый каталог
@@ -914,20 +1043,22 @@ account или сеть; полноценного Telegram/OpenAI end-to-end т�
 
 Это намеренные ограничения, а не скрытые обещания:
 
-- один Telegram owner id;
+- один Telegram administrator id и один owner id на управляемый Project;
+- один общий ChatGPT/Codex account администратора;
 - текст и caption принимаются; само вложение в Codex не передаётся;
 - один бот и один SQLite;
 - нет multi-host coordination;
 - нет автоматического merge/push;
-- нет создания Project из Telegram;
+- нет смены owner, удаления Project или добавления второго repository через Telegram;
 - нет публичного dashboard;
 - нет per-message approval UI;
-- non-Git Workspace не изолирует параллельные записи;
+- non-Git Workspace сериализует Runs, но не изолирует изменения между ними;
 - Project memory — простой Markdown, не vector database;
-- `/review` — prompt-level запрет изменений в обычном `workspaceWrite` turn;
+- `/review` — prompt-level запрет изменений в обычном write-enabled permission profile;
 - health не является полной readiness-проверкой;
 - config не перечитывается без рестарта;
-- автоматического механизма миграций SQLite schema нет.
+- версионированного механизма миграций SQLite schema нет; additive tables и
+  columns создаются idempotent `CREATE TABLE IF NOT EXISTS`/`ALTER TABLE`.
 
 Новая возможность должна добавляться только при конкретном пользовательском
 сценарии. Предпочтительный путь развития — улучшать надёжность существующего

@@ -22,6 +22,34 @@ packages:
   - xz-utils
 
 write_files:
+  - path: /etc/codex/requirements.toml
+    owner: root:root
+    permissions: "0644"
+    content: |
+      allow_login_shell = false
+      allow_managed_hooks_only = true
+
+      [features]
+      apps = false
+      browser_use = false
+      browser_use_external = false
+      browser_use_full_cdp_access = false
+      computer_use = false
+      hooks = false
+      image_generation = false
+      in_app_browser = false
+      memories = false
+      multi_agent = false
+      plugins = false
+      remote_plugin = false
+      skill_mcp_dependency_install = false
+      skill_search = false
+      workspace_dependencies = false
+
+      [mcp_servers]
+
+      [plugins]
+
   - path: /usr/local/sbin/summate-bootstrap
     owner: root:root
     permissions: "0750"
@@ -139,11 +167,13 @@ write_files:
       Summate host bootstrap is complete.
 
       1. Upload the private repository, including .git, to /opt/summate.
-      2. Set TELEGRAM_BOT_TOKEN and TELEGRAM_OWNER_ID in:
+      2. Set TELEGRAM_BOT_TOKEN and the administrator TELEGRAM_OWNER_ID in:
          /etc/summate/summate.env
       3. Run:
          /opt/summate/deploy/activate.sh
       4. Send /login to the bot and complete ChatGPT device-code login.
+      5. In the administrator's private bot chat, create a managed project:
+         /project_create client_name 123456789 repo_name
 
 runcmd:
   - [bash, /usr/local/sbin/summate-bootstrap]
