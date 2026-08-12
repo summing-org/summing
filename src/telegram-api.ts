@@ -63,7 +63,10 @@ export class TelegramAPI {
   }
 
   async getUpdates(offset: number | null): Promise<TelegramObject[]> {
-    const payload: TelegramObject = { timeout: 50, allowed_updates: ["message"] };
+    const payload: TelegramObject = {
+      timeout: 50,
+      allowed_updates: ["message", "my_chat_member"],
+    };
     if (offset !== null) payload.offset = offset;
     const result = await this.call("getUpdates", payload);
     return Array.isArray(result) ? result.filter((item): item is TelegramObject => record(item) !== null) : [];

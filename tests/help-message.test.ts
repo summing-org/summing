@@ -17,6 +17,8 @@ test("administrator help includes project management examples", () => {
   const help = helpMessage(true);
 
   assert.match(help, /\*Только для администратора\*/);
+  assert.match(help, /`\/topics`/);
+  assert.match(help, /`\/bind_topic -1001234567890 42 summate repo`/);
   assert.match(help, /`\/project_create shop 123456789 backend`/);
   assert.match(
     help,

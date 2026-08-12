@@ -76,6 +76,54 @@ test("rebinding starts a fresh Codex context", () => {
   }
 });
 
+test("persists Telegram memberships and discovered topics", () => {
+  const { root, path, store } = tempStore();
+  store.recordTelegramChat({
+    chatId: -100500,
+    type: "supergroup",
+    title: "Engineering",
+    username: "engineering",
+    isForum: true,
+    botStatus: "administrator",
+    addedByUserId: 42,
+    joinedAt: 1_700_000_000,
+    lastEventJson: '{"event":"joined"}',
+    observedAt: 1_700_000_000,
+  });
+  store.recordTelegramTopic(-100500, 17, "Backend", 1_700_000_100);
+  store.bind(-100600, 23, "legacy", "repo");
+  store.close();
+
+  const reopened = new StateStore(path);
+  try {
+    assert.deepEqual(reopened.telegramChat(-100500), {
+      chatId: -100500,
+      type: "supergroup",
+      title: "Engineering",
+      username: "engineering",
+      isForum: true,
+      botStatus: "administrator",
+      addedByUserId: 42,
+      joinedAt: 1_700_000_000,
+      lastEventJson: '{"event":"joined"}',
+      firstSeenAt: 1_700_000_000,
+      updatedAt: 1_700_000_000,
+    });
+    assert.deepEqual(reopened.telegramTopic(-100500, 17), {
+      chatId: -100500,
+      topicId: 17,
+      name: "Backend",
+      firstSeenAt: 1_700_000_100,
+      updatedAt: 1_700_000_100,
+    });
+    assert.equal(reopened.telegramChat(-100600)?.botStatus, "unknown");
+    assert.equal(reopened.telegramTopic(-100600, 23)?.name, "");
+  } finally {
+    reopened.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("restart recovers active state and steer", () => {
   const { root, path, store } = tempStore();
   const conversation = store.bind(1, 2, "demo", "app");

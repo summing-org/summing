@@ -32,3 +32,21 @@ test("sendMessage forwards the MarkdownV2 parse mode", async () => {
     await api.close();
   }
 });
+
+test("getUpdates subscribes to messages and bot membership changes", async () => {
+  const api = new TelegramAPI("token");
+  let payload: Record<string, unknown> = {};
+  api.call = async (method, input) => {
+    assert.equal(method, "getUpdates");
+    payload = input;
+    return [];
+  };
+
+  try {
+    assert.deepEqual(await api.getUpdates(25), []);
+    assert.deepEqual(payload.allowed_updates, ["message", "my_chat_member"]);
+    assert.equal(payload.offset, 25);
+  } finally {
+    await api.close();
+  }
+});

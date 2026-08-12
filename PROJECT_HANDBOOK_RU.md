@@ -176,6 +176,17 @@ forum group либо иметь отключённый Privacy Mode. Во вто
 одной Conversation. Для нескольких параллельных контекстов предназначена
 Telegram forum group.
 
+Runtime запрашивает Telegram updates типов `message` и `my_chat_member`. Из
+`my_chat_member` он сохраняет chat metadata, текущий статус бота, добавившего
+пользователя, время присоединения и последний исходный membership event. Telegram
+не передаёт в этом событии список уже существующих forum topics, поэтому
+`topic_id` и доступное название регистрируются по первому увиденному сообщению,
+`forum_topic_created` или `forum_topic_edited`. Администратор просматривает реестр
+командой `/topics` и привязывает обнаруженный топик командой `/bind_topic` в
+личном чате с ботом. Существующие bindings автоматически попадают в реестр при
+миграции SQLite, хотя название старого чата или топика может оставаться неизвестным
+до следующего Telegram update.
+
 ### 3.4. Run
 
 Run — один пользовательский turn внутри Conversation. Каждый Run имеет
@@ -547,6 +558,8 @@ Summate принадлежит администратору, а значение
 | `/login` | Device-code login; только администратор в личном чате. |
 | `/project_create <project> <owner_id> <repo>` | Создать пустой управляемый Git Project; только администратор в личном чате. |
 | `/project_clone <project> <owner_id> <repo> <git_url>` | Клонировать управляемый Git Project; только администратор в личном чате. |
+| `/topics` | Список обнаруженных Telegram chats/topics и их bindings; только администратор в личном чате. |
+| `/bind_topic <chat_id> <topic_id> <project> [workspace]` | Удалённо привязать обнаруженный topic; только администратор в личном чате. |
 | `/projects` | Список доступных отправителю Project и Workspace. |
 | `/bind <project> [workspace]` | Привязать текущий topic. |
 | `/status` | Account, plan, binding, active/pending. |
@@ -603,6 +616,7 @@ SQLite хранит:
 - pending steer/follow-up с `access_mode`, `response_mode` и Telegram user id;
 - историю Run: access/response mode, prompt, response, status, error и timestamps;
 - управляемые Projects, Workspaces и Telegram owner id;
+- обнаруженные Telegram chats/topics и последний membership event бота;
 - последний подтверждённый Telegram update offset.
 
 Основные таблицы:
@@ -615,6 +629,8 @@ SQLite хранит:
 | `runtime_state` | Сейчас только Telegram update offset. |
 | `managed_projects` | Динамический Project, его owner и default Workspace. |
 | `managed_workspaces` | Абсолютные пути управляемых repositories. |
+| `telegram_chats` | Метаданные чата, membership status бота и последний membership event. |
+| `telegram_topics` | Обнаруженные topic id, доступные названия и timestamps. |
 
 WAL сохраняет совместимость с существующей базой и допускает независимое чтение
 диагностическими инструментами. В самом runtime короткие синхронные SQLite-запросы

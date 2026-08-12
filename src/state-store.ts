@@ -40,6 +40,41 @@ export interface ManagedProject {
   createdAt: number;
 }
 
+export interface TelegramChatRecord {
+  chatId: number;
+  type: string;
+  title: string;
+  username: string;
+  isForum: boolean;
+  botStatus: string;
+  addedByUserId: number | null;
+  joinedAt: number | null;
+  lastEventJson: string;
+  firstSeenAt: number;
+  updatedAt: number;
+}
+
+export interface TelegramChatObservation {
+  chatId: number;
+  type: string;
+  title: string;
+  username?: string;
+  isForum?: boolean;
+  botStatus?: string;
+  addedByUserId?: number;
+  joinedAt?: number;
+  lastEventJson?: string;
+  observedAt?: number;
+}
+
+export interface TelegramTopicRecord {
+  chatId: number;
+  topicId: number;
+  name: string;
+  firstSeenAt: number;
+  updatedAt: number;
+}
+
 type Row = Record<string, string | number | bigint | null>;
 
 export class StateStore {
@@ -139,6 +174,31 @@ export class StateStore {
         );
         CREATE INDEX IF NOT EXISTS managed_projects_owner
           ON managed_projects(owner_id, id);
+        CREATE TABLE IF NOT EXISTS telegram_chats (
+          chat_id INTEGER PRIMARY KEY,
+          type TEXT NOT NULL,
+          title TEXT NOT NULL DEFAULT '',
+          username TEXT NOT NULL DEFAULT '',
+          is_forum INTEGER NOT NULL DEFAULT 0 CHECK(is_forum IN (0, 1)),
+          bot_status TEXT NOT NULL DEFAULT 'unknown',
+          added_by_user_id INTEGER,
+          joined_at REAL,
+          last_event_json TEXT NOT NULL DEFAULT '',
+          first_seen_at REAL NOT NULL,
+          updated_at REAL NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS telegram_topics (
+          chat_id INTEGER NOT NULL REFERENCES telegram_chats(chat_id) ON DELETE CASCADE,
+          topic_id INTEGER NOT NULL,
+          name TEXT NOT NULL DEFAULT '',
+          first_seen_at REAL NOT NULL,
+          updated_at REAL NOT NULL,
+          PRIMARY KEY(chat_id, topic_id)
+        );
+        CREATE INDEX IF NOT EXISTS telegram_chats_updated
+          ON telegram_chats(updated_at DESC, chat_id);
+        CREATE INDEX IF NOT EXISTS telegram_topics_updated
+          ON telegram_topics(chat_id, updated_at DESC, topic_id);
       `);
       const conversationColumns = this.db.prepare("PRAGMA table_info(conversations)").all() as Row[];
       if (!conversationColumns.some((column) => column.name === "readonly_codex_thread_id")) {
@@ -190,6 +250,28 @@ export class StateStore {
             "CHECK(response_mode IN ('direct', 'ambient'))",
         );
       }
+      this.db.exec(`
+        INSERT OR IGNORE INTO telegram_chats
+          (chat_id, type, title, username, is_forum, bot_status, first_seen_at, updated_at)
+        SELECT
+          chat_id,
+          'supergroup',
+          '',
+          '',
+          MAX(CASE WHEN topic_id != 0 THEN 1 ELSE 0 END),
+          'unknown',
+          MIN(created_at),
+          MAX(updated_at)
+        FROM conversations
+        WHERE chat_id < 0
+        GROUP BY chat_id;
+        INSERT OR IGNORE INTO telegram_topics
+          (chat_id, topic_id, name, first_seen_at, updated_at)
+        SELECT chat_id, topic_id, '', MIN(created_at), MAX(updated_at)
+        FROM conversations
+        WHERE chat_id < 0
+        GROUP BY chat_id, topic_id;
+      `);
     });
   }
 
@@ -236,6 +318,142 @@ export class StateStore {
       })),
       createdAt: Number(project.created_at),
     }));
+  }
+
+  recordTelegramChat(observation: TelegramChatObservation): TelegramChatRecord {
+    const observedAt = observation.observedAt ?? Date.now() / 1000;
+    return this.transaction(() => {
+      const current = this.db.prepare(
+        "SELECT * FROM telegram_chats WHERE chat_id = ?",
+      ).get(observation.chatId) as Row | undefined;
+      const botStatus = observation.botStatus ??
+        (current ? String(current.bot_status) : "unknown");
+      const addedByUserId = observation.addedByUserId ??
+        (current?.added_by_user_id === null || current === undefined
+          ? null
+          : Number(current.added_by_user_id));
+      const joinedAt = observation.joinedAt ??
+        (current?.joined_at === null || current === undefined
+          ? null
+          : Number(current.joined_at));
+      const lastEventJson = observation.lastEventJson ??
+        (current ? String(current.last_event_json) : "");
+      const firstSeenAt = current ? Number(current.first_seen_at) : observedAt;
+      const username = observation.username ?? (current ? String(current.username) : "");
+      const isForum = observation.isForum ??
+        (current ? Number(current.is_forum) === 1 : false);
+      const title = observation.title || (current ? String(current.title) : "");
+      this.db.prepare(`
+        INSERT INTO telegram_chats
+          (chat_id, type, title, username, is_forum, bot_status, added_by_user_id,
+           joined_at, last_event_json, first_seen_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(chat_id) DO UPDATE SET
+          type = excluded.type,
+          title = excluded.title,
+          username = excluded.username,
+          is_forum = excluded.is_forum,
+          bot_status = excluded.bot_status,
+          added_by_user_id = excluded.added_by_user_id,
+          joined_at = excluded.joined_at,
+          last_event_json = excluded.last_event_json,
+          updated_at = excluded.updated_at
+      `).run(
+        observation.chatId,
+        observation.type,
+        title,
+        username,
+        isForum ? 1 : 0,
+        botStatus,
+        addedByUserId,
+        joinedAt,
+        lastEventJson,
+        firstSeenAt,
+        observedAt,
+      );
+      return this.telegramChat(observation.chatId)!;
+    });
+  }
+
+  recordTelegramTopic(
+    chatId: number,
+    topicId: number,
+    name = "",
+    observedAt = Date.now() / 1000,
+  ): TelegramTopicRecord {
+    return this.transaction(() => {
+      const current = this.db.prepare(
+        "SELECT * FROM telegram_topics WHERE chat_id = ? AND topic_id = ?",
+      ).get(chatId, topicId) as Row | undefined;
+      const topicName = name || (current ? String(current.name) : "");
+      const firstSeenAt = current ? Number(current.first_seen_at) : observedAt;
+      this.db.prepare(`
+        INSERT INTO telegram_topics (chat_id, topic_id, name, first_seen_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(chat_id, topic_id) DO UPDATE SET
+          name = excluded.name,
+          updated_at = excluded.updated_at
+      `).run(chatId, topicId, topicName, firstSeenAt, observedAt);
+      return this.telegramTopic(chatId, topicId)!;
+    });
+  }
+
+  telegramChat(chatId: number): TelegramChatRecord | null {
+    const row = this.db.prepare(
+      "SELECT * FROM telegram_chats WHERE chat_id = ?",
+    ).get(chatId) as Row | undefined;
+    return row ? this.toTelegramChat(row) : null;
+  }
+
+  telegramTopic(chatId: number, topicId: number): TelegramTopicRecord | null {
+    const row = this.db.prepare(
+      "SELECT * FROM telegram_topics WHERE chat_id = ? AND topic_id = ?",
+    ).get(chatId, topicId) as Row | undefined;
+    return row ? this.toTelegramTopic(row) : null;
+  }
+
+  listTelegramChats(): TelegramChatRecord[] {
+    return (this.db.prepare(
+      "SELECT * FROM telegram_chats ORDER BY updated_at DESC, chat_id",
+    ).all() as Row[]).map((row) => this.toTelegramChat(row));
+  }
+
+  listTelegramTopics(chatId?: number): TelegramTopicRecord[] {
+    const rows = chatId === undefined
+      ? this.db.prepare(
+        "SELECT * FROM telegram_topics ORDER BY chat_id, updated_at DESC, topic_id",
+      ).all()
+      : this.db.prepare(
+        "SELECT * FROM telegram_topics WHERE chat_id = ? " +
+          "ORDER BY updated_at DESC, topic_id",
+      ).all(chatId);
+    return (rows as Row[]).map((row) => this.toTelegramTopic(row));
+  }
+
+  private toTelegramChat(row: Row): TelegramChatRecord {
+    return {
+      chatId: Number(row.chat_id),
+      type: String(row.type),
+      title: String(row.title),
+      username: String(row.username),
+      isForum: Number(row.is_forum) === 1,
+      botStatus: String(row.bot_status),
+      addedByUserId: row.added_by_user_id === null ? null : Number(row.added_by_user_id),
+      joinedAt: row.joined_at === null ? null : Number(row.joined_at),
+      lastEventJson: String(row.last_event_json),
+      firstSeenAt: Number(row.first_seen_at),
+      updatedAt: Number(row.updated_at),
+    };
+  }
+
+  private toTelegramTopic(row: Row): TelegramTopicRecord {
+    return {
+      chatId: Number(row.chat_id),
+      topicId: Number(row.topic_id),
+      name: String(row.name),
+      firstSeenAt: Number(row.first_seen_at),
+      updatedAt: Number(row.updated_at),
+    };
   }
 
   private recoverAfterRestart(): void {

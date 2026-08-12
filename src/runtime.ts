@@ -68,6 +68,13 @@ const AMBIENT_DECISION_SCHEMA: JsonRecord = {
   required: ["should_reply", "reply_to_message_id", "answer"],
   additionalProperties: false,
 };
+
+const ACTIVE_BOT_MEMBERSHIP_STATUSES = new Set([
+  "creator",
+  "administrator",
+  "member",
+  "restricted",
+]);
 const MAX_AMBIENT_ANSWER_LENGTH = 3_900;
 
 interface AmbientDecision {
@@ -284,6 +291,14 @@ export class SummateRuntime {
         this.lastTelegramPoll = Date.now() / 1000;
         for (const update of updates) {
           const nextOffset = Math.max(offset ?? 0, Number(update.update_id ?? 0) + 1);
+          const membership = record(update.my_chat_member);
+          if (membership) {
+            try {
+              this.handleChatMemberUpdate(membership);
+            } catch (error) {
+              console.error("could not record Telegram membership update", error);
+            }
+          }
           const message = record(update.message);
           if (message) {
             try {
@@ -319,10 +334,91 @@ export class SummateRuntime {
     ];
   }
 
+  private handleChatMemberUpdate(update: TelegramObject): void {
+    const chat = record(update.chat);
+    const actor = record(update.from);
+    const oldMember = record(update.old_chat_member);
+    const newMember = record(update.new_chat_member);
+    const chatId = Number(chat?.id ?? 0);
+    const newStatus = String(newMember?.status ?? "");
+    if (!chat || !chatId || !newStatus) return;
+    const oldStatus = String(oldMember?.status ?? "");
+    const observedAt = Number(update.date ?? 0) || Date.now() / 1000;
+    const joined =
+      !ACTIVE_BOT_MEMBERSHIP_STATUSES.has(oldStatus) &&
+      ACTIVE_BOT_MEMBERSHIP_STATUSES.has(newStatus);
+    const actorId = Number(actor?.id ?? 0);
+    this.state.recordTelegramChat({
+      chatId,
+      type: String(chat.type ?? "unknown"),
+      title: this.telegramChatTitle(chat),
+      username: String(chat.username ?? ""),
+      isForum: chat.is_forum === true,
+      botStatus: newStatus,
+      ...(joined
+        ? {
+            joinedAt: observedAt,
+            ...(actorId ? { addedByUserId: actorId } : {}),
+          }
+        : {}),
+      lastEventJson: JSON.stringify(update),
+      observedAt,
+    });
+  }
+
+  private observeTelegramMessage(message: TelegramObject, chat: TelegramObject): void {
+    const chatId = Number(chat.id ?? 0);
+    const chatType = String(chat.type ?? "");
+    if (!chatId || !["group", "supergroup", "channel"].includes(chatType)) return;
+    const observedAt = Number(message.date ?? 0) || Date.now() / 1000;
+    const title = this.telegramChatTitle(chat);
+    const username = typeof chat.username === "string" ? chat.username : undefined;
+    const isForum = typeof chat.is_forum === "boolean" ? chat.is_forum : undefined;
+    const knownChat = this.state.telegramChat(chatId);
+    if (
+      !knownChat ||
+      knownChat.type !== chatType ||
+      (title && knownChat.title !== title) ||
+      (username !== undefined && knownChat.username !== username) ||
+      (isForum !== undefined && knownChat.isForum !== isForum)
+    ) {
+      this.state.recordTelegramChat({
+        chatId,
+        type: chatType,
+        title,
+        ...(username !== undefined ? { username } : {}),
+        ...(isForum !== undefined ? { isForum } : {}),
+        observedAt,
+      });
+    }
+    if (chatType === "channel") return;
+    const createdTopic = record(message.forum_topic_created);
+    const editedTopic = record(message.forum_topic_edited);
+    const topicName = String(createdTopic?.name ?? editedTopic?.name ?? "").trim();
+    const topicId = Number(message.message_thread_id ?? 0);
+    const knownTopic = this.state.telegramTopic(chatId, topicId);
+    if (!knownTopic || (topicName && knownTopic.name !== topicName)) {
+      this.state.recordTelegramTopic(chatId, topicId, topicName, observedAt);
+    }
+  }
+
+  private telegramChatTitle(chat: TelegramObject): string {
+    const title = String(chat.title ?? "").trim();
+    if (title) return title;
+    const personName = [chat.first_name, chat.last_name]
+      .filter((part): part is string => typeof part === "string" && Boolean(part.trim()))
+      .join(" ")
+      .trim();
+    if (personName) return personName;
+    const username = String(chat.username ?? "").trim();
+    return username ? `@${username}` : "";
+  }
+
   private async handleMessage(message: TelegramObject): Promise<void> {
     const [chatId, topicId, senderId] = this.messageLocation(message);
     const chat = record(message.chat) ?? {};
     const sender = record(message.from) ?? {};
+    this.observeTelegramMessage(message, chat);
     if (!chatId || !senderId || sender.is_bot === true) return;
     const chatType = String(chat.type ?? "");
     const conversation = this.state.byTopic(chatId, topicId);
@@ -488,6 +584,55 @@ export class SummateRuntime {
     return { accepted: true, notify: false };
   }
 
+  private telegramConnectionsText(): string {
+    const chats = this.state.listTelegramChats();
+    if (chats.length === 0) {
+      return [
+        "Подключённых Telegram-групп пока нет.",
+        "Добавьте бота в группу — событие появится здесь автоматически.",
+      ].join("\n");
+    }
+    const lines = ["Обнаруженные Telegram-чаты:"];
+    for (const chat of chats) {
+      const title = chat.title || (chat.username ? `@${chat.username}` : "без названия");
+      lines.push(
+        "",
+        `- ${title}`,
+        `  chat_id: ${chat.chatId}, type: ${chat.type}, bot: ${chat.botStatus}`,
+      );
+      if (chat.joinedAt !== null) {
+        const actor = chat.addedByUserId === null ? "неизвестно" : String(chat.addedByUserId);
+        lines.push(
+          `  добавил user_id: ${actor}, дата: ${new Date(chat.joinedAt * 1_000).toISOString()}`,
+        );
+      }
+      const topics = this.state.listTelegramTopics(chat.chatId);
+      if (topics.length === 0) {
+        lines.push(
+          chat.type === "supergroup" && chat.isForum
+            ? "  топики пока не обнаружены — бот должен увидеть сообщение в нужном топике"
+            : "  доступных топиков пока не обнаружено",
+        );
+        continue;
+      }
+      for (const topic of topics) {
+        const topicName = topic.name || (topic.topicId === 0 ? "общий чат" : "название не получено");
+        const binding = this.state.byTopic(chat.chatId, topic.topicId);
+        lines.push(
+          `  topic_id: ${topic.topicId} «${topicName}» → ` +
+            (binding ? `${binding.projectId}/${binding.workspaceId}` : "не привязан"),
+        );
+      }
+    }
+    lines.push(
+      "",
+      "Привязка:",
+      "/bind_topic <chat_id> <topic_id> <project> [workspace]",
+      "Пример: /bind_topic -1001234567890 42 summate repo",
+    );
+    return lines.join("\n");
+  }
+
   private async handleCommand(
     chatId: number,
     topicId: number,
@@ -573,6 +718,125 @@ export class SummateRuntime {
         topicId,
         messageId,
       );
+      return;
+    }
+    if (command === "/topics") {
+      if (!isAdministrator) {
+        await this.reply(chatId, topicId, messageId, "Команда доступна только администратору.");
+        return;
+      }
+      if (chatType !== "private") {
+        await this.reply(
+          chatId,
+          topicId,
+          messageId,
+          "Список Telegram-групп и топиков доступен только в личном чате с ботом.",
+        );
+        return;
+      }
+      await this.replyLong(chatId, topicId, messageId, this.telegramConnectionsText());
+      return;
+    }
+    if (command === "/bind_topic") {
+      if (!isAdministrator) {
+        await this.reply(chatId, topicId, messageId, "Команда доступна только администратору.");
+        return;
+      }
+      if (chatType !== "private") {
+        await this.reply(
+          chatId,
+          topicId,
+          messageId,
+          "Удалённо привязывать топики можно только в личном чате с ботом.",
+        );
+        return;
+      }
+      const parts = argument.split(/\s+/).filter(Boolean);
+      if (parts.length < 3 || parts.length > 4) {
+        await this.reply(
+          chatId,
+          topicId,
+          messageId,
+          "Использование: /bind_topic <chat_id> <topic_id> <project> [workspace]",
+        );
+        return;
+      }
+      const targetChatId = Number(parts[0]);
+      const targetTopicId = Number(parts[1]);
+      if (
+        !Number.isSafeInteger(targetChatId) ||
+        targetChatId === 0 ||
+        !Number.isSafeInteger(targetTopicId) ||
+        targetTopicId < 0
+      ) {
+        await this.reply(chatId, topicId, messageId, "Некорректные chat_id или topic_id.");
+        return;
+      }
+      const targetChat = this.state.telegramChat(targetChatId);
+      const targetTopic = this.state.telegramTopic(targetChatId, targetTopicId);
+      if (!targetChat || !targetTopic) {
+        await this.reply(
+          chatId,
+          topicId,
+          messageId,
+          "Этот топик ещё не обнаружен. Проверьте /topics и отправьте сообщение в нужном топике.",
+        );
+        return;
+      }
+      if (targetChat.type !== "supergroup") {
+        await this.reply(
+          chatId,
+          topicId,
+          messageId,
+          `Привязка типа ${targetChat.type} не поддерживается: нужна Telegram supergroup.`,
+        );
+        return;
+      }
+      if (["left", "kicked"].includes(targetChat.botStatus)) {
+        await this.reply(
+          chatId,
+          topicId,
+          messageId,
+          `Бот больше не состоит в выбранной группе: status=${targetChat.botStatus}.`,
+        );
+        return;
+      }
+      const targetConversation = this.state.byTopic(targetChatId, targetTopicId);
+      if (
+        targetConversation &&
+        (this.processors.has(targetConversation.id) ||
+          this.state.pendingAll(targetConversation.id).length > 0)
+      ) {
+        await this.reply(
+          chatId,
+          topicId,
+          messageId,
+          "В выбранном топике есть активная или ожидающая задача. Сначала выполните /cancel в нём.",
+        );
+        return;
+      }
+      try {
+        const project = this.projects.project(parts[2]!);
+        const workspace = project.workspace(parts[3] ?? "");
+        const bound = this.state.bind(targetChatId, targetTopicId, project.id, workspace.id);
+        const targetTitle = targetChat.title || String(targetChat.chatId);
+        const topicTitle = targetTopic.name || String(targetTopic.topicId);
+        await this.reply(
+          chatId,
+          topicId,
+          messageId,
+          [
+            "Топик привязан:",
+            `${targetTitle} / ${topicTitle}`,
+            `chat_id: ${targetChatId}, topic_id: ${targetTopicId}`,
+            `Project: ${project.id}/${workspace.id}`,
+            `conversation: ${bound.id}`,
+          ].join("\n"),
+        );
+      } catch (error) {
+        if (!(error instanceof ConfigError)) throw error;
+        await this.reply(chatId, topicId, messageId, error.message);
+      }
       return;
     }
     if (command === "/projects") {
@@ -776,6 +1040,20 @@ export class SummateRuntime {
 
   private async reply(chatId: number, topicId: number, messageId: number, text: string): Promise<void> {
     await this.telegram.sendMessage(chatId, text, { topicId, replyTo: messageId });
+  }
+
+  private async replyLong(
+    chatId: number,
+    topicId: number,
+    messageId: number,
+    text: string,
+  ): Promise<void> {
+    for (const [index, chunk] of splitMessage(text).entries()) {
+      await this.telegram.sendMessage(chatId, chunk, {
+        topicId,
+        ...(index === 0 ? { replyTo: messageId } : {}),
+      });
+    }
   }
 
   private provisioningKey(chatId: number, topicId: number): string {

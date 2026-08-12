@@ -55,6 +55,7 @@ test("owners control projects while group participants get read-only Q&A", async
     chatType: "private" | "supergroup",
     topicId = 0,
     replyToBot = false,
+    chatTitle = "",
   ): Promise<void> => {
     messageId += 1;
     await handleMessage({
@@ -62,7 +63,11 @@ test("owners control projects while group participants get read-only Q&A", async
       message_thread_id: topicId,
       text,
       from: { id: senderId },
-      chat: { id: chatId, type: chatType },
+      chat: {
+        id: chatId,
+        type: chatType,
+        ...(chatTitle ? { title: chatTitle, is_forum: true } : {}),
+      },
       ...(replyToBot
         ? {
             reply_to_message: {
@@ -100,6 +105,55 @@ test("owners control projects while group participants get read-only Q&A", async
     assert.match(replies.at(-1) ?? "", /\*Только для администратора\*/);
     assert.match(replies.at(-1) ?? "", /`\/project_create shop 123456789 backend`/);
     assert.equal(replyOptions.at(-1)?.parseMode, "MarkdownV2");
+
+    const handleChatMemberUpdate = (
+      runtime as unknown as {
+        handleChatMemberUpdate(update: TelegramObject): void;
+      }
+    ).handleChatMemberUpdate.bind(runtime);
+    handleChatMemberUpdate({
+      date: 1_700_000_000,
+      from: { id: 1, first_name: "Admin" },
+      chat: {
+        id: -300,
+        type: "supergroup",
+        title: "Engineering",
+        is_forum: true,
+      },
+      old_chat_member: { status: "left" },
+      new_chat_member: { status: "administrator" },
+    });
+    assert.equal(runtime.state.telegramChat(-300)?.addedByUserId, 1);
+    assert.equal(runtime.state.telegramChat(-300)?.botStatus, "administrator");
+    await send(1, "/topics", 1, "private");
+    assert.match(replies.at(-1) ?? "", /Engineering/);
+    assert.match(replies.at(-1) ?? "", /топики пока не обнаружены/);
+    await handleMessage({
+      message_id: 999,
+      message_thread_id: 44,
+      date: 1_700_000_100,
+      from: { id: 1 },
+      chat: {
+        id: -300,
+        type: "supergroup",
+        title: "Engineering",
+        is_forum: true,
+      },
+      forum_topic_created: { name: "Backend" },
+    });
+    assert.equal(runtime.state.telegramTopic(-300, 44)?.name, "Backend");
+
+    await send(1, "/topics", 1, "private");
+    assert.match(replies.at(-1) ?? "", /topic_id: 44 «Backend» → не привязан/);
+    await send(42, "/topics", 42, "private");
+    assert.match(replies.at(-1) ?? "", /только администратору/);
+    await send(1, "/bind_topic -300 44 summate repo", 1, "private");
+    assert.equal(runtime.state.byTopic(-300, 44)?.projectId, "summate");
+    assert.match(replies.at(-1) ?? "", /Топик привязан/);
+    await send(1, "/topics", 1, "private");
+    assert.match(replies.at(-1) ?? "", /topic_id: 44 «Backend» → summate\/repo/);
+    await send(1, "/bind_topic -300 44 summate repo", -300, "supergroup", 44);
+    assert.match(replies.at(-1) ?? "", /только в личном чате/);
 
     const beforeUnknown = replies.length;
     await send(999, "/projects", 999, "private");
