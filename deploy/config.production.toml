@@ -5,6 +5,9 @@ effort = "medium"
 # A safe starting point for a 4 GiB VPS. Increase on a larger server.
 max_parallel_conversations = 2
 stream_interval_sec = 1.0
+participant_batch_sec = 20
+participant_rate_limit_messages = 12
+participant_rate_limit_window_sec = 60
 network_access = true
 
 [health]

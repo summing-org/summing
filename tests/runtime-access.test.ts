@@ -36,9 +36,11 @@ test("owners control projects while group participants get read-only Q&A", async
   );
   const runtime = new SummateRuntime(config);
   const replies: string[] = [];
+  const replyOptions: Array<{ parseMode?: string }> = [];
   let replyId = 100;
-  runtime.telegram.sendMessage = async (_chatId, text) => {
+  runtime.telegram.sendMessage = async (_chatId, text, options) => {
     replies.push(text);
+    replyOptions.push(options ?? {});
     replyId += 1;
     return replyId;
   };
@@ -52,6 +54,7 @@ test("owners control projects while group participants get read-only Q&A", async
     chatId: number,
     chatType: "private" | "supergroup",
     topicId = 0,
+    replyToBot = false,
   ): Promise<void> => {
     messageId += 1;
     await handleMessage({
@@ -60,6 +63,14 @@ test("owners control projects while group participants get read-only Q&A", async
       text,
       from: { id: senderId },
       chat: { id: chatId, type: chatType },
+      ...(replyToBot
+        ? {
+            reply_to_message: {
+              message_id: 500,
+              from: { id: 500, is_bot: true, username: "summate_bot" },
+            },
+          }
+        : {}),
     });
   };
   const waitFor = async (predicate: () => boolean): Promise<void> => {
@@ -77,6 +88,18 @@ test("owners control projects while group participants get read-only Q&A", async
     await waitFor(() => replies.some((reply) => reply.includes("Проект создан: beta")));
     assert.equal(runtime.projects.owner("alpha"), 42);
     assert.equal(runtime.projects.owner("beta"), 77);
+
+    await send(42, "/help", 42, "private");
+    assert.match(replies.at(-1) ?? "", /\*Помощь по Summate\*/);
+    assert.match(replies.at(-1) ?? "", /Пример: `\/bind shop backend`/);
+    assert.match(replies.at(-1) ?? "", /Пример: `\/remember Все даты в API передаём в UTC`/);
+    assert.doesNotMatch(replies.at(-1) ?? "", /Только для администратора|project_create/);
+    assert.equal(replyOptions.at(-1)?.parseMode, "MarkdownV2");
+
+    await send(1, "/help", 1, "private");
+    assert.match(replies.at(-1) ?? "", /\*Только для администратора\*/);
+    assert.match(replies.at(-1) ?? "", /`\/project_create shop 123456789 backend`/);
+    assert.equal(replyOptions.at(-1)?.parseMode, "MarkdownV2");
 
     const beforeUnknown = replies.length;
     await send(999, "/projects", 999, "private");
@@ -98,20 +121,113 @@ test("owners control projects while group participants get read-only Q&A", async
 
     let startedConversation = "";
     Object.assign(runtime, {
+      telegramBotId: 500,
+      telegramUsername: "summate_bot",
       startProcessor: (conversation: { id: string }): void => {
         startedConversation = conversation.id;
       },
     });
     await send(999, "Как устроена авторизация?", -100, "supergroup", 5);
     const bound = runtime.state.byTopic(-100, 5)!;
-    assert.equal(startedConversation, bound.id);
+    assert.equal(startedConversation, "");
     assert.deepEqual(
-      runtime.state.pendingAll(bound.id).map((item) => [item.text, item.access]),
-      [["Как устроена авторизация?", "read-only"]],
+      runtime.state.pendingAll(bound.id).map((item) => [
+        item.text,
+        item.access,
+        item.senderId,
+        item.responseMode,
+      ]),
+      [["Как устроена авторизация?", "read-only", 999, "ambient"]],
+    );
+    await send(999, "@summate_bot, как устроена авторизация?", -100, "supergroup", 5);
+    assert.equal(startedConversation, bound.id);
+    await send(999, "А токены где проверяются?", -100, "supergroup", 5, true);
+    assert.deepEqual(
+      runtime.state.pendingAll(bound.id).map((item) => item.responseMode),
+      ["ambient", "direct", "direct"],
     );
     await send(999, "/cancel", -100, "supergroup", 5);
     assert.match(replies.at(-1) ?? "", /гостевом режиме команды отключены/);
-    assert.equal(runtime.state.pendingAll(bound.id).length, 1);
+    assert.equal(runtime.state.pendingAll(bound.id).length, 3);
+
+    const beforeRateLimit = runtime.state.pendingAll(bound.id).length;
+    for (let index = 0; index < 12; index += 1) {
+      await send(888, `Фоновое сообщение ${index}`, -100, "supergroup", 5);
+    }
+    const beforeNotice = replies.length;
+    await send(888, "@summate_bot ответь", -100, "supergroup", 5);
+    assert.equal(runtime.state.pendingAll(bound.id).length, beforeRateLimit + 12);
+    assert.equal(replies.length, beforeNotice + 1);
+    assert.match(replies.at(-1) ?? "", /Слишком много сообщений/);
+    await send(888, "@summate_bot ещё раз", -100, "supergroup", 5);
+    assert.equal(replies.length, beforeNotice + 1);
+
+    const parseAmbientDecision = (
+      runtime as unknown as {
+        parseAmbientDecision(
+          response: string,
+          candidates: number[],
+        ): { shouldReply: boolean; replyToMessageId: number | null; answer: string } | null;
+      }
+    ).parseAmbientDecision.bind(runtime);
+    assert.deepEqual(
+      parseAmbientDecision(
+        '{"should_reply":false,"reply_to_message_id":null,"answer":""}',
+        [10],
+      ),
+      { shouldReply: false, replyToMessageId: null, answer: "" },
+    );
+    assert.deepEqual(
+      parseAmbientDecision(
+        '{"should_reply":true,"reply_to_message_id":10,"answer":"Полезный ответ"}',
+        [10],
+      ),
+      { shouldReply: true, replyToMessageId: 10, answer: "Полезный ответ" },
+    );
+    assert.equal(
+      parseAmbientDecision(
+        '{"should_reply":true,"reply_to_message_id":999,"answer":"Не туда"}',
+        [10],
+      ),
+      null,
+    );
+    const longDecision = parseAmbientDecision(
+      JSON.stringify({
+        should_reply: true,
+        reply_to_message_id: 10,
+        answer: "а".repeat(5_000),
+      }),
+      [10],
+    );
+    assert.equal(longDecision?.answer.length, 3_900);
+    assert.match(longDecision?.answer ?? "", /…$/);
+
+    const executedModes: string[] = [];
+    Object.assign(runtime, {
+      executeRun: async (
+        _conversationId: string,
+        _prompt: string,
+        _replyTo: number,
+        inputIds: number[],
+        _access: string,
+        responseMode: string,
+      ): Promise<void> => {
+        executedModes.push(responseMode);
+        runtime.state.consume(inputIds);
+      },
+    });
+    const conversationLoop = (
+      runtime as unknown as { conversationLoop(conversationId: string): Promise<void> }
+    ).conversationLoop.bind(runtime);
+    await conversationLoop(bound.id);
+    assert.deepEqual(executedModes, ["direct"]);
+    assert.ok(runtime.state.pendingAll(bound.id).every((item) => item.responseMode === "ambient"));
+    (
+      runtime as unknown as { ambientReady: Set<string> }
+    ).ambientReady.add(bound.id);
+    await conversationLoop(bound.id);
+    assert.deepEqual(executedModes, ["direct", "ambient"]);
+    assert.equal(runtime.state.pendingAll(bound.id).length, 0);
 
     let readOnlyOptions: Record<string, unknown> = {};
     runtime.codex.startThread = async (_cwd, _model, options) => {
@@ -186,6 +302,7 @@ test("owners control projects while group participants get read-only Q&A", async
     await waitFor(() => cloneCancelled);
     assert.match(replies.at(-1) ?? "", /Останавливаю создание проекта/);
   } finally {
+    runtime.requestStop();
     runtime.state.close();
     await runtime.telegram.close();
     rmSync(root, { recursive: true, force: true });

@@ -46,6 +46,9 @@ export class RuntimeConfig {
     readonly effort: string,
     readonly networkAccess: boolean,
     readonly projects: ReadonlyMap<string, ProjectConfig>,
+    readonly participantBatchSeconds = 20,
+    readonly participantMessagesPerWindow = 12,
+    readonly participantRateLimitWindowSeconds = 60,
   ) {}
 
   project(projectId: string): ProjectConfig {
@@ -214,5 +217,26 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig 
     String(agent.effort || "medium").trim(),
     Boolean(agent.network_access ?? true),
     loadProjects(raw.projects),
+    boundedNumber(
+      agent.participant_batch_sec ?? 20,
+      "agent.participant_batch_sec",
+      5,
+      120,
+      false,
+    ),
+    boundedNumber(
+      agent.participant_rate_limit_messages ?? 12,
+      "agent.participant_rate_limit_messages",
+      1,
+      100,
+      true,
+    ),
+    boundedNumber(
+      agent.participant_rate_limit_window_sec ?? 60,
+      "agent.participant_rate_limit_window_sec",
+      10,
+      3_600,
+      false,
+    ),
   );
 }

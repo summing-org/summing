@@ -76,13 +76,18 @@ export class TelegramAPI {
   async sendMessage(
     chatId: number,
     text: string,
-    options: { topicId?: number; replyTo?: number } = {},
+    options: {
+      topicId?: number;
+      replyTo?: number;
+      parseMode?: "MarkdownV2";
+    } = {},
   ): Promise<number> {
     const payload: TelegramObject = {
       chat_id: chatId,
       text: text.slice(0, 4_096) || "…",
       disable_web_page_preview: true,
     };
+    if (options.parseMode) payload.parse_mode = options.parseMode;
     if (options.topicId) payload.message_thread_id = options.topicId;
     if (options.replyTo) {
       payload.reply_parameters = {

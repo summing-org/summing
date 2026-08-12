@@ -1,6 +1,6 @@
-# Summate 8.2: архитектура, эксплуатация и разработка
+# Summate 8.3: архитектура, эксплуатация и разработка
 
-> Версия: **8.2.0**
+> Версия: **8.3.0**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
 > Последняя сверка с кодом: **12 августа 2026 года**.
 
@@ -72,8 +72,9 @@ npm start
 health port, процесс не имитирует успешный запуск: он завершается, а причина
 попадает в journal.
 
-При старте runtime также ищет сохранённые `pending_inputs` и возобновляет их
-обработку. Поэтому после рестарта работа может начаться без нового сообщения.
+При старте runtime также ищет сохранённые `pending_inputs`: direct-очередь
+возобновляется сразу, а ambient-очередь получает новое окно агрегации. Поэтому
+после рестарта работа может начаться без нового сообщения.
 Если очередь пуста, runtime только ждёт Telegram updates и события Codex;
 публичный HTTP-сервис не запускается.
 
@@ -163,6 +164,14 @@ read-only Q&A thread. Он может спрашивать об исходник
 slash-команды блокируются до Codex. Read-only thread не видит editor history,
 runtime identity/project memory, `.env` и файлы ключей.
 
+Чтобы runtime получал каждое обычное сообщение, бот должен быть администратором
+forum group либо иметь отключённый Privacy Mode. Во втором варианте используйте
+`@BotFather` → `/setprivacy` → `Disable`, затем удалите и заново добавьте бота в
+группу: Telegram применяет изменение privacy после повторного добавления. При
+стандартном включённом режиме не-администратор видит только адресованные ему
+команды и replies, поэтому на полный direct/ambient routing полагаться нельзя. См.
+[официальное описание Privacy Mode](https://core.telegram.org/bots/features#privacy-mode).
+
 В обычном приватном чате `message_thread_id` равен нулю, поэтому весь чат является
 одной Conversation. Для нескольких параллельных контекстов предназначена
 Telegram forum group.
@@ -170,7 +179,9 @@ Telegram forum group.
 ### 3.4. Run
 
 Run — один пользовательский turn внутри Conversation. Каждый Run имеет
-`access_mode`: `write` для администратора/owner или `read-only` для участника.
+`access_mode`: `write` для администратора/owner или `read-only` для участника, а
+также `response_mode`: `direct` для явного запроса или `ambient` для фонового
+семантического анализа.
 
 Инварианты:
 
@@ -182,14 +193,44 @@ Run — один пользовательский turn внутри Conversation
 - Run не является отдельным долго живущим task-объектом;
 - история Run хранится для диагностики, а смысловой контекст хранит Codex thread.
 
-## 4. Новые сообщения во время Run
+## 4. Маршрутизация сообщений
 
-Пока editor Codex работает, сообщения владельца делятся на два типа. Сообщения
-read-only участников всегда являются follow-up и никогда не могут steer editor
-turn. Очередь сохраняет общий порядок, но соседние inputs разных `access_mode`
-запускаются отдельными Run и никогда не объединяются в один prompt.
+У `pending_inputs` есть две независимые оси: полномочие `access_mode` (`write` или
+`read-only`) и намерение ответа `response_mode` (`direct` или `ambient`). Editor
+inputs никогда не объединяются с participant inputs, а ambient batch никогда не
+может steer активный editor turn.
 
-### 4.1. Steer
+### 4.1. Прямое обращение участника
+
+Упоминание `@username_бота` или reply на сообщение самого бота получает
+`response_mode=direct`. Такой input имеет приоритет над ожидающей ambient-очередью
+и запускается без batch-delay. Это явный запрос на ответ, но всё ещё в отдельном
+read-only thread: запускать команды или изменять Project от этого нельзя.
+
+### 4.2. Фоновый смысловой анализ
+
+Остальные сообщения участников получают `response_mode=ambient`. Первый input
+запускает тихий таймер `participant_batch_sec`; новые сообщения до его истечения
+собираются в один пакет. После таймера Codex получает JSON-массив с Telegram
+message/user id и текстом, а `turn/start.outputSchema` требует строгое решение:
+отвечать ли, какому исходному сообщению и каким текстом.
+
+Ответ допустим только когда он существенно помогает обсуждению Project: это
+конкретный вопрос по реализации, вероятная фактическая ошибка, блокер, риск или
+решение, требующее уточнения. Приветствия, подтверждения, шутки, повторы, общая
+болтовня, мнения и просьбы выполнить действие остаются без ответа. Отрицательное
+или невалидное решение ничего не отправляет в Telegram. Для положительного
+решения runtime дополнительно проверяет, что выбранный message id действительно
+входил в пакет, ограничивает ответ одним Telegram-сообщением и отвечает reply на
+него без промежуточного `⚙️ Работаю…`.
+
+До записи в очередь действует sliding-window rate limit по паре group/user. По
+умолчанию принимаются 12 сообщений за 60 секунд. Лишние ambient-сообщения
+отбрасываются молча; при лишнем direct-обращении одно уведомление о лимите может
+быть отправлено не чаще одного окна. Администратор и Project owner этим лимитом
+не ограничены.
+
+### 4.3. Steer
 
 Steer меняет уже выполняющийся turn. Он создаётся:
 
@@ -201,7 +242,7 @@ Summate вызывает официальный `turn/steer` с `expectedTurnId`
 закрылся, сообщение не теряется: оно остаётся и становится частью следующего
 turn.
 
-### 4.2. Follow-up
+### 4.4. Follow-up владельца
 
 Обычное сообщение во время Run не создаёт параллельную задачу в том же topic. Оно
 попадает в `pending_inputs` как follow-up.
@@ -216,17 +257,18 @@ turn.
 Сообщение ставится в очередь без отдельного служебного ответа, чтобы не засорять
 topic.
 
-### 4.3. Стриминг
+### 4.5. Стриминг
 
-В начале Run бот отправляет `⚙️ Работаю…`. Дельты
+В начале direct Run бот отправляет `⚙️ Работаю…`. Дельты
 `item/agentMessage/delta` накапливаются и не чаще заданного интервала заменяют
 текст этого сообщения через `editMessageText`.
 
 Если ответ длиннее лимита Telegram, создаются дополнительные сообщения. Reply на
 любую часть активного потока распознаётся как steer. На завершении выполняется
-принудительный flush итогового текста.
+принудительный flush итогового текста. Ambient Run не стримит внутреннее
+структурированное решение и публикует только выбранный полезный ответ.
 
-### 4.4. Telegram polling и offset
+### 4.6. Telegram polling и offset
 
 Bot API опрашивается через `getUpdates` с long-poll timeout 50 секунд; runtime
 запрашивает только updates типа `message`. HTTP-запрос имеет timeout 70 секунд и
@@ -355,7 +397,7 @@ Summate использует один execution substrate: официальны�
 | `account/login/start` | Начать ChatGPT device-code login. |
 | `thread/start` | Создать постоянный контекст Conversation. |
 | `thread/resume` | Возобновить сохранённый thread. |
-| `turn/start` | Запустить Run. |
+| `turn/start` | Запустить Run; для ambient потребовать структурированное решение через `outputSchema`. |
 | `turn/steer` | Передать указание в активный turn. |
 | `turn/interrupt` | Реализовать `/cancel`. |
 | `item/agentMessage/delta` | Стримить ответ. |
@@ -369,9 +411,10 @@ ChatGPT OAuth-токены хранит и обновляет сам Codex в в
 
 Перед каждым Run Summate создаёт запись `running` и атомарно помечает выбранные
 pending inputs как `consumed`, а затем вызывает `account/read`. Если account не
-авторизован, Run становится `failed`, бот просит выполнить `/login`, но исходный
-input автоматически в очередь не возвращается — после входа его нужно отправить
-повторно.
+авторизован, Run становится `failed`, но исходный input автоматически в очередь
+не возвращается — после входа его нужно отправить повторно. Direct editor Run
+просит выполнить `/login`, direct participant Run сообщает о недоступности, а
+ambient Run завершается без сообщения в группу.
 
 Для входа отправьте боту `/login` в **личном чате**. Summate не показывает
 device code в группе. Команда доступна только администратору. После подтверждения
@@ -447,6 +490,8 @@ requirements из [deploy/codex-requirements.toml](deploy/codex-requirements.tom
 - owner может увидеть, привязать и выполнять команды только в своём Project;
 - остальные участники привязанного group topic могут отправлять только обычные
   Q&A-сообщения; все slash-команды блокируются;
+- direct mention/reply получает приоритетный read-only ответ, остальные сообщения
+  проходят rate-limited ambient batch и могут не породить ответ;
 - Q&A использует отдельный persistent thread и именованный профиль с read-only
   project root, выключенными network/web search/extensions и denied secrets;
 - создание/клонирование Projects, `/login`, `/restart` и `/panic` доступны только
@@ -498,7 +543,7 @@ Summate принадлежит администратору, а значение
 
 | Команда | Поведение |
 |---|---|
-| `/start`, `/help` | Короткая справка. |
+| `/start`, `/help` | Подробная Markdown-справка с назначением команд и примерами; администратор также видит свой блок команд. |
 | `/login` | Device-code login; только администратор в личном чате. |
 | `/project_create <project> <owner_id> <repo>` | Создать пустой управляемый Git Project; только администратор в личном чате. |
 | `/project_clone <project> <owner_id> <repo> <git_url>` | Клонировать управляемый Git Project; только администратор в личном чате. |
@@ -555,8 +600,8 @@ SQLite хранит:
 - binding `chat_id/topic_id → project/workspace`;
 - editor и read-only Codex thread id;
 - активный turn и Telegram stream message id;
-- pending steer/follow-up с `access_mode`;
-- историю Run: access, prompt, response, status, error и timestamps;
+- pending steer/follow-up с `access_mode`, `response_mode` и Telegram user id;
+- историю Run: access/response mode, prompt, response, status, error и timestamps;
 - управляемые Projects, Workspaces и Telegram owner id;
 - последний подтверждённый Telegram update offset.
 
@@ -565,8 +610,8 @@ SQLite хранит:
 | Таблица | Содержимое |
 |---|---|
 | `conversations` | Binding, editor/read-only threads, active turn, stream message и worktree path. |
-| `pending_inputs` | Очередь `steer`/`followup`, access и состояние обработки. |
-| `runs` | Access, prompt, response, status, error и время выполнения. |
+| `pending_inputs` | Очередь, access/response mode, Telegram user id и состояние обработки. |
+| `runs` | Access/response mode, prompt, response, status, error и время выполнения. |
 | `runtime_state` | Сейчас только Telegram update offset. |
 | `managed_projects` | Динамический Project, его owner и default Workspace. |
 | `managed_workspaces` | Абсолютные пути управляемых repositories. |
@@ -589,6 +634,9 @@ Telegram-проекты находятся в SQLite и не записываю�
 | `agent.effort` | Reasoning effort. | `medium` |
 | `agent.max_parallel_conversations` | Общий предел параллельных topics. | 4 |
 | `agent.stream_interval_sec` | Частота edit Telegram. | 1.0 |
+| `agent.participant_batch_sec` | Окно агрегации ambient-сообщений. | 20 |
+| `agent.participant_rate_limit_messages` | Сообщений одного участника на окно. | 12 |
+| `agent.participant_rate_limit_window_sec` | Длина rate-limit окна. | 60 |
 | `agent.network_access` | Сеть внутри Codex sandbox. | true |
 | `health.port` | Порт health server. | 8765 |
 | `projects.<id>.name` | Отображаемое имя. | id |
@@ -601,7 +649,8 @@ Project/Workspace id имеют длину от 1 до 64 символов, на
 Project и один Workspace в нём. Пути проверяются на абсолютность при старте, но
 существование каталога проверяется только при подготовке конкретного Run.
 Допустимые диапазоны: parallel conversations — 1–32, stream interval — 0.5–10
-секунд, health port — 1–65535.
+секунд, participant batch — 5–120 секунд, participant messages — 1–100,
+rate-limit window — 10–3600 секунд, health port — 1–65535.
 
 ### 12.2. Environment
 
@@ -818,7 +867,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "8.2.0",
+  "version": "8.3.0",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",
@@ -945,10 +994,13 @@ login под другим Unix-user/Home.
 
 ### Обычное сообщение «пропало» во время ответа
 
-Оно поставлено без acknowledgement в follow-up queue. Для Project owner
-`/status` показывает `pending` текущего topic; для администратора — глобальный
-счётчик всей базы. После текущего Run сообщения этого topic будут объединены в
-следующий turn.
+Для Project owner оно поставлено без acknowledgement в direct follow-up queue;
+после текущего Run такие сообщения объединяются в следующий turn. Для обычного
+участника отсутствие ответа может быть штатным: ambient input ждёт batch-window,
+а затем модель может признать его несущественным. Для гарантированного Q&A нужно
+упомянуть `@username_бота` или ответить на сообщение бота. Если не срабатывает и
+это, проверьте Privacy Mode/права администратора бота и rate limit. `/status`
+показывает `pending` текущего topic владельцу и глобальный счётчик администратору.
 
 ### Steer не изменил текущий ответ
 

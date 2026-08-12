@@ -30,15 +30,22 @@ test("binding, input queues, and Telegram offset", () => {
       "how does logout work?",
       "followup",
       "read-only",
+      55,
+      "ambient",
     );
     assert.deepEqual(store.pending(conversation.id, "steer").map((item) => item.id), [steerId]);
     assert.deepEqual(store.pending(conversation.id, "followup").map((item) => item.id), [followId]);
     assert.deepEqual(
-      store.pendingAll(conversation.id).map((item) => [item.id, item.access]),
+      store.pendingAll(conversation.id).map((item) => [
+        item.id,
+        item.access,
+        item.senderId,
+        item.responseMode,
+      ]),
       [
-        [steerId, "write"],
-        [followId, "write"],
-        [viewerId, "read-only"],
+        [steerId, "write", 0, "direct"],
+        [followId, "write", 0, "direct"],
+        [viewerId, "read-only", 55, "ambient"],
       ],
     );
     assert.deepEqual(store.counts(), { conversations: 1, active: 1, pending: 3 });
@@ -84,6 +91,56 @@ test("restart recovers active state and steer", () => {
     assert.deepEqual(
       recovered.pending(conversation.id, "followup").map((item) => item.text),
       ["work", "continue safely"],
+    );
+  } finally {
+    recovered.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("restart restores original ambient batch inputs and reply ids", () => {
+  const { root, path, store } = tempStore();
+  const conversation = store.bind(-100, 7, "demo", "app");
+  const first = store.enqueueInput(
+    conversation.id,
+    101,
+    "Первое сообщение",
+    "followup",
+    "read-only",
+    41,
+    "ambient",
+  );
+  const second = store.enqueueInput(
+    conversation.id,
+    102,
+    "Второе сообщение",
+    "followup",
+    "read-only",
+    42,
+    "ambient",
+  );
+  store.startRun(
+    conversation.id,
+    "generated ambient prompt",
+    [first, second],
+    "read-only",
+    "ambient",
+  );
+  store.close();
+
+  const recovered = new StateStore(path);
+  try {
+    assert.deepEqual(
+      recovered.pendingAll(conversation.id).map((item) => [
+        item.telegramMessageId,
+        item.text,
+        item.senderId,
+        item.responseMode,
+      ]),
+      [
+        [101, "Первое сообщение", 41, "ambient"],
+        [102, "Второе сообщение", 42, "ambient"],
+      ],
     );
   } finally {
     recovered.close();
@@ -144,17 +201,23 @@ test("migrates existing conversations to separate read-only state", () => {
     assert.equal(migrated.get("legacy").codexThreadId, "thr_write");
     assert.equal(migrated.get("legacy").readOnlyCodexThreadId, null);
     assert.equal(migrated.pendingAll("legacy")[0]?.access, "write");
+    assert.equal(migrated.pendingAll("legacy")[0]?.senderId, 0);
+    assert.equal(migrated.pendingAll("legacy")[0]?.responseMode, "direct");
     const viewerId = migrated.enqueueInput(
       "legacy",
       10,
       "viewer question",
       "followup",
       "read-only",
+      99,
+      "ambient",
     );
     assert.deepEqual(
       migrated.pending("legacy", "followup", "read-only").map((item) => item.id),
       [viewerId],
     );
+    assert.equal(migrated.pendingAll("legacy").at(-1)?.senderId, 99);
+    assert.equal(migrated.pendingAll("legacy").at(-1)?.responseMode, "ambient");
   } finally {
     migrated.close();
     rmSync(root, { recursive: true, force: true });

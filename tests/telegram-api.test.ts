@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { splitMessage } from "../src/telegram-api.js";
+import { splitMessage, TelegramAPI } from "../src/telegram-api.js";
 
 test("splitMessage preserves content", () => {
   const text = "alpha ".repeat(1_000);
@@ -11,4 +11,24 @@ test("splitMessage preserves content", () => {
 
 test("short message stays single", () => {
   assert.deepEqual(splitMessage("hello"), ["hello"]);
+});
+
+test("sendMessage forwards the MarkdownV2 parse mode", async () => {
+  const api = new TelegramAPI("token");
+  let payload: Record<string, unknown> = {};
+  api.call = async (method, input) => {
+    assert.equal(method, "sendMessage");
+    payload = input;
+    return { message_id: 17 };
+  };
+
+  try {
+    assert.equal(
+      await api.sendMessage(42, "*Помощь*", { parseMode: "MarkdownV2" }),
+      17,
+    );
+    assert.equal(payload.parse_mode, "MarkdownV2");
+  } finally {
+    await api.close();
+  }
 });

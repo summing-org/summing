@@ -4,6 +4,11 @@ model = ""
 effort = "medium"
 max_parallel_conversations = 4
 stream_interval_sec = 1.0
+# Ambient participant messages are analyzed together after this delay.
+participant_batch_sec = 20
+# Per participant and group. Excess ambient messages are dropped silently.
+participant_rate_limit_messages = 12
+participant_rate_limit_window_sec = 60
 # Required for git fetch/push and dependency downloads inside a Codex turn.
 network_access = true
 

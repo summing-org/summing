@@ -17,6 +17,7 @@ export interface Conversation {
 }
 
 export type RunAccess = "write" | "read-only";
+export type ResponseMode = "direct" | "ambient";
 
 export interface PendingInput {
   id: number;
@@ -25,6 +26,8 @@ export interface PendingInput {
   text: string;
   mode: "steer" | "followup";
   access: RunAccess;
+  senderId: number;
+  responseMode: ResponseMode;
   createdAt: number;
 }
 
@@ -93,6 +96,10 @@ export class StateStore {
           text TEXT NOT NULL,
           mode TEXT NOT NULL CHECK(mode IN ('steer', 'followup')),
           access_mode TEXT NOT NULL DEFAULT 'write' CHECK(access_mode IN ('write', 'read-only')),
+          telegram_user_id INTEGER NOT NULL DEFAULT 0,
+          response_mode TEXT NOT NULL DEFAULT 'direct'
+            CHECK(response_mode IN ('direct', 'ambient')),
+          run_id INTEGER,
           state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending', 'consumed')),
           created_at REAL NOT NULL
         );
@@ -104,6 +111,8 @@ export class StateStore {
           turn_id TEXT,
           status TEXT NOT NULL,
           access_mode TEXT NOT NULL DEFAULT 'write' CHECK(access_mode IN ('write', 'read-only')),
+          response_mode TEXT NOT NULL DEFAULT 'direct'
+            CHECK(response_mode IN ('direct', 'ambient')),
           prompt TEXT NOT NULL,
           response TEXT NOT NULL DEFAULT '',
           error TEXT,
@@ -142,15 +151,43 @@ export class StateStore {
             "CHECK(access_mode IN ('write', 'read-only'))",
         );
       }
+      if (!pendingColumns.some((column) => column.name === "telegram_user_id")) {
+        this.db.exec(
+          "ALTER TABLE pending_inputs ADD COLUMN telegram_user_id INTEGER NOT NULL DEFAULT 0",
+        );
+      }
+      if (!pendingColumns.some((column) => column.name === "response_mode")) {
+        this.db.exec(
+          "ALTER TABLE pending_inputs ADD COLUMN response_mode TEXT NOT NULL DEFAULT 'direct' " +
+            "CHECK(response_mode IN ('direct', 'ambient'))",
+        );
+      }
+      if (!pendingColumns.some((column) => column.name === "run_id")) {
+        this.db.exec("ALTER TABLE pending_inputs ADD COLUMN run_id INTEGER");
+      }
       this.db.exec(`
         CREATE INDEX IF NOT EXISTS pending_inputs_access_lookup
         ON pending_inputs(conversation_id, access_mode, state, id)
+      `);
+      this.db.exec(`
+        CREATE INDEX IF NOT EXISTS pending_inputs_response_lookup
+        ON pending_inputs(conversation_id, response_mode, state, id)
+      `);
+      this.db.exec(`
+        CREATE INDEX IF NOT EXISTS pending_inputs_run_lookup
+        ON pending_inputs(run_id, id)
       `);
       const runColumns = this.db.prepare("PRAGMA table_info(runs)").all() as Row[];
       if (!runColumns.some((column) => column.name === "access_mode")) {
         this.db.exec(
           "ALTER TABLE runs ADD COLUMN access_mode TEXT NOT NULL DEFAULT 'write' " +
             "CHECK(access_mode IN ('write', 'read-only'))",
+        );
+      }
+      if (!runColumns.some((column) => column.name === "response_mode")) {
+        this.db.exec(
+          "ALTER TABLE runs ADD COLUMN response_mode TEXT NOT NULL DEFAULT 'direct' " +
+            "CHECK(response_mode IN ('direct', 'ambient'))",
         );
       }
     });
@@ -206,22 +243,32 @@ export class StateStore {
     this.transaction(() => {
       const abandoned = this.db
         .prepare(
-          "SELECT conversation_id, prompt, access_mode, started_at " +
+          "SELECT id, conversation_id, prompt, access_mode, response_mode, started_at " +
             "FROM runs WHERE status = 'running'",
         )
         .all() as Row[];
       const enqueue = this.db.prepare(`
         INSERT INTO pending_inputs
-          (conversation_id, telegram_message_id, text, mode, access_mode, created_at)
-        VALUES (?, 0, ?, 'followup', ?, ?)
+          (conversation_id, telegram_message_id, text, mode, access_mode, telegram_user_id,
+           response_mode, created_at)
+        VALUES (?, 0, ?, 'followup', ?, 0, ?, ?)
+      `);
+      const restoreInputs = this.db.prepare(`
+        UPDATE pending_inputs
+        SET state = 'pending', mode = 'followup', run_id = NULL
+        WHERE run_id = ?
       `);
       for (const row of abandoned) {
-        enqueue.run(
-          row.conversation_id as SQLInputValue,
-          row.prompt as SQLInputValue,
-          row.access_mode as SQLInputValue,
-          Number(row.started_at) - 0.000_001,
-        );
+        const restored = restoreInputs.run(row.id as SQLInputValue);
+        if (Number(restored.changes) === 0) {
+          enqueue.run(
+            row.conversation_id as SQLInputValue,
+            row.prompt as SQLInputValue,
+            row.access_mode as SQLInputValue,
+            row.response_mode as SQLInputValue,
+            Number(row.started_at) - 0.000_001,
+          );
+        }
       }
       this.db.prepare(`
         UPDATE runs SET status = 'interrupted', error = 'runtime restarted', completed_at = ?
@@ -363,13 +410,25 @@ export class StateStore {
     text: string,
     mode: "steer" | "followup",
     access: RunAccess = "write",
+    senderId = 0,
+    responseMode: ResponseMode = "direct",
   ): number {
     return this.transaction(() => {
       const result = this.db.prepare(`
         INSERT INTO pending_inputs
-          (conversation_id, telegram_message_id, text, mode, access_mode, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).run(conversationId, telegramMessageId, text, mode, access, Date.now() / 1000);
+          (conversation_id, telegram_message_id, text, mode, access_mode, telegram_user_id,
+           response_mode, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        conversationId,
+        telegramMessageId,
+        text,
+        mode,
+        access,
+        senderId,
+        responseMode,
+        Date.now() / 1000,
+      );
       return Number(result.lastInsertRowid);
     });
   }
@@ -380,7 +439,8 @@ export class StateStore {
     access: RunAccess = "write",
   ): PendingInput[] {
     const rows = this.db.prepare(`
-      SELECT id, conversation_id, telegram_message_id, text, mode, access_mode, created_at
+      SELECT id, conversation_id, telegram_message_id, text, mode, access_mode,
+             telegram_user_id, response_mode, created_at
       FROM pending_inputs
       WHERE conversation_id = ? AND mode = ? AND access_mode = ? AND state = 'pending'
       ORDER BY created_at, id
@@ -390,7 +450,8 @@ export class StateStore {
 
   pendingAll(conversationId: string): PendingInput[] {
     const rows = this.db.prepare(`
-      SELECT id, conversation_id, telegram_message_id, text, mode, access_mode, created_at
+      SELECT id, conversation_id, telegram_message_id, text, mode, access_mode,
+             telegram_user_id, response_mode, created_at
       FROM pending_inputs
       WHERE conversation_id = ? AND state = 'pending'
       ORDER BY created_at, id
@@ -406,6 +467,8 @@ export class StateStore {
       text: String(row.text),
       mode: String(row.mode) as PendingInput["mode"],
       access: String(row.access_mode) as RunAccess,
+      senderId: Number(row.telegram_user_id),
+      responseMode: String(row.response_mode) as ResponseMode,
       createdAt: Number(row.created_at),
     };
   }
@@ -425,17 +488,20 @@ export class StateStore {
     prompt: string,
     inputIds: number[] = [],
     access: RunAccess = "write",
+    responseMode: ResponseMode = "direct",
   ): number {
     return this.transaction(() => {
       const result = this.db.prepare(`
-        INSERT INTO runs (conversation_id, status, access_mode, prompt, started_at)
-        VALUES (?, 'running', ?, ?, ?)
-      `).run(conversationId, access, prompt, Date.now() / 1000);
+        INSERT INTO runs
+          (conversation_id, status, access_mode, response_mode, prompt, started_at)
+        VALUES (?, 'running', ?, ?, ?, ?)
+      `).run(conversationId, access, responseMode, prompt, Date.now() / 1000);
       if (inputIds.length > 0) {
         const placeholders = inputIds.map(() => "?").join(",");
         this.db.prepare(
-          `UPDATE pending_inputs SET state = 'consumed' WHERE id IN (${placeholders})`,
-        ).run(...inputIds);
+          `UPDATE pending_inputs SET state = 'consumed', run_id = ? ` +
+            `WHERE id IN (${placeholders})`,
+        ).run(Number(result.lastInsertRowid), ...inputIds);
       }
       return Number(result.lastInsertRowid);
     });

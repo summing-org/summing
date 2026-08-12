@@ -67,7 +67,16 @@ test("thread and turn requests use official v2 shapes", async () => {
     readableRoots: ["/tmp/project"],
   };
   const threadId = await client.startThread("/tmp/project/workspace", "", permissionOptions);
-  const turnId = await client.startTurn(threadId, "inspect", "/tmp/project/workspace", permissionOptions);
+  const outputSchema = {
+    type: "object",
+    properties: { should_reply: { type: "boolean" } },
+    required: ["should_reply"],
+    additionalProperties: false,
+  };
+  const turnId = await client.startTurn(threadId, "inspect", "/tmp/project/workspace", {
+    ...permissionOptions,
+    outputSchema,
+  });
   assert.deepEqual([threadId, turnId], ["thread-1", "turn-1"]);
   const threadParams = client.calls[0]?.[1] ?? {};
   assert.equal(Object.hasOwn(threadParams, "sandbox"), false);
@@ -132,6 +141,7 @@ test("thread and turn requests use official v2 shapes", async () => {
   assert.equal(Object.hasOwn(turnParams, "sandboxPolicy"), false);
   assert.equal(Object.hasOwn(turnParams, "permissions"), false);
   assert.deepEqual(turnParams.runtimeWorkspaceRoots, ["/tmp/project"]);
+  assert.deepEqual(turnParams.outputSchema, outputSchema);
   assert.equal(Object.hasOwn(turnParams, "environments"), false);
 
   await client.startThread("/tmp/project/workspace", "", {

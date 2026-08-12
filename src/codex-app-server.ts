@@ -85,7 +85,7 @@ export class CodexAppServer extends EventEmitter {
         clientInfo: {
           name: "summate_telegram",
           title: "Summate Telegram",
-          version: "8.2.0",
+          version: "8.3.0",
         },
         capabilities: {
           experimentalApi: true,
@@ -322,6 +322,7 @@ export class CodexAppServer extends EventEmitter {
       model?: string;
       effort?: string;
       networkAccess?: boolean;
+      outputSchema?: JsonRecord;
       readableRoots?: string[];
     } = {},
   ): Promise<string> {
@@ -335,6 +336,7 @@ export class CodexAppServer extends EventEmitter {
       summary: "concise",
     };
     if (options.model) params.model = options.model;
+    if (options.outputSchema) params.outputSchema = options.outputSchema;
     const result = this.record(await this.request("turn/start", params));
     const turn = this.record(result.turn);
     if (typeof turn.id !== "string") {
