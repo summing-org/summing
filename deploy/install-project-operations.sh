@@ -103,7 +103,11 @@ sed "s/replace_me/${ash_seo_revision}/" "${repo_dir}/deploy/ash-seo.schedule.jso
 chown root:summate /etc/summate-runner/schedules/ash-seo.json
 chmod 0640 /etc/summate-runner/schedules/ash-seo.json
 
-install -o root -g root -m 0644 "${repo_dir}/deploy/summate-runner.service" /etc/systemd/system/summate-runner.service
+sed "s/RUNNER_UID/${runner_uid}/g" \
+  "${repo_dir}/deploy/summate-runner.service" \
+  > /etc/systemd/system/summate-runner.service
+chown root:root /etc/systemd/system/summate-runner.service
+chmod 0644 /etc/systemd/system/summate-runner.service
 install -o root -g root -m 0644 "${repo_dir}/deploy/summate-ash-seo.service" /etc/systemd/system/summate-ash-seo.service
 install -o root -g root -m 0644 "${repo_dir}/deploy/summate-ash-seo.timer" /etc/systemd/system/summate-ash-seo.timer
 
