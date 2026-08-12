@@ -99,6 +99,9 @@ export class TelegramStream {
   text = "";
   private lastFlush = 0;
   private timer: NodeJS.Timeout | null = null;
+  private typingTimer: NodeJS.Timeout | null = null;
+  private typingActive = false;
+  private replyTo: number | null = null;
   private flushChain = Promise.resolve();
 
   constructor(
@@ -106,16 +109,42 @@ export class TelegramStream {
     readonly chatId: number,
     readonly topicId: number,
     readonly intervalSeconds: number,
+    readonly typingIntervalMilliseconds = 4_000,
   ) {}
 
-  async start(replyTo?: number): Promise<number> {
-    const messageId = await this.api.sendMessage(this.chatId, "⚙️ Работаю…", {
-      topicId: this.topicId,
-      ...(replyTo ? { replyTo } : {}),
-    });
-    this.messageIds.push(messageId);
-    this.rendered.push("⚙️ Работаю…");
-    return messageId;
+  start(replyTo?: number): void {
+    this.replyTo = replyTo ?? null;
+    this.startTyping();
+  }
+
+  private startTyping(): void {
+    if (this.typingActive) return;
+    this.typingActive = true;
+    void this.pulseTyping();
+  }
+
+  private async pulseTyping(): Promise<void> {
+    try {
+      await this.api.sendChatAction(this.chatId, "typing", this.topicId);
+    } catch (error) {
+      console.warn("could not refresh Telegram typing indicator", error);
+    } finally {
+      if (this.typingActive) {
+        this.typingTimer = setTimeout(
+          () => void this.pulseTyping(),
+          this.typingIntervalMilliseconds,
+        );
+        this.typingTimer.unref();
+      }
+    }
+  }
+
+  stopTyping(): void {
+    this.typingActive = false;
+    if (this.typingTimer) {
+      clearTimeout(this.typingTimer);
+      this.typingTimer = null;
+    }
   }
 
   append(delta: string): void {
@@ -129,6 +158,7 @@ export class TelegramStream {
   }
 
   async flush(fallback = ""): Promise<void> {
+    this.stopTyping();
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
@@ -151,7 +181,10 @@ export class TelegramStream {
         if (this.rendered[index] !== chunk) await this.api.editMessage(this.chatId, messageId, chunk);
       } else {
         this.messageIds.push(
-          await this.api.sendMessage(this.chatId, chunk, { topicId: this.topicId }),
+          await this.api.sendMessage(this.chatId, chunk, {
+            topicId: this.topicId,
+            ...(index === 0 && this.replyTo ? { replyTo: this.replyTo } : {}),
+          }),
         );
       }
       this.rendered[index] = chunk;
@@ -295,7 +328,7 @@ export class SummateRuntime {
     const account = record(this.accountState.account);
     return {
       ok: this.codex.running && !this.stopping,
-      version: "8.4.0",
+      version: "8.4.1",
       codex_running: this.codex.running,
       auth: account?.type ?? null,
       plan: account?.planType ?? null,
@@ -1386,9 +1419,8 @@ export class SummateRuntime {
         readOnlyDeniedPaths,
         access,
       );
-      const streamMessageId =
-        responseMode === "direct" ? await stream.start(replyTo) : null;
-      this.state.setActive(conversation.id, "starting", streamMessageId);
+      if (responseMode === "direct") stream.start(replyTo);
+      this.state.setActive(conversation.id, "starting", null);
       const active: ActiveRun = {
         conversation,
         threadId,
@@ -1425,7 +1457,7 @@ export class SummateRuntime {
       active.turnId = turnId;
       this.activeByTurn.set(turnId, active);
       this.state.attachTurn(runId, turnId);
-      this.state.setActive(conversation.id, turnId, streamMessageId);
+      this.state.setActive(conversation.id, turnId, null);
       if (active.cancelRequested) await this.codex.interrupt(active.threadId, turnId);
       else await this.deliverSteer(active, this.state.pending(conversation.id, "steer"));
       await active.done.promise;
@@ -1483,6 +1515,7 @@ export class SummateRuntime {
       }
     } finally {
       try {
+        stream.stopTyping();
         const active = this.activeForConversation(conversationId);
         if (active) {
           this.activeByThread.delete(active.threadId);

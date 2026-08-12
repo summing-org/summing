@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -52,7 +60,7 @@ lines.on("line", (line) => {
   }
 });
 
-test("thread and turn requests use official v2 shapes", async () => {
+test("thread and turn requests use official v2 shapes", async (context) => {
   class FakeCodex extends CodexAppServer {
     readonly calls: Array<[string, JsonRecord]> = [];
 
@@ -66,7 +74,16 @@ test("thread and turn requests use official v2 shapes", async () => {
         : { turn: { id: "turn-1" } };
     }
   }
-  const client = new FakeCodex("codex", "/tmp/codex-test");
+  const binaryFixture = mkdtempSync(join(tmpdir(), "summate-codex-release-"));
+  const releaseBin = join(binaryFixture, "release", "bin");
+  mkdirSync(releaseBin, { recursive: true });
+  const releaseExecutable = join(releaseBin, "codex");
+  writeFileSync(releaseExecutable, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const launcher = join(binaryFixture, "codex");
+  symlinkSync(releaseExecutable, launcher);
+  const canonicalReleaseBin = realpathSync(releaseBin);
+  context.after(() => rmSync(binaryFixture, { recursive: true, force: true }));
+  const client = new FakeCodex(launcher, "/tmp/codex-test");
   const permissionOptions = {
     deniedPaths: ["workspace/deep/secrets/.env"],
     networkAccess: true,
@@ -109,6 +126,7 @@ test("thread and turn requests use official v2 shapes", async () => {
             "workspace/.summate-runtime/attachments": "read",
           },
           "/tmp/project-git": "write",
+          [canonicalReleaseBin]: "read",
         },
         network: { enabled: true, domains: { "*": "allow" } },
       },
@@ -176,6 +194,7 @@ test("thread and turn requests use official v2 shapes", async () => {
             "workspace/.summate-runtime/attachments": "read",
             "workspace/deep/secrets/.env": "deny",
           },
+          [canonicalReleaseBin]: "read",
         },
         network: { enabled: false },
       },

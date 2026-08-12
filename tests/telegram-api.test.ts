@@ -33,6 +33,26 @@ test("sendMessage forwards the MarkdownV2 parse mode", async () => {
   }
 });
 
+test("sendChatAction targets the active Telegram topic", async () => {
+  const api = new TelegramAPI("token");
+  let payload: Record<string, unknown> = {};
+  api.call = async (method, input) => {
+    assert.equal(method, "sendChatAction");
+    payload = input;
+    return true;
+  };
+  try {
+    await api.sendChatAction(-10042, "typing", 17);
+    assert.deepEqual(payload, {
+      chat_id: -10042,
+      action: "typing",
+      message_thread_id: 17,
+    });
+  } finally {
+    await api.close();
+  }
+});
+
 test("getUpdates subscribes to messages and bot membership changes", async () => {
   const api = new TelegramAPI("token");
   let payload: Record<string, unknown> = {};

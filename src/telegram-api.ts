@@ -143,6 +143,12 @@ export class TelegramAPI {
     return messageId;
   }
 
+  async sendChatAction(chatId: number, action: "typing", topicId = 0): Promise<void> {
+    const payload: TelegramObject = { chat_id: chatId, action };
+    if (topicId) payload.message_thread_id = topicId;
+    await this.call("sendChatAction", payload);
+  }
+
   async editMessage(chatId: number, messageId: number, text: string): Promise<void> {
     try {
       await this.call("editMessageText", {

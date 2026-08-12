@@ -1,7 +1,7 @@
 import { EventEmitter, once } from "node:events";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { relative, resolve } from "node:path";
+import { delimiter, dirname, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { parse } from "smol-toml";
 
@@ -31,6 +31,24 @@ export class CodexProtocolError extends Error {}
 const PROJECT_PERMISSION_PROFILE = "summate-project";
 const READ_ONLY_PERMISSION_PROFILE = "summate-project-readonly";
 
+function executableReadRoot(command: string): string | null {
+  const candidates = command.includes("/")
+    ? [resolve(command)]
+    : (process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin")
+        .split(delimiter)
+        .filter(Boolean)
+        .map((directory) => resolve(directory, command));
+  for (const candidate of candidates) {
+    try {
+      accessSync(candidate, constants.X_OK);
+      return dirname(realpathSync(candidate));
+    } catch {
+      // Try the next PATH entry. start() reports a clear error if none can run.
+    }
+  }
+  return null;
+}
+
 interface WorkspacePermissionOptions {
   deniedPaths?: string[];
   gitMetadataRoots?: string[];
@@ -44,12 +62,14 @@ export class CodexAppServer extends EventEmitter {
   private readonly pending = new Map<number, PendingRequest>();
   private nextId = 1;
   private closed = false;
+  private readonly binaryReadRoot: string | null;
 
   constructor(
     readonly binary: string,
     readonly codexHome: string,
   ) {
     super();
+    this.binaryReadRoot = executableReadRoot(binary);
   }
 
   get running(): boolean {
@@ -85,7 +105,7 @@ export class CodexAppServer extends EventEmitter {
         clientInfo: {
           name: "summate_telegram",
           title: "Summate Telegram",
-          version: "8.4.0",
+          version: "8.4.1",
         },
         capabilities: {
           experimentalApi: true,
@@ -397,6 +417,11 @@ export class CodexAppServer extends EventEmitter {
       ":minimal": "read",
       ":workspace_roots": workspaceRoots,
     };
+    // Standalone installs resolve /usr/local/bin/codex into a versioned release
+    // under CODEX_HOME. Codex re-executes that binary when it launches a Linux
+    // sandbox command, so the containing bin directory must remain readable
+    // inside restricted permission profiles.
+    if (this.binaryReadRoot) filesystem[this.binaryReadRoot] = "read";
     if (!options.readOnly) {
       for (const gitMetadataRoot of options.gitMetadataRoots ?? []) {
         filesystem[resolve(gitMetadataRoot)] = "write";
