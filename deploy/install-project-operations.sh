@@ -165,5 +165,17 @@ else
   systemctl disable --now summate-ash-seo.timer >/dev/null 2>&1 || true
 fi
 
-curl --fail --silent --unix-socket /run/summate-runner/runner.sock http://localhost/health >/dev/null
+runner_healthy=0
+for attempt in $(seq 1 30); do
+  if curl --fail --silent --unix-socket /run/summate-runner/runner.sock \
+    http://localhost/health >/dev/null 2>&1; then
+    runner_healthy=1
+    break
+  fi
+  sleep 1
+done
+if [ "${runner_healthy}" != 1 ]; then
+  printf '%s\n' 'Project runner did not become healthy within 30 seconds.' >&2
+  exit 1
+fi
 printf '%s\n' 'Project Viewer proxy and isolated runner are installed.'
