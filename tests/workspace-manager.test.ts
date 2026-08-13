@@ -35,7 +35,12 @@ test("upgrades the previous identity, worktree branch, and runtime directory to 
     git(source, "commit", "-m", "initial");
 
     const workspace: WorkspaceConfig = { id: "repo", path: source };
-    const project = new ProjectConfig("demo", "Demo", "repo", new Map([["repo", workspace]]));
+    const project = new ProjectConfig(
+      "summing",
+      "SUMMING",
+      "repo",
+      new Map([["repo", workspace]]),
+    );
     const config = new RuntimeConfig(
       join(root, "data"),
       join(root, "codex"),
@@ -49,7 +54,7 @@ test("upgrades the previous identity, worktree branch, and runtime directory to 
       "",
       "medium",
       true,
-      new Map([["demo", project]]),
+      new Map([["summing", project]]),
     );
     const manager = new WorkspaceManager(config);
     const retiredIdentity = "Sum" + "mate";
@@ -68,7 +73,7 @@ test("upgrades the previous identity, worktree branch, and runtime directory to 
       id: "tg-upgrade",
       chatId: -1,
       topicId: 2,
-      projectId: "demo",
+      projectId: "summing",
       workspaceId: "repo",
       codexThreadId: null,
       readOnlyCodexThreadId: null,
@@ -84,7 +89,7 @@ test("upgrades the previous identity, worktree branch, and runtime directory to 
       "worktree",
       "add",
       "-b",
-      `${retiredPrefix}/${project.id}/${conversation.id}`,
+      `${retiredPrefix}/${retiredPrefix}/${conversation.id}`,
       worktree,
       "HEAD",
     );

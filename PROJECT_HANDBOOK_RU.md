@@ -1034,6 +1034,59 @@ sudo systemctl start summing-deploy.service
 cat /var/lib/summing/deploy/state.json
 ```
 
+### 13.8. Одноразовая миграция существующего 8.x host
+
+Версия 9.0 меняет не только UI identity, но и весь operational namespace:
+application/builder/runner users, home и config directories, environment
+variables, runtime socket, release paths, systemd units и GitHub repository.
+Поэтому старый timer не считается migration mechanism: его health rollback
+защищает работающий host от частично переименованного release.
+
+До начала должны существовать:
+
+1. опубликованный `master` с версией 9.0.0;
+2. repository `git@summing.github.com:summing-org/summing.git`, доступный тому же
+   read-only deploy key;
+3. проверенный полный snapshot VPS;
+4. ноль активных Codex runs и чистый mutable checkout.
+
+Обновите checkout и отдельно выполните preflight. Разделённая строка ниже
+нужна только для адресации pre-9 installation; после успешного перехода такой
+identity на host больше не существует.
+
+```bash
+legacy_name="sum""mate"
+legacy_repo="/opt/${legacy_name}"
+sudo -u "${legacy_name}" git -C "${legacy_repo}" fetch origin master
+sudo -u "${legacy_name}" git -C "${legacy_repo}" merge --ff-only origin/master
+sudo "${legacy_repo}/deploy/migrate-host-to-summing" --check
+```
+
+`--check` ничего не меняет. Он валидирует source/target users и paths, чистоту
+checkout, отсутствие deployment worker и active runs, доступность нового remote,
+конфликты conversation branches/runtime directories и collision self-project IDs
+в SQLite. Apply требует явного подтверждения внешнего snapshot:
+
+```bash
+sudo env SUMMING_BACKUP_CONFIRMED=1 \
+  "${legacy_repo}/deploy/migrate-host-to-summing" --apply
+```
+
+Apply сначала останавливает polling, deploy timers и runner, затем создаёт
+`/var/backups/summing-host-migration-<UTC>` с manifest, configuration copy,
+consistent SQLite backup, прежними units/current symlink/releases. После этого
+он сохраняет UID/GID при переименовании Unix accounts, переносит durable/config
+paths, переписывает только operational paths и `SUMMING_*` keys, обновляет
+SQLite references, linked-worktree metadata, runtime directory, excludes и
+conversation branch. Незакоммиченные workspace files не копируются и не
+пересоздаются: остаётся тот же worktree.
+
+Финальный этап использует обычный `deploy/activate.sh`, запускает rootless Docker
+под сохранённым runner UID, устанавливает новые units и проверяет application и
+runner health. При ошибке после начала apply не пытайтесь смешивать namespaces:
+остановите units и восстановите проверенный VPS snapshot; recovery bundle служит
+дополнительным материалом для диагностики, а не заменяет snapshot.
+
 ## 14. Операционное управление
 
 В проекте нет собственного CLI. Операционные команды стандартные:
@@ -1259,7 +1312,9 @@ src/
 └── health-server.ts        # loopback HTTP
 
 tests/
+├── brand.test.ts
 ├── config.test.ts
+├── deploy-assets.test.ts
 ├── project-catalog.test.ts
 ├── git-inspector.test.ts
 ├── project-runner.test.ts
@@ -1275,6 +1330,7 @@ tests/
 deploy/
 ├── cloud-init.yaml         # bootstrap чистого Ubuntu/Hetzner VPS
 ├── activate.sh             # сборка, установка unit и первый запуск
+├── migrate-host-to-summing # guarded one-time 8.x host migration
 ├── install-project-operations.sh # rootless Docker, Caddy, runner и timer
 ├── config.production.toml  # минимальный production config для SUMMING
 ├── summing.service         # основной Telegram runtime

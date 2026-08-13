@@ -288,6 +288,40 @@ cache 8 ГБ, HTTPS proxy, project config/data и timer unit. Пользоват
 placeholders в `/etc/summing-runner/projects/ash-seo.env` и проверьте
 `ash-seo.config.json`, затем запустите Validate и Dry run из Viewer.
 
+## Переход существующего 8.x VPS на SUMMING 9.0
+
+Переименование GitHub repository в `summing-org/summing` и проверенный VPS
+snapshot должны быть завершены **до** миграции. Обычный automatic deploy не
+может пересечь 9.0 boundary: users, paths, environment variables и units уже
+имеют новые имена.
+
+Сначала обновите только чистый mutable checkout до опубликованного `master`, не
+трогая активный release, затем запустите read-only preflight:
+
+```bash
+legacy_name="sum""mate"
+legacy_repo="/opt/${legacy_name}"
+sudo -u "${legacy_name}" git -C "${legacy_repo}" fetch origin master
+sudo -u "${legacy_name}" git -C "${legacy_repo}" merge --ff-only origin/master
+sudo "${legacy_repo}/deploy/migrate-host-to-summing" --check
+```
+
+Только после успешного preflight и проверки snapshot выполните одноразовый
+переход:
+
+```bash
+sudo env SUMMING_BACKUP_CONFIRMED=1 \
+  "${legacy_repo}/deploy/migrate-host-to-summing" --apply
+```
+
+Migration отказывается работать при активных Codex runs, deployment worker,
+конфликтующих users/paths/project IDs или недоступном новом remote. Перед
+изменениями она останавливает services и сохраняет root-only recovery bundle в
+`/var/backups/summing-host-migration-<UTC>`, включая конфигурацию, SQLite backup,
+старые units и releases. Затем переносит Unix identities и durable paths,
+обновляет SQLite/Git worktree metadata и conversation branches без удаления
+незакоммиченных файлов, запускает штатный `activate.sh` и проверяет health.
+
 ## Автоматическое обновление SUMMING
 
 `summing-deploy.timer` каждые 10 минут делает `fetch` закреплённого

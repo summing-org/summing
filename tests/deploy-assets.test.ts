@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
@@ -45,4 +45,27 @@ test("all production processes execute through the current release symlink", () 
   ]) {
     assert.match(asset(path), /\/opt\/summing-current\/dist\/src\//, path);
   }
+});
+
+test("host identity migration is guarded, recoverable, and preserves worktrees", () => {
+  const path = join(root, "deploy/migrate-host-to-summing");
+  const migration = readFileSync(path, "utf8");
+  const syntax = spawnSync("bash", ["-n", path], { encoding: "utf8" });
+
+  assert.equal(syntax.status, 0, syntax.stderr);
+  assert.notEqual(statSync(path).mode & 0o111, 0, "migration must be executable");
+  assert.match(migration, /retired_name="sum""mate"/);
+  assert.match(migration, /SUMMING_BACKUP_CONFIRMED/);
+  assert.match(migration, /trap 'on_error \$\? \$\{LINENO\}' ERR/);
+  assert.match(migration, /\.active \/\/ 0/);
+  assert.match(migration, /git ls-remote --exit-code/);
+  assert.match(migration, /sqlite3 "\$\{retired_home\}\/data\/state\.sqlite3"/);
+  assert.match(migration, /\.backup '\$\{recovery_dir\}\/state\.sqlite3'/);
+  assert.match(migration, /usermod --login/);
+  assert.match(migration, /groupmod --new-name/);
+  assert.match(migration, /git -C "\$\{worktree\}" branch -m/);
+  assert.match(migration, /pre-9-releases/);
+  assert.match(migration, /"\$\{product_repo\}\/deploy\/activate\.sh"/);
+  assert.match(migration, /\/run\/summing-runner\/runner\.sock/);
+  assert.doesNotMatch(migration, /rm\s+-rf/);
 });

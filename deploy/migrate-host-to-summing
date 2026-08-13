@@ -1,0 +1,569 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+umask 0077
+
+retired_name="sum""mate"
+retired_title="Sum""mate"
+product_name=summing
+retired_upper=$(printf '%s' "${retired_name}" | tr '[:lower:]' '[:upper:]')
+product_upper=SUMMING
+
+retired_app_user=${retired_name}
+product_app_user=${product_name}
+retired_builder_user=${retired_name}-builder
+product_builder_user=${product_name}-builder
+retired_runner_user=${retired_name}-runner
+product_runner_user=${product_name}-runner
+
+retired_repo=/opt/${retired_name}
+product_repo=/opt/${product_name}
+retired_current=/opt/${retired_name}-current
+product_current=/opt/${product_name}-current
+retired_releases=/opt/${retired_name}-releases
+product_releases=/opt/${product_name}-releases
+retired_home=/var/lib/${retired_name}
+product_home=/var/lib/${product_name}
+retired_builder_home=/var/lib/${retired_name}-builder
+product_builder_home=/var/lib/${product_name}-builder
+retired_runner_home=/var/lib/${retired_name}-runner
+product_runner_home=/var/lib/${product_name}-runner
+retired_runs=/var/lib/${retired_name}-runs
+product_runs=/var/lib/${product_name}-runs
+retired_config=/etc/${retired_name}
+product_config=/etc/${product_name}
+retired_runner_config=/etc/${retired_name}-runner
+product_runner_config=/etc/${product_name}-runner
+
+expected_remote=${SUMMING_MIGRATION_EXPECTED_REMOTE:-git@summing.github.com:summing-org/summing.git}
+mode=${1:---check}
+migration_started=0
+recovery_dir=
+
+fail() {
+  printf 'ERROR: %s\n' "$*" >&2
+  if [ "${migration_started}" = 1 ]; then
+    printf 'Migration already changed host state. Restore the verified VPS snapshot.\n' >&2
+    printf 'Recovery bundle: %s\n' "${recovery_dir}" >&2
+  fi
+  exit 2
+}
+
+on_error() {
+  local code=$1
+  local line=$2
+  trap - ERR
+  printf 'ERROR: host migration failed at line %s (exit %s).\n' "${line}" "${code}" >&2
+  if [ "${migration_started}" = 1 ]; then
+    printf 'Restore the verified VPS snapshot before retrying.\n' >&2
+    printf 'Recovery bundle: %s\n' "${recovery_dir}" >&2
+  fi
+  exit "${code}"
+}
+
+trap 'on_error $? ${LINENO}' ERR
+
+note() {
+  printf '%s\n' "$*"
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || fail "required command is missing: $1"
+}
+
+require_absent() {
+  [ ! -e "$1" ] && [ ! -L "$1" ] || fail "target already exists: $1"
+}
+
+require_source() {
+  [ -e "$1" ] || [ -L "$1" ] || fail "source is missing: $1"
+}
+
+unit_enabled() {
+  systemctl is-enabled --quiet "$1" 2>/dev/null
+}
+
+rewrite_file() {
+  local path=$1
+  [ -f "${path}" ] || return 0
+  grep -Iq . "${path}" 2>/dev/null || return 0
+  sed -i \
+    -e "s/${retired_upper}_/${product_upper}_/g" \
+    -e "s#/opt/${retired_name}#/opt/${product_name}#g" \
+    -e "s#/var/lib/${retired_name}#/var/lib/${product_name}#g" \
+    -e "s#/etc/${retired_name}#/etc/${product_name}#g" \
+    -e "s#/run/${retired_name}#/run/${product_name}#g" \
+    -e "s#/repositories/${retired_name}/#/repositories/${product_name}/#g" \
+    -e "s#/projects/${retired_name}/#/projects/${product_name}/#g" \
+    -e "s#summing-org/${retired_name}\.git#summing-org/${product_name}.git#g" \
+    "${path}"
+}
+
+rewrite_product_config() {
+  local path=$1
+  [ -f "${path}" ] || return 0
+  rewrite_file "${path}"
+  sed -i \
+    -e "s/^\[projects\.${retired_name}\]/[projects.${product_name}]/" \
+    -e "s/^\[projects\.${retired_name}\./[projects.${product_name}./" \
+    -e "s/^name = \"${retired_title}\"$/name = \"${product_upper}\"/" \
+    "${path}"
+}
+
+rewrite_identity_asset() {
+  local path=$1
+  [ -f "${path}" ] || return 0
+  sed -i \
+    -e "s/${retired_name}/${product_name}/g" \
+    -e "s/${retired_title}/${product_upper}/g" \
+    -e "s/${retired_upper}/${product_upper}/g" \
+    "${path}"
+}
+
+mapped_operational_path() {
+  local value=$1
+  value=${value/#${retired_repo}/${product_repo}}
+  value=${value/#${retired_home}/${product_home}}
+  value=${value//\/repositories\/${retired_name}\//\/repositories\/${product_name}\/}
+  value=${value//\/projects\/${retired_name}\//\/projects\/${product_name}\/}
+  printf '%s\n' "${value}"
+}
+
+migrated_branch_name() {
+  local branch=$1
+  local suffix=${branch#${retired_name}/}
+  if [[ "${suffix}" == "${retired_name}/"* ]]; then
+    suffix=${product_name}/${suffix#${retired_name}/}
+  fi
+  printf '%s/%s\n' "${product_name}" "${suffix}"
+}
+
+rewrite_tree() {
+  local root=$1
+  [ -d "${root}" ] || return 0
+  while IFS= read -r -d '' path; do
+    rewrite_file "${path}"
+  done < <(find "${root}" -type f -print0)
+}
+
+move_optional() {
+  local source=$1
+  local target=$2
+  if [ -e "${source}" ] || [ -L "${source}" ]; then
+    require_absent "${target}"
+    mv "${source}" "${target}"
+  fi
+}
+
+rename_account() {
+  local source_user=$1
+  local target_user=$2
+  local target_home=$3
+  if id "${source_user}" >/dev/null 2>&1; then
+    usermod --login "${target_user}" --home "${target_home}" --move-home "${source_user}"
+  fi
+  if getent group "${source_user}" >/dev/null 2>&1; then
+    groupmod --new-name "${target_user}" "${source_user}"
+  fi
+}
+
+check_worktrees() {
+  local worktree_root=${retired_home}/data/worktrees
+  [ -d "${worktree_root}" ] || return 0
+  local git_file
+  for git_file in "${worktree_root}"/*/.git; do
+    [ -f "${git_file}" ] || continue
+    local worktree=${git_file%/.git}
+    local retired_runtime=${worktree}/.${retired_name}-runtime
+    local product_runtime=${worktree}/.${product_name}-runtime
+    if [ -e "${retired_runtime}" ] && [ -e "${product_runtime}" ]; then
+      fail "both runtime directories exist: ${worktree}"
+    fi
+    local branch
+    branch=$(runuser -u "${retired_app_user}" -- \
+      git -C "${worktree}" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+    if [[ "${branch}" == "${retired_name}/"* ]]; then
+      local target_branch
+      target_branch=$(migrated_branch_name "${branch}")
+      if runuser -u "${retired_app_user}" -- \
+        git -C "${worktree}" show-ref --verify --quiet "refs/heads/${target_branch}"; then
+        fail "target conversation branch already exists: ${target_branch}"
+      fi
+    fi
+  done
+}
+
+upgrade_worktrees() {
+  local worktree_root=${product_home}/data/worktrees
+  [ -d "${worktree_root}" ] || return 0
+  local git_file
+  for git_file in "${worktree_root}"/*/.git; do
+    [ -f "${git_file}" ] || continue
+    local worktree=${git_file%/.git}
+    local metadata
+    metadata=$(sed -n 's/^gitdir: //p' "${git_file}")
+    [ -n "${metadata}" ] || fail "invalid linked-worktree metadata: ${git_file}"
+    local mapped_metadata
+    mapped_metadata=$(mapped_operational_path "${metadata}")
+    printf 'gitdir: %s\n' "${mapped_metadata}" > "${git_file}"
+    if [ -f "${mapped_metadata}/gitdir" ]; then
+      rewrite_file "${mapped_metadata}/gitdir"
+    fi
+
+    local retired_runtime=${worktree}/.${retired_name}-runtime
+    local product_runtime=${worktree}/.${product_name}-runtime
+    if [ -d "${retired_runtime}" ]; then
+      require_absent "${product_runtime}"
+      mv "${retired_runtime}" "${product_runtime}"
+    fi
+    rewrite_identity_asset "${product_runtime}/CONTEXT.md"
+
+    local branch
+    branch=$(runuser -u "${product_app_user}" -- \
+      git -C "${worktree}" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+    if [[ "${branch}" == "${retired_name}/"* ]]; then
+      local target_branch
+      target_branch=$(migrated_branch_name "${branch}")
+      runuser -u "${product_app_user}" -- \
+        git -C "${worktree}" branch -m "${target_branch}"
+    fi
+
+    local exclude
+    exclude=$(runuser -u "${product_app_user}" -- \
+      git -C "${worktree}" rev-parse --git-path info/exclude)
+    sed -i "/^\.${retired_name}-runtime\/$/d" "${exclude}"
+    if ! grep -qxF ".${product_name}-runtime/" "${exclude}"; then
+      printf '.%s-runtime/\n' "${product_name}" >> "${exclude}"
+    fi
+    runuser -u "${product_app_user}" -- git -C "${worktree}" status --short >/dev/null
+  done
+}
+
+upgrade_state_database() {
+  local database=${product_home}/data/state.sqlite3
+  [ -f "${database}" ] || return 0
+  sqlite3 "${database}" <<SQL
+PRAGMA foreign_keys=OFF;
+BEGIN IMMEDIATE;
+UPDATE managed_workspaces
+SET path = replace(
+  replace(
+    replace(path, '${retired_home}', '${product_home}'),
+    '${retired_repo}', '${product_repo}'
+  ),
+  '/repositories/${retired_name}/', '/repositories/${product_name}/'
+)
+WHERE instr(path, '${retired_home}') > 0
+   OR instr(path, '${retired_repo}') > 0
+   OR instr(path, '/repositories/${retired_name}/') > 0;
+UPDATE conversations
+SET worktree_path = replace(worktree_path, '${retired_home}', '${product_home}')
+WHERE worktree_path IS NOT NULL AND instr(worktree_path, '${retired_home}') > 0;
+UPDATE pending_inputs
+SET attachments_json = replace(attachments_json, '${retired_home}', '${product_home}')
+WHERE instr(attachments_json, '${retired_home}') > 0;
+UPDATE managed_workspaces
+SET project_id = '${product_name}'
+WHERE project_id = '${retired_name}'
+  AND NOT EXISTS (SELECT 1 FROM managed_projects WHERE id = '${product_name}');
+UPDATE conversations
+SET project_id = '${product_name}'
+WHERE project_id = '${retired_name}'
+  AND NOT EXISTS (SELECT 1 FROM managed_projects WHERE id = '${product_name}');
+UPDATE managed_projects
+SET id = '${product_name}', name = '${product_upper}'
+WHERE id = '${retired_name}'
+  AND NOT EXISTS (SELECT 1 FROM managed_projects WHERE id = '${product_name}');
+UPDATE managed_projects
+SET name = '${product_upper}'
+WHERE lower(name) = '${retired_name}';
+COMMIT;
+PRAGMA foreign_keys=ON;
+PRAGMA foreign_key_check;
+SQL
+}
+
+case "${mode}" in
+  --check|--apply) ;;
+  *) fail "usage: $0 [--check|--apply]" ;;
+esac
+
+if [ "${EUID}" -ne 0 ]; then
+  fail "run this migration as root"
+fi
+
+for command in cp curl date find getent git grep groupmod id install jq ln loginctl \
+  mktemp mv npm rm runuser sed sqlite3 systemctl tr usermod; do
+  require_command "${command}"
+done
+
+require_source "${retired_repo}/package.json"
+require_source "${retired_repo}/VERSION"
+[ "$(tr -d '[:space:]' < "${retired_repo}/VERSION")" = 9.0.0 ] || \
+  fail "the source checkout must already contain SUMMING 9.0.0"
+require_source "${retired_home}/data"
+require_source "${retired_config}/${retired_name}.env"
+id "${retired_app_user}" >/dev/null 2>&1 || fail "source application user is missing"
+id "${retired_builder_user}" >/dev/null 2>&1 || fail "source builder user is missing"
+getent group "${retired_app_user}" >/dev/null 2>&1 || fail "source application group is missing"
+getent group "${retired_builder_user}" >/dev/null 2>&1 || fail "source builder group is missing"
+
+for user in "${product_app_user}" "${product_builder_user}" "${product_runner_user}"; do
+  if id "${user}" >/dev/null 2>&1; then fail "target user already exists: ${user}"; fi
+done
+for group in "${product_app_user}" "${product_builder_user}" "${product_runner_user}"; do
+  if getent group "${group}" >/dev/null 2>&1; then fail "target group already exists: ${group}"; fi
+done
+for path in "${product_repo}" "${product_current}" "${product_releases}" \
+  "${product_home}" "${product_builder_home}" "${product_config}"; do
+  require_absent "${path}"
+done
+if id "${retired_runner_user}" >/dev/null 2>&1; then
+  require_command docker
+  require_source "${retired_runner_home}"
+  require_source "${retired_runner_config}"
+  getent group "${retired_runner_user}" >/dev/null 2>&1 || \
+    fail "source runner group is missing"
+  require_absent "${product_runner_home}"
+  require_absent "${product_runner_config}"
+  if unit_enabled "${retired_name}-runner.service"; then
+    curl --fail --silent --unix-socket "/run/${retired_name}-runner/runner.sock" \
+      http://localhost/health >/dev/null || fail "source runner health check failed"
+  fi
+fi
+if [ -e "${retired_runs}" ]; then require_absent "${product_runs}"; fi
+if [ -e "${retired_home}/data/projects/${retired_name}" ]; then
+  require_absent "${retired_home}/data/projects/${product_name}"
+fi
+if [ -e "${retired_home}/data/repositories/${retired_name}" ]; then
+  require_absent "${retired_home}/data/repositories/${product_name}"
+fi
+
+state_database=${retired_home}/data/state.sqlite3
+if [ -f "${state_database}" ]; then
+  project_identity_count=$(sqlite3 "${state_database}" \
+    "SELECT count(*) FROM managed_projects WHERE id IN ('${retired_name}', '${product_name}');")
+  [ "${project_identity_count}" -lt 2 ] || \
+    fail "both retired and SUMMING managed project ids exist in state.sqlite3"
+fi
+
+if [ -n "$(runuser -u "${retired_app_user}" -- \
+  git -C "${retired_repo}" status --porcelain --untracked-files=no)" ]; then
+  fail "source checkout has tracked changes; commit or restore them before migration"
+fi
+if systemctl is-active --quiet "${retired_name}-deploy.service"; then
+  fail "deployment worker is active; wait for it to finish"
+fi
+if systemctl is-active --quiet "${retired_name}.service"; then
+  health=$(curl --fail --silent http://127.0.0.1:8765/health) || \
+    fail "running application health endpoint is unavailable"
+  active=$(printf '%s' "${health}" | jq -er '.active // 0') || fail "invalid health response"
+  [ "${active}" = 0 ] || fail "wait for ${active} active run(s) before migration"
+fi
+
+runuser -u "${retired_app_user}" -- env \
+  HOME="${retired_home}" GIT_TERMINAL_PROMPT=0 \
+  git ls-remote --exit-code "${expected_remote}" refs/heads/master >/dev/null || \
+  fail "the renamed repository is not reachable at ${expected_remote}"
+check_worktrees
+
+note "Preflight passed."
+note "Repository: ${retired_repo} -> ${product_repo}"
+note "Durable state: ${retired_home} -> ${product_home}"
+note "Expected remote: ${expected_remote}"
+
+if [ "${mode}" = --check ]; then
+  note "No changes made. Re-run with SUMMING_BACKUP_CONFIRMED=1 and --apply after a VPS snapshot."
+  exit 0
+fi
+
+[ "${SUMMING_BACKUP_CONFIRMED:-}" = 1 ] || \
+  fail "set SUMMING_BACKUP_CONFIRMED=1 only after creating and verifying a VPS snapshot"
+
+timestamp=$(date -u +%Y%m%dT%H%M%SZ)
+recovery_dir=/var/backups/summing-host-migration-${timestamp}
+app_enabled=0
+runner_enabled=0
+schedule_enabled=0
+unit_enabled "${retired_name}.service" && app_enabled=1
+unit_enabled "${retired_name}-runner.service" && runner_enabled=1
+unit_enabled "${retired_name}-ash-seo.timer" && schedule_enabled=1
+
+systemctl disable --now \
+  "${retired_name}-deploy.path" \
+  "${retired_name}-deploy.timer" >/dev/null 2>&1 || true
+systemctl disable --now "${retired_name}-ash-seo.timer" >/dev/null 2>&1 || true
+systemctl stop \
+  "${retired_name}-ash-seo.service" \
+  "${retired_name}-runner.service" \
+  "${retired_name}.service" >/dev/null 2>&1 || true
+for unit in "${retired_name}.service" "${retired_name}-runner.service"; do
+  if systemctl is-active --quiet "${unit}"; then fail "failed to stop ${unit}"; fi
+done
+
+install -d -o root -g root -m 0700 "${recovery_dir}"
+install -d -o root -g root -m 0700 "${recovery_dir}/systemd"
+printf '%s\n' \
+  "started_at=${timestamp}" \
+  "source_repo=${retired_repo}" \
+  "source_head=$(runuser -u "${retired_app_user}" -- \
+    git -C "${retired_repo}" rev-parse HEAD)" \
+  "source_remote=$(runuser -u "${retired_app_user}" -- \
+    git -C "${retired_repo}" remote get-url origin)" \
+  > "${recovery_dir}/manifest"
+cp -a "${retired_config}" "${recovery_dir}/config"
+if [ -d "${retired_runner_config}" ]; then
+  cp -a "${retired_runner_config}" "${recovery_dir}/runner-config"
+fi
+if [ -f "${retired_home}/data/state.sqlite3" ]; then
+  sqlite3 "${retired_home}/data/state.sqlite3" \
+    ".backup '${recovery_dir}/state.sqlite3'"
+fi
+migration_started=1
+
+runner_uid=
+if id "${retired_runner_user}" >/dev/null 2>&1; then
+  runner_uid=$(id -u "${retired_runner_user}")
+  loginctl disable-linger "${retired_runner_user}" >/dev/null 2>&1 || true
+  systemctl stop "user@${runner_uid}.service" >/dev/null 2>&1 || true
+fi
+
+rename_account "${retired_app_user}" "${product_app_user}" "${product_home}"
+rename_account "${retired_builder_user}" "${product_builder_user}" "${product_builder_home}"
+if [ -n "${runner_uid}" ]; then
+  rename_account "${retired_runner_user}" "${product_runner_user}" "${product_runner_home}"
+  usermod --append --groups "${product_app_user}" "${product_runner_user}"
+fi
+
+for subordinate_file in /etc/subuid /etc/subgid; do
+  if [ -f "${subordinate_file}" ]; then
+    sed -i \
+      "s/^${retired_runner_user}:/${product_runner_user}:/" \
+      "${subordinate_file}"
+  fi
+done
+
+move_optional "${retired_config}" "${product_config}"
+move_optional "${retired_runner_config}" "${product_runner_config}"
+move_optional "${retired_runs}" "${product_runs}"
+move_optional "${retired_repo}" "${product_repo}"
+if [ -e "${retired_current}" ] || [ -L "${retired_current}" ]; then
+  mv "${retired_current}" "${recovery_dir}/pre-9-current-link"
+fi
+if [ -d "${retired_releases}" ]; then
+  mv "${retired_releases}" "${recovery_dir}/pre-9-releases"
+fi
+install -d -o root -g root -m 0711 "${product_releases}"
+ln -s "${product_repo}" "${product_current}"
+
+retired_env=${product_config}/${retired_name}.env
+product_env=${product_config}/${product_name}.env
+if [ -f "${retired_env}" ]; then mv "${retired_env}" "${product_env}"; fi
+rewrite_tree "${product_config}"
+rewrite_tree "${product_runner_config}"
+rewrite_tree "${product_runner_home}/.config"
+rewrite_product_config "${product_home}/data/config.toml"
+rewrite_identity_asset "${product_home}/data/memory/identity.md"
+
+move_optional \
+  "${product_home}/data/projects/${retired_name}" \
+  "${product_home}/data/projects/${product_name}"
+move_optional \
+  "${product_home}/data/repositories/${retired_name}" \
+  "${product_home}/data/repositories/${product_name}"
+rewrite_identity_asset "${product_home}/data/projects/${product_name}/memory.md"
+
+upgrade_state_database
+upgrade_worktrees
+
+runuser -u "${product_app_user}" -- \
+  git -C "${product_repo}" remote set-url origin "${expected_remote}"
+deploy_env=${product_config}/deploy.env
+if grep -q '^SUMMING_DEPLOY_EXPECTED_REMOTE=' "${deploy_env}" 2>/dev/null; then
+  sed -i \
+    "s#^SUMMING_DEPLOY_EXPECTED_REMOTE=.*#SUMMING_DEPLOY_EXPECTED_REMOTE=${expected_remote}#" \
+    "${deploy_env}"
+else
+  printf 'SUMMING_DEPLOY_EXPECTED_REMOTE=%s\n' "${expected_remote}" >> "${deploy_env}"
+fi
+
+ln -sfn "${product_home}/.local/bin/codex" /usr/local/bin/codex
+
+if [ -n "${runner_uid}" ]; then
+  loginctl enable-linger "${product_runner_user}"
+  systemctl start "user@${runner_uid}.service"
+  runuser -u "${product_runner_user}" -- env \
+    HOME="${product_runner_home}" \
+    XDG_RUNTIME_DIR="/run/user/${runner_uid}" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${runner_uid}/bus" \
+    systemctl --user daemon-reload
+  runuser -u "${product_runner_user}" -- env \
+    HOME="${product_runner_home}" \
+    XDG_RUNTIME_DIR="/run/user/${runner_uid}" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${runner_uid}/bus" \
+    systemctl --user restart docker
+  while IFS= read -r image; do
+    [ -n "${image}" ] || continue
+    if [[ "${image}" == "${retired_name}/"* ]]; then
+      migrated_image=${image/#${retired_name}\//${product_name}/}
+      runuser -u "${product_runner_user}" -- env \
+        HOME="${product_runner_home}" \
+        DOCKER_HOST="unix:///run/user/${runner_uid}/docker.sock" \
+        docker image tag "${image}" "${migrated_image}"
+      runuser -u "${product_runner_user}" -- env \
+        HOME="${product_runner_home}" \
+        DOCKER_HOST="unix:///run/user/${runner_uid}/docker.sock" \
+        docker image rm "${image}"
+    fi
+  done < <(runuser -u "${product_runner_user}" -- env \
+    HOME="${product_runner_home}" \
+    DOCKER_HOST="unix:///run/user/${runner_uid}/docker.sock" \
+    docker image ls --format '{{.Repository}}:{{.Tag}}')
+  temporary_runner_unit=$(mktemp /run/summing-runner.service.XXXXXX)
+  sed "s/RUNNER_UID/${runner_uid}/g" \
+    "${product_repo}/deploy/summing-runner.service" > "${temporary_runner_unit}"
+  install -o root -g root -m 0644 "${temporary_runner_unit}" \
+    /etc/systemd/system/summing-runner.service
+  rm -f "${temporary_runner_unit}"
+  install -o root -g root -m 0644 \
+    "${product_repo}/deploy/summing-ash-seo.service" \
+    /etc/systemd/system/summing-ash-seo.service
+  install -o root -g root -m 0644 \
+    "${product_repo}/deploy/summing-ash-seo.timer" \
+    /etc/systemd/system/summing-ash-seo.timer
+  systemctl daemon-reload
+  if [ "${runner_enabled}" = 1 ]; then systemctl enable summing-runner.service; fi
+fi
+
+for unit in \
+  "${retired_name}.service" \
+  "${retired_name}-runner.service" \
+  "${retired_name}-ash-seo.service" \
+  "${retired_name}-ash-seo.timer" \
+  "${retired_name}-deploy.service" \
+  "${retired_name}-deploy.path" \
+  "${retired_name}-deploy.timer"; do
+  if [ -f "/etc/systemd/system/${unit}" ]; then
+    mv "/etc/systemd/system/${unit}" "${recovery_dir}/systemd/${unit}"
+  fi
+done
+systemctl daemon-reload
+
+"${product_repo}/deploy/activate.sh"
+if [ "${app_enabled}" = 0 ]; then systemctl disable --now summing.service; fi
+if [ "${schedule_enabled}" = 1 ]; then systemctl enable --now summing-ash-seo.timer; fi
+
+id "${retired_app_user}" >/dev/null 2>&1 && fail "retired application user still exists"
+[ ! -e "${retired_repo}" ] || fail "retired repository path still exists"
+[ ! -e "${retired_config}" ] || fail "retired configuration path still exists"
+if [ "${app_enabled}" = 1 ]; then
+  curl --fail --silent http://127.0.0.1:8765/health >/dev/null
+fi
+if [ "${runner_enabled}" = 1 ]; then
+  curl --fail --silent --unix-socket /run/summing-runner/runner.sock \
+    http://localhost/health >/dev/null
+fi
+
+printf 'completed_at=%s\n' "$(date -u +%Y%m%dT%H%M%SZ)" >> "${recovery_dir}/manifest"
+note "SUMMING host migration completed."
+note "Recovery bundle: ${recovery_dir}"

@@ -401,8 +401,14 @@ export class WorkspaceManager {
       signal,
     );
     if (current.code !== 0) return;
-    const legacyBranch = branch.replace(/^summing\//, `${LEGACY_BRANCH_PREFIX}/`);
-    if (current.stdout.trim() === legacyBranch) {
+    const branchSuffix = branch.replace(/^summing\//, "");
+    const legacyBranches = new Set([`${LEGACY_BRANCH_PREFIX}/${branchSuffix}`]);
+    if (branchSuffix.startsWith("summing/")) {
+      legacyBranches.add(
+        `${LEGACY_BRANCH_PREFIX}/${LEGACY_BRANCH_PREFIX}/${branchSuffix.slice("summing/".length)}`,
+      );
+    }
+    if (legacyBranches.has(current.stdout.trim())) {
       await this.runGit(target, signal, "branch", "-m", branch);
     }
   }
