@@ -172,13 +172,17 @@ test("thread and turn requests use official v2 shapes", async (context) => {
 
   await client.startThread("/tmp/project/workspace", "", {
     deniedPaths: ["workspace/deep/secrets/.env"],
+    disableEnvironments: true,
     networkAccess: true,
     gitMetadataRoots: ["/tmp/project-git"],
     readableRoots: ["/tmp/project"],
     readOnly: true,
+    ephemeral: true,
   });
   const readOnlyParams = client.calls[2]?.[1] ?? {};
   assert.equal(readOnlyParams.permissions, "summing-project-readonly");
+  assert.deepEqual(readOnlyParams.environments, []);
+  assert.equal(readOnlyParams.ephemeral, true);
   assert.deepEqual(readOnlyParams.runtimeWorkspaceRoots, ["/tmp/project"]);
   assert.deepEqual(readOnlyParams.config, {
     default_permissions: "summing-project-readonly",
@@ -248,6 +252,9 @@ test("thread and turn requests use official v2 shapes", async (context) => {
     ".summing-runtime/tmp": "write",
     ".summing-runtime/attachments": "read",
   });
+
+  await client.unsubscribeThread("thread-1");
+  assert.deepEqual(client.calls.at(-1), ["thread/unsubscribe", { threadId: "thread-1" }]);
   assert.equal(
     Object.keys(emptyWorkspaceRules).some((path) => path.endsWith("PROJECT_MEMORY.md")),
     false,

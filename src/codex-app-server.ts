@@ -52,6 +52,8 @@ function executableReadRoot(command: string): string | null {
 
 interface WorkspacePermissionOptions {
   deniedPaths?: string[];
+  disableEnvironments?: boolean;
+  ephemeral?: boolean;
   gitMetadataRoots?: string[];
   networkAccess?: boolean;
   readableRoots?: string[];
@@ -305,6 +307,8 @@ export class CodexAppServer extends EventEmitter {
       selectedCapabilityRoots: [],
     };
     if (model) params.model = model;
+    if (options.disableEnvironments) params.environments = [];
+    if (options.ephemeral !== undefined) params.ephemeral = options.ephemeral;
     const result = this.record(await this.request("thread/start", params));
     const thread = this.record(result.thread);
     if (typeof thread.id !== "string") {
@@ -337,6 +341,10 @@ export class CodexAppServer extends EventEmitter {
       permissions: permissionProfile,
       config: this.permissionConfig(cwd, options),
     });
+  }
+
+  async unsubscribeThread(threadId: string): Promise<void> {
+    await this.request("thread/unsubscribe", { threadId }, 30_000);
   }
 
   async startTurn(

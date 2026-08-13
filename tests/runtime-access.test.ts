@@ -56,6 +56,7 @@ test("owners control projects while group participants get read-only Q&A", async
     topicId = 0,
     replyToBot = false,
     chatTitle = "",
+    repliedText = "",
   ): Promise<void> => {
     messageId += 1;
     await handleMessage({
@@ -73,6 +74,7 @@ test("owners control projects while group participants get read-only Q&A", async
             reply_to_message: {
               message_id: 500,
               from: { id: 500, is_bot: true, username: "summing_bot" },
+              ...(repliedText ? { text: repliedText } : {}),
             },
           }
         : {}),
@@ -174,13 +176,76 @@ test("owners control projects while group participants get read-only Q&A", async
     assert.match(replies.at(-1) ?? "", /гостевом режиме команды отключены/);
 
     let startedConversation = "";
+    const unboundQuestions: Array<{
+      chatId: number;
+      topicId: number;
+      messageId: number;
+      senderId: number;
+      text: string;
+      context: Array<{ text: string; author?: "bot" }>;
+    }> = [];
     Object.assign(runtime, {
       telegramBotId: 500,
       telegramUsername: "summing_bot",
       startProcessor: (conversation: { id: string }): void => {
         startedConversation = conversation.id;
       },
+      startUnboundQuestion: (question: (typeof unboundQuestions)[number]): void => {
+        unboundQuestions.push(question);
+      },
     });
+
+    const beforeUnboundReplies = replies.length;
+    await send(999, "Всем привет", -100, "supergroup", 6);
+    await send(42, "Обсудим планы на вечер", -100, "supergroup", 6);
+    assert.equal(replies.length, beforeUnboundReplies);
+    assert.equal(unboundQuestions.length, 0);
+    assert.equal(runtime.state.byTopic(-100, 6), null);
+    assert.ok(runtime.state.telegramTopic(-100, 6));
+
+    await send(999, "@summing_bot, подведи итог обсуждения", -100, "supergroup", 6);
+    assert.equal(replies.length, beforeUnboundReplies);
+    assert.equal(unboundQuestions.length, 1);
+    assert.equal(unboundQuestions[0]?.topicId, 6);
+    assert.equal(unboundQuestions[0]?.senderId, 999);
+    assert.deepEqual(
+      unboundQuestions[0]?.context.map((item) => item.text),
+      ["Всем привет", "Обсудим планы на вечер"],
+    );
+    for (let index = 0; index < 25; index += 1) {
+      await send(999, `Контекст ${index}`, -100, "supergroup", 6);
+    }
+    await send(999, "@summing_bot, что было последним?", -100, "supergroup", 6);
+    assert.equal(unboundQuestions[1]?.context.length, 20);
+    assert.equal(unboundQuestions[1]?.context[0]?.text, "Контекст 5");
+    assert.equal(unboundQuestions[1]?.context.at(-1)?.text, "Контекст 24");
+    await send(
+      999,
+      "Раскрой второй пункт",
+      -100,
+      "supergroup",
+      6,
+      true,
+      "",
+      "Первый пункт: сроки. Второй пункт: риски.",
+    );
+    assert.equal(unboundQuestions[2]?.context.at(-1)?.author, "bot");
+    assert.equal(
+      unboundQuestions[2]?.context.at(-1)?.text,
+      "Первый пункт: сроки. Второй пункт: риски.",
+    );
+
+    for (let topic = 1; topic <= 101; topic += 1) {
+      await send(777, `Фоновый контекст ${topic}`, -400, "supergroup", topic);
+    }
+    const unboundRuntime = runtime as unknown as {
+      unboundTopicMessages: Map<string, unknown>;
+      unboundTopicContext(chatId: number, topicId: number): Array<{ text: string }>;
+    };
+    assert.equal(unboundRuntime.unboundTopicMessages.size, 100);
+    assert.deepEqual(unboundRuntime.unboundTopicContext(-400, 1), []);
+    assert.equal(unboundRuntime.unboundTopicContext(-400, 101)[0]?.text, "Фоновый контекст 101");
+
     await send(999, "Как устроена авторизация?", -100, "supergroup", 5);
     const bound = runtime.state.byTopic(-100, 5)!;
     assert.equal(startedConversation, "");
@@ -355,6 +420,295 @@ test("owners control projects while group participants get read-only Q&A", async
     await send(1, "/cancel", 1, "private");
     await waitFor(() => cloneCancelled);
     assert.match(replies.at(-1) ?? "", /Останавливаю создание проекта/);
+  } finally {
+    runtime.requestStop();
+    runtime.state.close();
+    await runtime.telegram.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("explicit questions in unbound topics run without Project access", async () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-runtime-unbound-"));
+  const staticPath = join(root, "summing");
+  mkdirSync(staticPath);
+  const workspace: WorkspaceConfig = { id: "repo", path: staticPath };
+  const project = new ProjectConfig(
+    "summing",
+    "SUMMING",
+    "repo",
+    new Map([["repo", workspace]]),
+    true,
+  );
+  const runtime = new SummingRuntime(
+    new RuntimeConfig(
+      join(root, "data"),
+      join(root, "codex"),
+      join(root, "worktrees"),
+      "token",
+      1,
+      "codex",
+      8765,
+      2,
+      1,
+      "",
+      "medium",
+      true,
+      new Map([["summing", project]]),
+    ),
+  );
+  const replies: Array<{
+    chatId: number;
+    text: string;
+    options: { topicId?: number; replyTo?: number } | undefined;
+  }> = [];
+  let threadOptions: Record<string, unknown> = {};
+  let turnPrompt = "";
+  let unsubscribedThread = "";
+  runtime.telegram.sendChatAction = async () => {};
+  runtime.telegram.sendMessage = async (chatId, text, options) => {
+    replies.push({ chatId, text, options });
+    return replies.length;
+  };
+  runtime.codex.account = async () => ({ account: { type: "chatgpt" } });
+  runtime.codex.startThread = async (_cwd, _model, options) => {
+    threadOptions = options as Record<string, unknown>;
+    return "thr-unbound";
+  };
+  Object.defineProperty(runtime.codex, "running", { configurable: true, get: () => true });
+  runtime.codex.unsubscribeThread = async (threadId) => {
+    unsubscribedThread = threadId;
+  };
+  const routeCodexEvent = (
+    runtime as unknown as {
+      routeCodexEvent(event: {
+        method: string;
+        params: Record<string, unknown>;
+      }): Promise<void>;
+    }
+  ).routeCodexEvent.bind(runtime);
+  runtime.codex.startTurn = async (_threadId, prompt) => {
+    turnPrompt = prompt;
+    setImmediate(() => {
+      void (async () => {
+        await routeCodexEvent({
+          method: "item/completed",
+          params: {
+            threadId: "thr-unbound",
+            turnId: "turn-unbound",
+            item: {
+              type: "agentMessage",
+              phase: "final_answer",
+              text: "Короткий ответ по обсуждению.",
+            },
+          },
+        });
+        await routeCodexEvent({
+          method: "turn/completed",
+          params: {
+            threadId: "thr-unbound",
+            turnId: "turn-unbound",
+            turn: { id: "turn-unbound", status: "completed" },
+          },
+        });
+      })();
+    });
+    return "turn-unbound";
+  };
+  const answerUnboundQuestion = (
+    runtime as unknown as {
+      answerUnboundQuestion(question: {
+        chatId: number;
+        topicId: number;
+        messageId: number;
+        senderId: number;
+        text: string;
+        hasAttachment: boolean;
+        context: Array<{
+          messageId: number;
+          senderId: number;
+          text: string;
+          author?: "bot";
+        }>;
+      }): Promise<void>;
+    }
+  ).answerUnboundQuestion.bind(runtime);
+
+  try {
+    await answerUnboundQuestion({
+      chatId: -500,
+      topicId: 77,
+      messageId: 10,
+      senderId: 999,
+      text: "@summing_bot, что решили?",
+      hasAttachment: false,
+      context: [
+        { messageId: 9, senderId: 42, text: "Релиз переносим на пятницу" },
+        { messageId: 8, senderId: 500, text: "Обсудили два риска", author: "bot" },
+      ],
+    });
+
+    assert.deepEqual(threadOptions, {
+      deniedPaths: [],
+      disableEnvironments: true,
+      ephemeral: true,
+      networkAccess: false,
+      gitMetadataRoots: [],
+      readableRoots: [join(root, "data", "unbound-topic-qa")],
+      readOnly: true,
+    });
+    assert.match(turnPrompt, /No Project or Workspace is bound/);
+    assert.match(turnPrompt, /Релиз переносим на пятницу/);
+    assert.match(turnPrompt, /"author": "bot"/);
+    assert.match(turnPrompt, /что решили/);
+    assert.equal(unsubscribedThread, "thr-unbound");
+    assert.deepEqual(replies, [
+      {
+        chatId: -500,
+        text: "Короткий ответ по обсуждению.",
+        options: { topicId: 77, replyTo: 10 },
+      },
+    ]);
+  } finally {
+    runtime.requestStop();
+    runtime.state.close();
+    await runtime.telegram.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("unbound questions have a bounded queue isolated from Project capacity", async () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-runtime-unbound-queue-"));
+  const runtime = new SummingRuntime(
+    new RuntimeConfig(
+      join(root, "data"),
+      join(root, "codex"),
+      join(root, "worktrees"),
+      "token",
+      1,
+      "codex",
+      8765,
+      1,
+      1,
+      "",
+      "medium",
+      true,
+      new Map(),
+    ),
+  );
+  const replies: string[] = [];
+  runtime.telegram.sendMessage = async (_chatId, text) => {
+    replies.push(text);
+    return replies.length;
+  };
+  let release!: () => void;
+  const gate = new Promise<void>((resolveGate) => {
+    release = resolveGate;
+  });
+  let answersStarted = 0;
+  Object.assign(runtime, {
+    answerUnboundQuestion: async (): Promise<void> => {
+      answersStarted += 1;
+      await gate;
+    },
+  });
+  const privateRuntime = runtime as unknown as {
+    startUnboundQuestion(question: {
+      chatId: number;
+      topicId: number;
+      messageId: number;
+      senderId: number;
+      text: string;
+      hasAttachment: boolean;
+      context: [];
+    }): void;
+    semaphore: { run<T>(action: () => Promise<T>): Promise<T> };
+    unboundProcessors: Set<Promise<void>>;
+  };
+  const waitFor = async (predicate: () => boolean): Promise<void> => {
+    const deadline = Date.now() + 2_000;
+    while (!predicate()) {
+      if (Date.now() >= deadline) throw new Error("timed out waiting for unbound queue");
+      await new Promise((resolveWait) => setTimeout(resolveWait, 5));
+    }
+  };
+  try {
+    for (let index = 0; index < 5; index += 1) {
+      privateRuntime.startUnboundQuestion({
+        chatId: -500,
+        topicId: 77,
+        messageId: index + 1,
+        senderId: 999,
+        text: `Вопрос ${index}`,
+        hasAttachment: false,
+        context: [],
+      });
+    }
+    await waitFor(() => answersStarted === 1 && replies.length === 1);
+    assert.equal(privateRuntime.unboundProcessors.size, 4);
+    assert.match(replies[0] ?? "", /несколько прямых вопросов/);
+
+    let projectCapacityReached = false;
+    await privateRuntime.semaphore.run(async () => {
+      projectCapacityReached = true;
+    });
+    assert.equal(projectCapacityReached, true);
+
+    release();
+    await waitFor(() => privateRuntime.unboundProcessors.size === 0);
+    assert.equal(answersStarted, 4);
+  } finally {
+    release();
+    runtime.requestStop();
+    runtime.state.close();
+    await runtime.telegram.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("stalled unbound questions time out and interrupt their Codex turn", async () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-runtime-unbound-timeout-"));
+  const runtime = new SummingRuntime(
+    new RuntimeConfig(
+      join(root, "data"),
+      join(root, "codex"),
+      join(root, "worktrees"),
+      "token",
+      1,
+      "codex",
+      8765,
+      1,
+      1,
+      "",
+      "medium",
+      true,
+      new Map(),
+    ),
+  );
+  const interrupted: string[] = [];
+  runtime.codex.interrupt = async (threadId, turnId) => {
+    interrupted.push(`${threadId}:${turnId}`);
+  };
+  const active = {
+    threadId: "thr-stalled",
+    turnId: "turn-stalled",
+    status: "running",
+    error: null as string | null,
+    done: { promise: new Promise<void>(() => {}) },
+  };
+  const waitForUnboundTurn = (
+    runtime as unknown as {
+      waitForUnboundTurn(
+        response: typeof active,
+        timeoutMilliseconds: number,
+      ): Promise<void>;
+    }
+  ).waitForUnboundTurn.bind(runtime);
+  try {
+    await waitForUnboundTurn(active, 5);
+    assert.equal(active.status, "failed");
+    assert.match(active.error ?? "", /timed out after 1s/);
+    assert.deepEqual(interrupted, ["thr-stalled:turn-stalled"]);
   } finally {
     runtime.requestStop();
     runtime.state.close();
