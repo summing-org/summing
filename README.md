@@ -276,7 +276,8 @@ Viewer всегда слушает только `127.0.0.1:8766`. Без пуб�
 ревизией проекта:
 
 ```bash
-SUMMING_VIEWER_DOMAIN=viewer.example.com \
+SUMMING_VIEWER_DOMAIN=assist.summing.org \
+SUMMING_VIEWER_REDIRECT_DOMAIN=ash.summing.org \
 ASH_SEO_REVISION=<full-commit-sha> \
 ENABLE_ASH_SEO_TIMER=0 \
 sudo /opt/summing/deploy/install-project-operations.sh
@@ -287,6 +288,9 @@ cache 8 ГБ, HTTPS proxy, project config/data и timer unit. Пользоват
 `summing` не получает Docker socket. Перед включением live timer замените
 placeholders в `/etc/summing-runner/projects/ash-seo.env` и проверьте
 `ash-seo.config.json`, затем запустите Validate и Dry run из Viewer.
+Основной production URL Mini App — `https://assist.summing.org`; прежний
+`https://ash.summing.org` остаётся только постоянным HTTPS-редиректом с
+сохранением URI для уже отправленных Telegram-кнопок.
 
 ## Переход существующего 8.x VPS на SUMMING 9.0
 

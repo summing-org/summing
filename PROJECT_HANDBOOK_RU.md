@@ -624,6 +624,14 @@ HTTPS-запрос Mini App должен содержать Telegram `initData`.
 там бот создаёт `web_app` button, поскольку Telegram предоставляет Mini App
 identity именно в private bot chat.
 
+Production Mini App работает на `https://assist.summing.org`. Installer
+принимает `SUMMING_VIEWER_DOMAIN=assist.summing.org` и необязательный
+`SUMMING_VIEWER_REDIRECT_DOMAIN=ash.summing.org`: Caddy сначала валидирует
+временный конфиг, затем атомарно устанавливает основной reverse proxy и
+постоянный redirect старого адреса с сохранением URI. Runtime получает основной
+URL через `SUMMING_VIEWER_URL`; persistent Telegram menu button не требуется,
+поскольку `/files` формирует актуальную `web_app` button при каждом ответе.
+
 До editor Codex turn host создаёт временный Git commit через отдельный index,
 не меняя branch или настоящий index worktree. После turn создаётся второй
 snapshot и сохраняется patch в `run-artifacts`. Snapshot включает tracked и

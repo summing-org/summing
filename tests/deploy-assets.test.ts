@@ -37,6 +37,19 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
   assert.match(activation, /sed "s\/RUNNER_UID\/\$\{runner_uid\}\/g"/);
 });
 
+test("Project Viewer installer supports an HTTPS domain transition", () => {
+  const path = join(root, "deploy/install-project-operations.sh");
+  const installer = readFileSync(path, "utf8");
+  const syntax = spawnSync("bash", ["-n", path], { encoding: "utf8" });
+
+  assert.equal(syntax.status, 0, syntax.stderr);
+  assert.match(installer, /SUMMING_VIEWER_REDIRECT_DOMAIN/);
+  assert.match(installer, /redir https:\/\/%s\{uri\} permanent/);
+  assert.match(installer, /caddy validate --config "\$\{temporary_caddy\}"/);
+  assert.match(installer, /mktemp \/etc\/caddy\/Caddyfile\.XXXXXX/);
+  assert.match(installer, /mv -f "\$\{temporary_caddy\}" \/etc\/caddy\/Caddyfile/);
+});
+
 test("all production processes execute through the current release symlink", () => {
   for (const path of [
     "deploy/summing.service",

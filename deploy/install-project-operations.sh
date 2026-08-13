@@ -7,6 +7,7 @@ if [ "${EUID}" -ne 0 ]; then
 fi
 
 viewer_domain=${SUMMING_VIEWER_DOMAIN:-}
+viewer_redirect_domain=${SUMMING_VIEWER_REDIRECT_DOMAIN:-}
 ash_seo_revision=${ASH_SEO_REVISION:-}
 enable_timer=${ENABLE_ASH_SEO_TIMER:-0}
 repo_dir=/opt/summing
@@ -19,6 +20,16 @@ if [ -z "${viewer_domain}" ] || [ -z "${ash_seo_revision}" ]; then
 fi
 if ! printf '%s' "${viewer_domain}" | grep -Eq '^[a-z0-9.-]+$'; then
   printf '%s\n' 'SUMMING_VIEWER_DOMAIN is invalid.' >&2
+  exit 2
+fi
+if [ -n "${viewer_redirect_domain}" ] && \
+  ! printf '%s' "${viewer_redirect_domain}" | grep -Eq '^[a-z0-9.-]+$'; then
+  printf '%s\n' 'SUMMING_VIEWER_REDIRECT_DOMAIN is invalid.' >&2
+  exit 2
+fi
+if [ -n "${viewer_redirect_domain}" ] && \
+  [ "${viewer_redirect_domain}" = "${viewer_domain}" ]; then
+  printf '%s\n' 'SUMMING_VIEWER_REDIRECT_DOMAIN must differ from SUMMING_VIEWER_DOMAIN.' >&2
   exit 2
 fi
 if ! printf '%s' "${ash_seo_revision}" | grep -Eq '^[0-9a-f]{40}$'; then
@@ -129,8 +140,22 @@ if ! command -v caddy >/dev/null 2>&1; then
   apt-get update
   DEBIAN_FRONTEND=noninteractive apt-get install -y caddy
 fi
-sed "s/VIEWER_DOMAIN/${viewer_domain}/g" "${repo_dir}/deploy/Caddyfile.viewer" > /etc/caddy/Caddyfile
-caddy validate --config /etc/caddy/Caddyfile
+temporary_caddy=$(mktemp /etc/caddy/Caddyfile.XXXXXX)
+trap 'rm -f "${temporary_caddy}"' EXIT
+sed "s/VIEWER_DOMAIN/${viewer_domain}/g" \
+  "${repo_dir}/deploy/Caddyfile.viewer" > "${temporary_caddy}"
+if [ -n "${viewer_redirect_domain}" ]; then
+  printf '\n%s {\n\tredir https://%s{uri} permanent\n}\n' \
+    "${viewer_redirect_domain}" \
+    "${viewer_domain}" \
+    >> "${temporary_caddy}"
+fi
+caddy fmt --overwrite "${temporary_caddy}"
+caddy validate --config "${temporary_caddy}"
+chown root:root "${temporary_caddy}"
+chmod 0644 "${temporary_caddy}"
+mv -f "${temporary_caddy}" /etc/caddy/Caddyfile
+trap - EXIT
 
 env_file=/etc/summing/summing.env
 if ! grep -q '^SUMMING_VIEWER_URL=' "${env_file}"; then
