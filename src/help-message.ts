@@ -1,48 +1,76 @@
+const MARKDOWN_V2_RESERVED_TEXT = /[_*[\]()~`>#+\-=|{}.!\\]/g;
+
+function text(value: string): string {
+  return value.replace(MARKDOWN_V2_RESERVED_TEXT, (character) => `\\${character}`);
+}
+
+function bold(value: string): string {
+  return `*${text(value)}*`;
+}
+
+function code(value: string): string {
+  return `\`${value.replace(/[\\`]/g, (character) => `\\${character}`)}\``;
+}
+
+function command(syntax: string, description: string): string {
+  return `${code(syntax)}${text(` — ${description}`)}`;
+}
+
+function example(value: string): string {
+  return `${text("Пример: ")}${code(value)}`;
+}
+
 export function helpMessage(isAdministrator: boolean): string {
   const lines = [
-    "*Помощь по SUMMING*",
-    "Аргументы в `<угловых скобках>` обязательны, в `[квадратных]` — нет",
+    bold("Помощь по SUMMING"),
+    `${text("Аргументы в ")}${code("<угловых скобках>")}${text(" обязательны, в ")}${code("[квадратных]")}${text(" — нет")}`,
     "",
-    "*Проекты*",
-    "`/projects` — показать доступные проекты и Workspace",
-    "`/bind <project> [workspace]` — привязать текущий topic",
-    "Пример: `/bind shop backend`",
-    "`/status` — показать версию SUMMING, состояние Codex, привязку и очередь",
-    "`/files` — открыть дерево файлов, diff и project runner",
-    "`/connections` — безопасно подключить API key или OAuth provider",
+    bold("Проекты"),
+    command("/projects", "показать доступные проекты и Workspace"),
+    command("/bind <project> [workspace]", "привязать текущий topic"),
+    example("/bind shop backend"),
+    command("/status", "показать версию SUMMING, состояние Codex, привязку и очередь"),
+    command("/files", "открыть дерево файлов, diff и project runner"),
+    command("/connections", "безопасно подключить API key или OAuth provider"),
     "",
-    "*Работа*",
-    "Отправьте задачу обычным сообщением",
-    "Пример: `Добавь валидацию email и запусти тесты`",
-    "Можно приложить document или ZIP до 20 МБ",
-    "Voice и audio транскрибируются через OpenAI gpt-transcribe (или Groq) и передаются как текст",
-    "`/steer <текст>` — уточнить активную задачу",
-    "Пример: `/steer Не меняй публичный API`",
-    "Ответ на сообщение текущего ответа тоже уточняет активную задачу",
-    "`/cancel` — остановить активную задачу или создание проекта",
+    bold("Работа"),
+    text("Отправьте задачу обычным сообщением"),
+    example("Добавь валидацию email и запусти тесты"),
+    text("Можно приложить document или ZIP до 20 МБ"),
+    text("Voice и audio транскрибируются через OpenAI gpt-transcribe (или Groq) и передаются как текст"),
+    command("/steer <текст>", "уточнить активную задачу"),
+    example("/steer Не меняй публичный API"),
+    text("Ответ на сообщение текущего ответа тоже уточняет активную задачу"),
+    command("/cancel", "остановить активную задачу или создание проекта"),
     "",
-    "*Контекст и память*",
-    "`/new` — начать новый контекст в topic",
-    "`/remember <факт>` — сохранить факт в общей памяти проекта",
-    "Пример: `/remember Все даты в API передаём в UTC`",
-    "`/review` — проверить текущие незакоммиченные изменения без их исправления",
+    bold("Контекст и память"),
+    command("/new", "начать новый контекст в topic"),
+    command("/remember <факт>", "сохранить факт в общей памяти проекта"),
+    example("/remember Все даты в API передаём в UTC"),
+    command("/review", "проверить текущие незакоммиченные изменения без их исправления"),
   ];
 
   if (isAdministrator) {
     lines.push(
       "",
-      "*Только для администратора*",
-      "`/login` — войти в ChatGPT через device code в личном чате",
-      "`/limits` — показать 5\\-часовой и недельный Codex limits этого VPS",
-      "`/topics` — показать обнаруженные Telegram группы, топики и привязки",
-      "`/bind_topic <chat_id> <topic_id> <project> [workspace]` — привязать топик из личного чата",
-      "Пример: `/bind_topic -1001234567890 42 summing repo`",
-      "`/project_create <project> <owner_id> <repo>` — создать локальный Git\\-проект",
-      "Пример: `/project_create shop 123456789 backend`",
-      "`/project_clone <project> <owner_id> <repo> <git_url>` — клонировать Git\\-проект",
-      "Пример: `/project_clone shop 123456789 backend https://github.com/acme/backend.git`",
-      "`/restart` — перезапустить SUMMING",
-      "`/panic` — немедленно остановить SUMMING без автоматического рестарта",
+      bold("Только для администратора"),
+      command("/login", "войти в ChatGPT через device code в личном чате"),
+      command("/limits", "показать 5-часовой и недельный Codex limits этого VPS"),
+      command("/topics", "показать обнаруженные Telegram группы, топики и привязки"),
+      command(
+        "/bind_topic <chat_id> <topic_id> <project> [workspace]",
+        "привязать топик из личного чата",
+      ),
+      example("/bind_topic -1001234567890 42 summing repo"),
+      command("/project_create <project> <owner_id> <repo>", "создать локальный Git-проект"),
+      example("/project_create shop 123456789 backend"),
+      command(
+        "/project_clone <project> <owner_id> <repo> <git_url>",
+        "клонировать Git-проект",
+      ),
+      example("/project_clone shop 123456789 backend https://github.com/acme/backend.git"),
+      command("/restart", "перезапустить SUMMING"),
+      command("/panic", "немедленно остановить SUMMING без автоматического рестарта"),
     );
   }
 
