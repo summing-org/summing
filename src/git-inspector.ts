@@ -8,7 +8,7 @@ const MAX_ARCHIVE_BYTES = 50_000_000;
 const MAX_FILE_BYTES = 1_000_000;
 const DENIED_SEGMENTS = new Set([
   ".git",
-  ".summate-runtime",
+  ".summing-runtime",
   ".ssh",
   "node_modules",
   "dist",
@@ -237,7 +237,7 @@ export class GitInspector {
   }
 
   async snapshot(label: string): Promise<string> {
-    const directory = await mkdtemp(join(tmpdir(), "summate-index-"));
+    const directory = await mkdtemp(join(tmpdir(), "summing-index-"));
     const indexPath = join(directory, "index");
     const env = { ...process.env, GIT_INDEX_FILE: indexPath };
     try {
@@ -246,7 +246,7 @@ export class GitInspector {
       const tree = text(await this.git(["write-tree"], { env })).trim();
       const head = text(await this.git(["rev-parse", "HEAD"])).trim();
       const committed = await this.git(
-        ["commit-tree", tree, "-p", head, "-m", `Summate snapshot: ${label}`],
+        ["commit-tree", tree, "-p", head, "-m", `SUMMING snapshot: ${label}`],
         { env },
       );
       return text(committed).trim();

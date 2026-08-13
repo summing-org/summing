@@ -5,7 +5,7 @@ import { helpMessage } from "../src/help-message.js";
 test("help describes everyday commands with examples", () => {
   const help = helpMessage(false);
 
-  assert.match(help, /^\*Помощь по Summate\*/);
+  assert.match(help, /^\*Помощь по SUMMING\*/);
   assert.match(help, /Пример: `\/bind shop backend`/);
   assert.match(help, /Пример: `\/steer Не меняй публичный API`/);
   assert.match(help, /Voice и audio транскрибируются через OpenAI gpt-transcribe/);
@@ -20,7 +20,7 @@ test("administrator help includes project management examples", () => {
   assert.match(help, /\*Только для администратора\*/);
   assert.match(help, /`\/limits`/);
   assert.match(help, /`\/topics`/);
-  assert.match(help, /`\/bind_topic -1001234567890 42 summate repo`/);
+  assert.match(help, /`\/bind_topic -1001234567890 42 summing repo`/);
   assert.match(help, /`\/project_create shop 123456789 backend`/);
   assert.match(
     help,

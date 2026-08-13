@@ -22,8 +22,100 @@ function git(cwd: string, ...args: string[]): void {
   assert.equal(result.status, 0, result.stderr);
 }
 
+test("upgrades the previous identity, worktree branch, and runtime directory to SUMMING", async () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-workspace-upgrade-"));
+  try {
+    const source = join(root, "repo");
+    mkdirSync(source, { recursive: true });
+    git(source, "init");
+    git(source, "config", "user.email", "test@example.com");
+    git(source, "config", "user.name", "Test");
+    writeFileSync(join(source, "README.md"), "demo\n");
+    git(source, "add", "README.md");
+    git(source, "commit", "-m", "initial");
+
+    const workspace: WorkspaceConfig = { id: "repo", path: source };
+    const project = new ProjectConfig("demo", "Demo", "repo", new Map([["repo", workspace]]));
+    const config = new RuntimeConfig(
+      join(root, "data"),
+      join(root, "codex"),
+      join(root, "worktrees"),
+      "token",
+      1,
+      "codex",
+      8765,
+      2,
+      1,
+      "",
+      "medium",
+      true,
+      new Map([["demo", project]]),
+    );
+    const manager = new WorkspaceManager(config);
+    const retiredIdentity = "Sum" + "mate";
+    mkdirSync(join(config.dataDir, "memory"), { recursive: true });
+    writeFileSync(
+      manager.identityPath,
+      `# ${retiredIdentity} identity\n\n` +
+        `I am ${retiredIdentity}, one persistent agent serving one owner through Telegram.\n` +
+        "I preserve continuity across projects and change my own code only on the " +
+        "owner's direct request.\n",
+    );
+    manager.initialize();
+    assert.match(readFileSync(manager.identityPath, "utf8"), /^# SUMMING identity$/m);
+
+    const conversation: Conversation = {
+      id: "tg-upgrade",
+      chatId: -1,
+      topicId: 2,
+      projectId: "demo",
+      workspaceId: "repo",
+      codexThreadId: null,
+      readOnlyCodexThreadId: null,
+      activeTurnId: null,
+      streamMessageId: null,
+      worktreePath: null,
+    };
+    const worktree = join(config.worktreeRoot, conversation.id);
+    mkdirSync(config.worktreeRoot, { recursive: true });
+    const retiredPrefix = retiredIdentity.toLowerCase();
+    git(
+      source,
+      "worktree",
+      "add",
+      "-b",
+      `${retiredPrefix}/${project.id}/${conversation.id}`,
+      worktree,
+      "HEAD",
+    );
+    const retiredRuntime = join(worktree, `.${retiredPrefix}-runtime`);
+    mkdirSync(retiredRuntime);
+    writeFileSync(join(retiredRuntime, "sentinel.txt"), "preserved\n");
+    writeFileSync(join(source, ".git", "info", "exclude"), `.${retiredPrefix}-runtime/\n`);
+
+    await manager.prepare(conversation, project, workspace);
+
+    assert.equal(existsSync(retiredRuntime), false);
+    assert.equal(
+      readFileSync(join(worktree, ".summing-runtime", "sentinel.txt"), "utf8"),
+      "preserved\n",
+    );
+    const branch = spawnSync("git", ["branch", "--show-current"], {
+      cwd: worktree,
+      encoding: "utf8",
+    });
+    assert.equal(branch.status, 0, branch.stderr);
+    assert.equal(branch.stdout.trim(), `summing/${project.id}/${conversation.id}`);
+    const exclude = readFileSync(join(source, ".git", "info", "exclude"), "utf8");
+    assert.doesNotMatch(exclude, new RegExp(retiredPrefix, "iu"));
+    assert.match(exclude, /^\.summing-runtime\/$/m);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("conversation gets a persistent worktree and project memory", async () => {
-  const root = mkdtempSync(join(tmpdir(), "summate-workspace-"));
+  const root = mkdtempSync(join(tmpdir(), "summing-workspace-"));
   try {
     const source = join(root, "repo");
     const nested = join(source, "apps", "web");
@@ -103,19 +195,19 @@ test("conversation gets a persistent worktree and project memory", async () => {
     assert.ok(readOnlyDeniedPaths.includes(".ssh"));
     assert.ok(readOnlyDeniedPaths.includes(".envrc"));
     assert.ok(readOnlyDeniedPaths.includes(".git-credentials"));
-    assert.ok(readOnlyDeniedPaths.includes("apps/web/.summate-runtime"));
+    assert.ok(readOnlyDeniedPaths.includes("apps/web/.summing-runtime"));
     assert.ok(readOnlyDeniedPaths.includes(deepSecretRelative));
-    const legacyMemory = join(prepared.path, ".summate-runtime", "PROJECT_MEMORY.md");
+    const legacyMemory = join(prepared.path, ".summing-runtime", "PROJECT_MEMORY.md");
     writeFileSync(legacyMemory, "legacy runtime memory\n");
     await manager.prepare(conversation, project, workspace);
     assert.equal(existsSync(legacyMemory), false);
     const localMemory = join(
       prepared.path,
-      ".summate-runtime",
+      ".summing-runtime",
       "memory",
       "PROJECT_MEMORY.md",
     );
-    assert.ok(readFileSync(join(prepared.path, ".summate-runtime", "CONTEXT.md"), "utf8"));
+    assert.ok(readFileSync(join(prepared.path, ".summing-runtime", "CONTEXT.md"), "utf8"));
     const spoolDir = join(root, "data", "attachments", conversation.id);
     mkdirSync(spoolDir, { recursive: true });
     const spoolFile = join(spoolDir, "source.zip");
@@ -132,7 +224,7 @@ test("conversation gets a persistent worktree and project memory", async () => {
       },
     }]);
     assert.deepEqual(materialized.map((item) => item.relativePath), [
-      ".summate-runtime/attachments/99-7-source.zip",
+      ".summing-runtime/attachments/99-7-source.zip",
     ]);
     assert.equal(
       readFileSync(join(prepared.path, materialized[0]!.relativePath), "utf8"),

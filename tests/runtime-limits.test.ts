@@ -4,23 +4,23 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { ProjectConfig, RuntimeConfig, type WorkspaceConfig } from "../src/config.js";
-import { SummateRuntime } from "../src/runtime.js";
+import { SummingRuntime } from "../src/runtime.js";
 import type { TelegramObject } from "../src/telegram-api.js";
 
-function runtimeFixture(): { root: string; runtime: SummateRuntime } {
-  const root = mkdtempSync(join(tmpdir(), "summate-runtime-limits-"));
+function runtimeFixture(): { root: string; runtime: SummingRuntime } {
+  const root = mkdtempSync(join(tmpdir(), "summing-runtime-limits-"));
   const workspacePath = join(root, "workspace");
   mkdirSync(workspacePath);
   const workspace: WorkspaceConfig = { id: "repo", path: workspacePath };
   const project = new ProjectConfig(
-    "summate",
-    "Summate",
+    "summing",
+    "SUMMING",
     "repo",
     new Map([["repo", workspace]]),
   );
   return {
     root,
-    runtime: new SummateRuntime(
+    runtime: new SummingRuntime(
       new RuntimeConfig(
         join(root, "data"),
         join(root, "codex"),
@@ -34,7 +34,7 @@ function runtimeFixture(): { root: string; runtime: SummateRuntime } {
         "",
         "medium",
         true,
-        new Map([["summate", project]]),
+        new Map([["summing", project]]),
       ),
     ),
   };

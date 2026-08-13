@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch for a manual SUMMING update request
+
+[Path]
+PathChanged=/var/lib/summing/deploy/request.json
+Unit=summing-deploy.service
+
+[Install]
+WantedBy=multi-user.target

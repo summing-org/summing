@@ -5,7 +5,7 @@ Description=Run the pinned ash-seo revision daily at 09:00 Europe/Moscow
 OnCalendar=*-*-* 06:00:00 UTC
 Persistent=true
 RandomizedDelaySec=30
-Unit=summate-ash-seo.service
+Unit=summing-ash-seo.service
 
 [Install]
 WantedBy=timers.target

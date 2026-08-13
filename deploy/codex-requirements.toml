@@ -1,6 +1,6 @@
-# Summate delegates one ChatGPT/Codex login to multiple Telegram project owners.
+# SUMMING delegates one ChatGPT/Codex login to multiple Telegram project owners.
 # Keep account-level extensions unavailable; project code still has the filesystem
-# and network permissions selected by Summate for its own worktree.
+# and network permissions selected by SUMMING for its own worktree.
 
 allow_login_shell = false
 allow_managed_hooks_only = true

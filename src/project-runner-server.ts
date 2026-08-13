@@ -323,7 +323,7 @@ export class ProjectRunnerServer {
   }
 
   private image(job: RunnerJob): string {
-    return `summate/${job.projectId}:${job.revision}`;
+    return `summing/${job.projectId}:${job.revision}`;
   }
 
   private async ensureImage(job: RunnerJob, source: string, logPath: string): Promise<void> {
@@ -338,8 +338,8 @@ export class ProjectRunnerServer {
       this.dockerBinary,
       [
         "build",
-        "--label", `summate.project=${job.projectId}`,
-        "--label", `summate.revision=${job.revision}`,
+        "--label", `summing.project=${job.projectId}`,
+        "--label", `summing.revision=${job.revision}`,
         "--tag", image,
         ".",
       ],
@@ -358,7 +358,7 @@ export class ProjectRunnerServer {
     mkdirSync(project.dataPath, { recursive: true, mode: 0o700 });
     const args = [
       "run", "--rm", "--init",
-      "--name", `summate-${job.projectId}-${job.id.slice(0, 8)}`,
+      "--name", `summing-${job.projectId}-${job.id.slice(0, 8)}`,
       "--read-only",
       "--user", "0:0",
       "--cap-drop", "ALL",

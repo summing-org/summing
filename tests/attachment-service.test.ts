@@ -48,7 +48,7 @@ test("recognizes Telegram documents, native audio, and audio documents", () => {
 });
 
 test("stores Telegram attachments in the private spool and removes them", async () => {
-  const root = mkdtempSync(join(tmpdir(), "summate-attachments-"));
+  const root = mkdtempSync(join(tmpdir(), "summing-attachments-"));
   const telegram = new TelegramAPI("token");
   telegram.downloadFile = async () => ({
     data: new Uint8Array([80, 75, 3, 4]),
@@ -82,7 +82,7 @@ test("stores Telegram attachments in the private spool and removes them", async 
 });
 
 test("OpenAI transcription uses the official multipart endpoint and exact default model", async () => {
-  const root = mkdtempSync(join(tmpdir(), "summate-openai-"));
+  const root = mkdtempSync(join(tmpdir(), "summing-openai-"));
   const path = join(root, "voice.ogg");
   const attachment: StoredAttachment = {
     kind: "audio",
@@ -126,7 +126,7 @@ test("OpenAI transcription uses the official multipart endpoint and exact defaul
 });
 
 test("Groq Whisper remains available as an optional transcriber", async () => {
-  const root = mkdtempSync(join(tmpdir(), "summate-groq-"));
+  const root = mkdtempSync(join(tmpdir(), "summing-groq-"));
   const path = join(root, "voice.ogg");
   const attachment: StoredAttachment = {
     kind: "audio",

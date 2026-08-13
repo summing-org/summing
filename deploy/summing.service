@@ -1,0 +1,23 @@
+[Unit]
+Description=SUMMING Telegram agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=summing
+Group=summing
+WorkingDirectory=/opt/summing-current
+Environment=HOME=/var/lib/summing
+EnvironmentFile=/etc/summing/summing.env
+ExecStart=/usr/local/bin/node --enable-source-maps /opt/summing-current/dist/src/index.js
+Restart=on-failure
+RestartSec=5
+RestartPreventExitStatus=2 99
+KillMode=control-group
+TimeoutStopSec=20
+UMask=0077
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

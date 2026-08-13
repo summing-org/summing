@@ -9,7 +9,7 @@ import { ProjectRunnerClient } from "../src/project-runner-client.js";
 import { ProjectRunnerServer } from "../src/project-runner-server.js";
 
 test("queues an immutable archive and builds it through the isolated runner", async () => {
-  const root = mkdtempSync(join(tmpdir(), "summate-runner-test-"));
+  const root = mkdtempSync(join(tmpdir(), "summing-runner-test-"));
   const repository = join(root, "repo");
   const configRoot = join(root, "config");
   const dataRoot = join(root, "data");

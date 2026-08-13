@@ -27,14 +27,14 @@ port = 8765
 port = 8766
 public_url = ""
 auth_max_age_sec = 900
-runner_socket = "/run/summate-runner/runner.sock"
+runner_socket = "/run/summing-runner/runner.sock"
 
 # Static projects belong to TELEGRAM_OWNER_ID. Managed client projects are
 # created from the administrator's private Telegram chat.
-[projects.summate]
-name = "Summate"
+[projects.summing]
+name = "SUMMING"
 default_workspace = "repo"
 self_change = true
 
-[projects.summate.workspaces.repo]
-path = "/opt/summate"
+[projects.summing.workspaces.repo]
+path = "/opt/summing"

@@ -4,17 +4,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { ConfigError, ProjectConfig, RuntimeConfig, type WorkspaceConfig } from "../src/config.js";
-import { SummateRuntime } from "../src/runtime.js";
+import { SummingRuntime } from "../src/runtime.js";
 import type { TelegramObject } from "../src/telegram-api.js";
 
 test("owners control projects while group participants get read-only Q&A", async () => {
-  const root = mkdtempSync(join(tmpdir(), "summate-runtime-access-"));
-  const staticPath = join(root, "summate");
+  const root = mkdtempSync(join(tmpdir(), "summing-runtime-access-"));
+  const staticPath = join(root, "summing");
   mkdirSync(staticPath);
   const workspace: WorkspaceConfig = { id: "repo", path: staticPath };
   const staticProject = new ProjectConfig(
-    "summate",
-    "Summate",
+    "summing",
+    "SUMMING",
     "repo",
     new Map([["repo", workspace]]),
     true,
@@ -32,9 +32,9 @@ test("owners control projects while group participants get read-only Q&A", async
     "",
     "medium",
     true,
-    new Map([["summate", staticProject]]),
+    new Map([["summing", staticProject]]),
   );
-  const runtime = new SummateRuntime(config);
+  const runtime = new SummingRuntime(config);
   const replies: string[] = [];
   const replyOptions: Array<{ parseMode?: string }> = [];
   let replyId = 100;
@@ -72,7 +72,7 @@ test("owners control projects while group participants get read-only Q&A", async
         ? {
             reply_to_message: {
               message_id: 500,
-              from: { id: 500, is_bot: true, username: "summate_bot" },
+              from: { id: 500, is_bot: true, username: "summing_bot" },
             },
           }
         : {}),
@@ -95,7 +95,7 @@ test("owners control projects while group participants get read-only Q&A", async
     assert.equal(runtime.projects.owner("beta"), 77);
 
     await send(42, "/help", 42, "private");
-    assert.match(replies.at(-1) ?? "", /\*Помощь по Summate\*/);
+    assert.match(replies.at(-1) ?? "", /\*Помощь по SUMMING\*/);
     assert.match(replies.at(-1) ?? "", /Пример: `\/bind shop backend`/);
     assert.match(replies.at(-1) ?? "", /Пример: `\/remember Все даты в API передаём в UTC`/);
     assert.doesNotMatch(replies.at(-1) ?? "", /Только для администратора|project_create/);
@@ -147,12 +147,12 @@ test("owners control projects while group participants get read-only Q&A", async
     assert.match(replies.at(-1) ?? "", /topic_id: 44 «Backend» → не привязан/);
     await send(42, "/topics", 42, "private");
     assert.match(replies.at(-1) ?? "", /только администратору/);
-    await send(1, "/bind_topic -300 44 summate repo", 1, "private");
-    assert.equal(runtime.state.byTopic(-300, 44)?.projectId, "summate");
+    await send(1, "/bind_topic -300 44 summing repo", 1, "private");
+    assert.equal(runtime.state.byTopic(-300, 44)?.projectId, "summing");
     assert.match(replies.at(-1) ?? "", /Топик привязан/);
     await send(1, "/topics", 1, "private");
-    assert.match(replies.at(-1) ?? "", /topic_id: 44 «Backend» → summate\/repo/);
-    await send(1, "/bind_topic -300 44 summate repo", -300, "supergroup", 44);
+    assert.match(replies.at(-1) ?? "", /topic_id: 44 «Backend» → summing\/repo/);
+    await send(1, "/bind_topic -300 44 summing repo", -300, "supergroup", 44);
     assert.match(replies.at(-1) ?? "", /только в личном чате/);
 
     const beforeUnknown = replies.length;
@@ -161,7 +161,7 @@ test("owners control projects while group participants get read-only Q&A", async
 
     await send(42, "/projects", 42, "private");
     assert.match(replies.at(-1) ?? "", /alpha/);
-    assert.doesNotMatch(replies.at(-1) ?? "", /beta|summate/);
+    assert.doesNotMatch(replies.at(-1) ?? "", /beta|summing/);
 
     await send(1, "/project_create grouped 42 repo", -100, "supergroup", 5);
     assert.throws(() => runtime.projects.project("grouped"), ConfigError);
@@ -176,7 +176,7 @@ test("owners control projects while group participants get read-only Q&A", async
     let startedConversation = "";
     Object.assign(runtime, {
       telegramBotId: 500,
-      telegramUsername: "summate_bot",
+      telegramUsername: "summing_bot",
       startProcessor: (conversation: { id: string }): void => {
         startedConversation = conversation.id;
       },
@@ -193,7 +193,7 @@ test("owners control projects while group participants get read-only Q&A", async
       ]),
       [["Как устроена авторизация?", "read-only", 999, "ambient"]],
     );
-    await send(999, "@summate_bot, как устроена авторизация?", -100, "supergroup", 5);
+    await send(999, "@summing_bot, как устроена авторизация?", -100, "supergroup", 5);
     assert.equal(startedConversation, bound.id);
     await send(999, "А токены где проверяются?", -100, "supergroup", 5, true);
     assert.deepEqual(
@@ -209,11 +209,11 @@ test("owners control projects while group participants get read-only Q&A", async
       await send(888, `Фоновое сообщение ${index}`, -100, "supergroup", 5);
     }
     const beforeNotice = replies.length;
-    await send(888, "@summate_bot ответь", -100, "supergroup", 5);
+    await send(888, "@summing_bot ответь", -100, "supergroup", 5);
     assert.equal(runtime.state.pendingAll(bound.id).length, beforeRateLimit + 12);
     assert.equal(replies.length, beforeNotice + 1);
     assert.match(replies.at(-1) ?? "", /Слишком много сообщений/);
-    await send(888, "@summate_bot ещё раз", -100, "supergroup", 5);
+    await send(888, "@summing_bot ещё раз", -100, "supergroup", 5);
     assert.equal(replies.length, beforeNotice + 1);
 
     const parseAmbientDecision = (
@@ -331,8 +331,8 @@ test("owners control projects while group participants get read-only Q&A", async
     assert.match(replies.at(-1) ?? "", /только администратору/);
 
     runtime.state.bind(-200, 9, "removed-project", "repo");
-    await send(1, "/bind summate", -200, "supergroup", 9);
-    assert.equal(runtime.state.byTopic(-200, 9)?.projectId, "summate");
+    await send(1, "/bind summing", -200, "supergroup", 9);
+    assert.equal(runtime.state.byTopic(-200, 9)?.projectId, "summing");
 
     let cloneCancelled = false;
     runtime.projects.cloneRemote = async (

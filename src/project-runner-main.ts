@@ -1,10 +1,10 @@
 import { ProjectRunnerServer } from "./project-runner-server.js";
 
 const server = new ProjectRunnerServer(
-  process.env.SUMMATE_RUNNER_SOCKET || "/run/summate-runner/runner.sock",
-  process.env.SUMMATE_RUNNER_DATA || "/var/lib/summate-runner/jobs",
-  process.env.SUMMATE_RUNNER_CONFIG || "/etc/summate-runner/projects",
-  process.env.SUMMATE_RUNNER_DOCKER || "/usr/bin/docker",
+  process.env.SUMMING_RUNNER_SOCKET || "/run/summing-runner/runner.sock",
+  process.env.SUMMING_RUNNER_DATA || "/var/lib/summing-runner/jobs",
+  process.env.SUMMING_RUNNER_CONFIG || "/etc/summing-runner/projects",
+  process.env.SUMMING_RUNNER_DOCKER || "/usr/bin/docker",
 );
 
 const stop = (): void => {

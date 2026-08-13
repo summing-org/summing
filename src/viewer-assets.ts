@@ -4,7 +4,7 @@ export const VIEWER_HTML = `<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#111714">
-  <title>Summate Project Viewer</title>
+  <title>SUMMING Project Viewer</title>
   <link rel="stylesheet" href="/app.css">
   <script src="https://telegram.org/js/telegram-web-app.js?63"></script>
   <script src="/app.js" defer></script>
@@ -12,7 +12,7 @@ export const VIEWER_HTML = `<!doctype html>
 <body>
   <div id="app">
     <header class="topbar">
-      <div class="brand"><span class="brand-mark">Σ</span><span>Summate</span></div>
+      <div class="brand"><span class="brand-mark">Σ</span><span>SUMMING</span></div>
       <div class="repo-title">
         <strong id="projectName">Project Viewer</strong>
         <span id="repoMeta">подключение…</span>
@@ -63,7 +63,7 @@ export const VIEWER_HTML = `<!doctype html>
         <pre id="jobLog" class="code-view log-view"><code>Выберите запуск, чтобы увидеть лог.</code></pre>
       </section>
       <section id="settingsPanel" class="panel settings-panel">
-        <div class="section-heading"><div><h2>Настройки Summate</h2><p>Системные операции доступны только администратору.</p></div></div>
+        <div class="section-heading"><div><h2>Настройки SUMMING</h2><p>Системные операции доступны только администратору.</p></div></div>
         <article class="settings-card">
           <div class="settings-card-heading"><div><h3>Обновление приложения</h3><p>Каждые 10 минут сервер проверяет <code>origin/master</code>. Новая версия собирается и тестируется до перезапуска.</p></div><span id="deploymentBadge" class="deployment-badge">Проверка…</span></div>
           <dl class="settings-details">
@@ -97,8 +97,8 @@ export const VIEWER_JS = `
   const refreshTelegramAuth=()=>{if(tg&&tg.initData)state.initData=tg.initData;return Boolean(state.initData)};
   if(tg){tg.ready();tg.expand();refreshTelegramAuth();}
   const hash=new URLSearchParams(location.hash.slice(1));
-  if(hash.get("token")){sessionStorage.setItem("summateViewerToken",hash.get("token"));history.replaceState(null,"",location.pathname+location.search);}
-  state.token=sessionStorage.getItem("summateViewerToken")||"";
+  if(hash.get("token")){sessionStorage.setItem("summingViewerToken",hash.get("token"));history.replaceState(null,"",location.pathname+location.search);}
+  state.token=sessionStorage.getItem("summingViewerToken")||"";
   const query=new URLSearchParams(location.search);
   state.conversation=query.get("conversation")||(tg&&tg.initDataUnsafe&&tg.initDataUnsafe.start_param)||"";
   const headers=()=>state.initData?{"x-telegram-init-data":state.initData}:state.token?{authorization:"Bearer "+state.token}:{};
@@ -110,7 +110,7 @@ export const VIEWER_JS = `
   const setTab=(name)=>{state.tab=name;document.querySelectorAll(".tabs button").forEach(button=>button.classList.toggle("active",button.dataset.tab===name));document.querySelectorAll(".panel").forEach(panel=>panel.classList.remove("active"));$(name+"Panel").classList.add("active");if(name==="changes")loadWorkingDiff();if(name==="history")loadCommits();if(name==="runs")loadRuns();if(name==="launch")loadJobs();if(name==="settings")loadDeployment()};
   document.querySelectorAll(".tabs button").forEach(button=>button.addEventListener("click",()=>setTab(button.dataset.tab)));
   const sessionUrl=()=>"/api/viewer/session?conversation="+encodeURIComponent(state.conversation);
-  async function loadSession(){if(!state.conversation)throw new Error("Conversation не указан. Откройте viewer из команды /files.");await waitForAuthentication();state.session=await api(sessionUrl());$("projectName").textContent=state.session.project.name;const repo=state.session.repository;$("repoMeta").textContent=repo.branch+" · "+repo.shortHead+(repo.remote?" · origin":" · local only");$("repoMeta").className=repo.dirty?"dirty":"clean";$("changeBadge").textContent=repo.changes;$("changeBadge").classList.toggle("hidden",repo.changes===0);$("runnerStatus").textContent=state.session.runnerAvailable?"Runner доступен":"Runner пока недоступен";$("settingsTab").classList.toggle("hidden",!(state.session.administrator&&state.session.deploymentAvailable));document.title=state.session.project.name+" · Summate";await loadTree()}
+  async function loadSession(){if(!state.conversation)throw new Error("Conversation не указан. Откройте viewer из команды /files.");await waitForAuthentication();state.session=await api(sessionUrl());$("projectName").textContent=state.session.project.name;const repo=state.session.repository;$("repoMeta").textContent=repo.branch+" · "+repo.shortHead+(repo.remote?" · origin":" · local only");$("repoMeta").className=repo.dirty?"dirty":"clean";$("changeBadge").textContent=repo.changes;$("changeBadge").classList.toggle("hidden",repo.changes===0);$("runnerStatus").textContent=state.session.runnerAvailable?"Runner доступен":"Runner пока недоступен";$("settingsTab").classList.toggle("hidden",!(state.session.administrator&&state.session.deploymentAvailable));document.title=state.session.project.name+" · SUMMING";await loadTree()}
   async function loadTree(){const result=await api("/api/viewer/tree?conversation="+encodeURIComponent(state.conversation));state.tree=result.files;renderTree()}
   function renderTree(){const search=$("fileSearch").value.trim().toLowerCase();const files=state.tree.filter(item=>!search||item.path.toLowerCase().includes(search));$("fileTree").innerHTML=files.length?files.map(item=>{const depth=Math.min(item.path.split("/").length-1,5);const name=item.path.split("/").pop();const status=item.status==="untracked"?"untracked":item.status?"changed":"";return "<button class='file-item "+status+"' style='padding-left:"+(9+depth*12)+"px' data-path='"+esc(item.path)+"'><span class='dot'></span><span class='path' title='"+esc(item.path)+"'>"+esc(name)+"</span></button>"}).join(""):"<div class='empty'>Файлы не найдены.</div>";document.querySelectorAll(".file-item").forEach(button=>button.addEventListener("click",()=>openFile(button.dataset.path,button)))}
   async function openFile(path,button){document.querySelectorAll(".file-item").forEach(item=>item.classList.remove("active"));button.classList.add("active");$("filePath").textContent=path;$("fileContent").innerHTML="<code>Загрузка…</code>";try{const file=await api("/api/viewer/file?conversation="+encodeURIComponent(state.conversation)+"&path="+encodeURIComponent(path));$("fileSize").textContent=file.bytes<1024?file.bytes+" B":(file.bytes/1024).toFixed(1)+" KB";$("fileContent").innerHTML="<code>"+file.content.split("\\n").map(line=>"<span class='diff-line'>"+esc(line)+"</span>").join("")+"</code>"}catch(error){$("fileContent").innerHTML="<code>"+esc(error.message)+"</code>"}}
@@ -127,7 +127,7 @@ export const VIEWER_JS = `
   const shortSha=(value)=>value?value.slice(0,12):"—";
   const localTime=(value)=>value?new Date(value).toLocaleString("ru-RU"):"—";
   async function loadDeployment(){clearTimeout(state.deploymentTimer);try{const result=await api("/api/viewer/deployment?conversation="+encodeURIComponent(state.conversation));$("deploymentBadge").textContent=deploymentLabels[result.status]||result.status;$("deploymentBadge").className="deployment-badge "+result.status;$("deploymentCurrent").textContent=shortSha(result.currentSha);$("deploymentCurrent").title=result.currentSha||"";$("deploymentRemote").textContent=shortSha(result.remoteSha);$("deploymentRemote").title=result.remoteSha||"";$("deploymentChecked").textContent=localTime(result.finishedAt||result.startedAt);$("deploymentMessage").textContent=result.message;$("requestDeployment").disabled=deploymentActive.has(result.status);if(deploymentActive.has(result.status)&&state.tab==="settings")state.deploymentTimer=setTimeout(loadDeployment,3000)}catch(error){$("deploymentBadge").textContent="перезапуск";$("deploymentBadge").className="deployment-badge checking";$("deploymentMessage").textContent=error.message;$("requestDeployment").disabled=true;if(state.tab==="settings")state.deploymentTimer=setTimeout(loadDeployment,3000)}}
-  async function requestDeployment(){if(!confirm("Проверить origin/master и установить новую версию Summate, если она доступна?"))return;$("requestDeployment").disabled=true;try{await api("/api/viewer/deployment",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({conversation:state.conversation})});toast("Проверка обновлений запрошена");await loadDeployment()}catch(error){toast(error.message);$("requestDeployment").disabled=false}}
+  async function requestDeployment(){if(!confirm("Проверить origin/master и установить новую версию SUMMING, если она доступна?"))return;$("requestDeployment").disabled=true;try{await api("/api/viewer/deployment",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({conversation:state.conversation})});toast("Проверка обновлений запрошена");await loadDeployment()}catch(error){toast(error.message);$("requestDeployment").disabled=false}}
   $("fileSearch").addEventListener("input",renderTree);$("refreshButton").addEventListener("click",async()=>{try{await loadSession();if(state.tab==="changes")await loadWorkingDiff();if(state.tab==="settings")await loadDeployment();toast("Обновлено")}catch(error){toast(error.message)}});$("reloadDiff").addEventListener("click",loadWorkingDiff);$("reloadJobs").addEventListener("click",loadJobs);$("requestDeployment").addEventListener("click",requestDeployment);document.querySelectorAll("[data-action]").forEach(button=>button.addEventListener("click",()=>enqueue(button.dataset.action)));
   loadSession().catch(error=>{document.body.innerHTML="<main style='padding:32px;font-family:system-ui;color:#eef5f0;background:#0d1210;min-height:100vh'><h1>Project Viewer</h1><p style='color:#ff9c8e'>"+esc(error.message)+"</p><p>Откройте viewer из Telegram или передайте локальный token в URL fragment.</p><button id='retryViewer' style='padding:10px 14px;border:1px solid #405347;border-radius:9px;background:#1a231e;color:#eef5f0'>Повторить</button></main>";$("retryViewer").addEventListener("click",()=>location.reload())});
 })();

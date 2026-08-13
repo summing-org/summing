@@ -7,7 +7,7 @@ import test from "node:test";
 import { StateStore } from "../src/state-store.js";
 
 function tempStore(): { root: string; path: string; store: StateStore } {
-  const root = mkdtempSync(join(tmpdir(), "summate-state-"));
+  const root = mkdtempSync(join(tmpdir(), "summing-state-"));
   const path = join(root, "state.sqlite3");
   return { root, path, store: new StateStore(path) };
 }
@@ -213,7 +213,7 @@ test("restart restores original ambient batch inputs and reply ids", () => {
 });
 
 test("migrates existing conversations to separate read-only state", () => {
-  const root = mkdtempSync(join(tmpdir(), "summate-state-migration-"));
+  const root = mkdtempSync(join(tmpdir(), "summing-state-migration-"));
   const path = join(root, "state.sqlite3");
   const legacy = new DatabaseSync(path);
   legacy.exec(`

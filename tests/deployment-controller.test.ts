@@ -6,7 +6,7 @@ import test from "node:test";
 import { DeploymentController } from "../src/deployment-controller.js";
 
 test("deployment controller atomically requests an update and reports worker state", async () => {
-  const root = mkdtempSync(join(tmpdir(), "summate-deployment-"));
+  const root = mkdtempSync(join(tmpdir(), "summing-deployment-"));
   const request = join(root, "deploy", "request.json");
   const state = join(root, "deploy", "state.json");
   const controller = new DeploymentController(request, state);

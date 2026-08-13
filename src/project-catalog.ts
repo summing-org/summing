@@ -245,7 +245,7 @@ export class ProjectCatalog {
     const cloned = await runGit(["clone", "--", remote, repositoryPath], 300_000, signal);
     if (cloned.code !== 0) {
       throw new ProjectCatalogError(
-        "git clone failed; verify the URL and non-interactive credentials for the summate user",
+        "git clone failed; verify the URL and non-interactive credentials for the summing user",
       );
     }
     await this.configureIdentity(repositoryPath, signal);
@@ -315,8 +315,8 @@ export class ProjectCatalog {
 
   private async configureIdentity(repositoryPath: string, signal?: AbortSignal): Promise<void> {
     for (const [key, value] of [
-      ["user.name", "Summate"],
-      ["user.email", "summate@localhost"],
+      ["user.name", "SUMMING"],
+      ["user.email", "summing@localhost"],
     ] as const) {
       const configured = await runGit(
         ["-C", repositoryPath, "config", key, value],

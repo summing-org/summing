@@ -15,7 +15,7 @@ import test from "node:test";
 import { CodexAppServer, type JsonRecord } from "../src/codex-app-server.js";
 
 test("dispatches responses and notifications over JSONL stdio", async () => {
-  const root = mkdtempSync(join(tmpdir(), "summate-codex-"));
+  const root = mkdtempSync(join(tmpdir(), "summing-codex-"));
   const executable = join(root, "fake-codex.mjs");
   writeFileSync(
     executable,
@@ -31,7 +31,7 @@ lines.on("line", (line) => {
   if (message.id) process.stdout.write(JSON.stringify({ id: message.id, result: { ok: true } }) + "\\n");
   if (message.method === "initialized") {
     const delta =
-      process.env.SUMMATE_TEST_SECRET || process.env.OPENAI_API_KEY || process.env.GROQ_API_KEY
+      process.env.SUMMING_TEST_SECRET || process.env.OPENAI_API_KEY || process.env.GROQ_API_KEY
         ? "secret leaked"
         : "hello";
     process.stdout.write(JSON.stringify({ method: "item/agentMessage/delta", params: { delta } }) + "\\n");
@@ -41,7 +41,7 @@ lines.on("line", (line) => {
   );
   chmodSync(executable, 0o755);
   const client = new CodexAppServer(executable, join(root, "home"));
-  process.env.SUMMATE_TEST_SECRET = "must-not-reach-codex";
+  process.env.SUMMING_TEST_SECRET = "must-not-reach-codex";
   process.env.OPENAI_API_KEY = "must-not-reach-codex";
   process.env.GROQ_API_KEY = "must-not-reach-codex";
   try {
@@ -52,7 +52,7 @@ lines.on("line", (line) => {
     assert.equal(event.method, "item/agentMessage/delta");
     assert.equal(event.params.delta, "hello");
   } finally {
-    delete process.env.SUMMATE_TEST_SECRET;
+    delete process.env.SUMMING_TEST_SECRET;
     delete process.env.OPENAI_API_KEY;
     delete process.env.GROQ_API_KEY;
     await client.close(true);
@@ -74,7 +74,7 @@ test("thread and turn requests use official v2 shapes", async (context) => {
         : { turn: { id: "turn-1" } };
     }
   }
-  const binaryFixture = mkdtempSync(join(tmpdir(), "summate-codex-release-"));
+  const binaryFixture = mkdtempSync(join(tmpdir(), "summing-codex-release-"));
   const releaseBin = join(binaryFixture, "release", "bin");
   mkdirSync(releaseBin, { recursive: true });
   const releaseExecutable = join(releaseBin, "codex");
@@ -104,15 +104,15 @@ test("thread and turn requests use official v2 shapes", async (context) => {
   assert.deepEqual([threadId, turnId], ["thread-1", "turn-1"]);
   const threadParams = client.calls[0]?.[1] ?? {};
   assert.equal(Object.hasOwn(threadParams, "sandbox"), false);
-  assert.equal(threadParams.permissions, "summate-project");
+  assert.equal(threadParams.permissions, "summing-project");
   assert.deepEqual(threadParams.runtimeWorkspaceRoots, ["/tmp/project"]);
   assert.equal(Object.hasOwn(threadParams, "environments"), false);
   assert.deepEqual(threadParams.dynamicTools, []);
   assert.deepEqual(threadParams.selectedCapabilityRoots, []);
   assert.deepEqual(threadParams.config, {
-    default_permissions: "summate-project",
+    default_permissions: "summing-project",
     permissions: {
-      "summate-project": {
+      "summing-project": {
         description: "Write the active project worktree and read only its project root",
         filesystem: {
           ":minimal": "read",
@@ -120,10 +120,10 @@ test("thread and turn requests use official v2 shapes", async (context) => {
             ".": "read",
             workspace: "write",
             ".git": "read",
-            "workspace/.summate-runtime": "read",
-            "workspace/.summate-runtime/memory": "write",
-            "workspace/.summate-runtime/tmp": "write",
-            "workspace/.summate-runtime/attachments": "read",
+            "workspace/.summing-runtime": "read",
+            "workspace/.summing-runtime/memory": "write",
+            "workspace/.summing-runtime/tmp": "write",
+            "workspace/.summing-runtime/attachments": "read",
           },
           "/tmp/project-git": "write",
           [canonicalReleaseBin]: "read",
@@ -136,9 +136,9 @@ test("thread and turn requests use official v2 shapes", async (context) => {
       set: {
         LANG: process.env.LANG ?? "C.UTF-8",
         PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
-        TEMP: "/tmp/project/workspace/.summate-runtime/tmp",
-        TMP: "/tmp/project/workspace/.summate-runtime/tmp",
-        TMPDIR: "/tmp/project/workspace/.summate-runtime/tmp",
+        TEMP: "/tmp/project/workspace/.summing-runtime/tmp",
+        TMP: "/tmp/project/workspace/.summing-runtime/tmp",
+        TMPDIR: "/tmp/project/workspace/.summing-runtime/tmp",
       },
     },
     projects: {
@@ -178,20 +178,20 @@ test("thread and turn requests use official v2 shapes", async (context) => {
     readOnly: true,
   });
   const readOnlyParams = client.calls[2]?.[1] ?? {};
-  assert.equal(readOnlyParams.permissions, "summate-project-readonly");
+  assert.equal(readOnlyParams.permissions, "summing-project-readonly");
   assert.deepEqual(readOnlyParams.runtimeWorkspaceRoots, ["/tmp/project"]);
   assert.deepEqual(readOnlyParams.config, {
-    default_permissions: "summate-project-readonly",
+    default_permissions: "summing-project-readonly",
     permissions: {
-      "summate-project-readonly": {
+      "summing-project-readonly": {
         description: "Read project files without writes or network access",
         filesystem: {
           ":minimal": "read",
           ":workspace_roots": {
             ".": "read",
             ".git": "deny",
-            "workspace/.summate-runtime": "deny",
-            "workspace/.summate-runtime/attachments": "read",
+            "workspace/.summing-runtime": "deny",
+            "workspace/.summing-runtime/attachments": "read",
             "workspace/deep/secrets/.env": "deny",
           },
           [canonicalReleaseBin]: "read",
@@ -237,16 +237,16 @@ test("thread and turn requests use official v2 shapes", async (context) => {
   const emptyThreadParams = client.calls[3]?.[1] ?? {};
   const emptyConfig = emptyThreadParams.config as JsonRecord;
   const emptyProfiles = emptyConfig.permissions as JsonRecord;
-  const emptyProfile = emptyProfiles["summate-project"] as JsonRecord;
+  const emptyProfile = emptyProfiles["summing-project"] as JsonRecord;
   const emptyFilesystem = emptyProfile.filesystem as JsonRecord;
   const emptyWorkspaceRules = emptyFilesystem[":workspace_roots"] as JsonRecord;
   assert.deepEqual(emptyWorkspaceRules, {
     ".": "write",
     ".git": "read",
-    ".summate-runtime": "read",
-    ".summate-runtime/memory": "write",
-    ".summate-runtime/tmp": "write",
-    ".summate-runtime/attachments": "read",
+    ".summing-runtime": "read",
+    ".summing-runtime/memory": "write",
+    ".summing-runtime/tmp": "write",
+    ".summing-runtime/attachments": "read",
   });
   assert.equal(
     Object.keys(emptyWorkspaceRules).some((path) => path.endsWith("PROJECT_MEMORY.md")),
@@ -278,9 +278,9 @@ test("refuses shared Codex configuration that could expand project permissions",
     'sandbox_mode = "danger-full-access"\n',
     '[sandbox_workspace_write]\nnetwork_access = true\n',
     'default_permissions = ":danger-full-access"\n',
-    '[permissions.summate-project.filesystem]\n":root" = "write"\n',
+    '[permissions.summing-project.filesystem]\n":root" = "write"\n',
   ]) {
-    const root = mkdtempSync(join(tmpdir(), "summate-codex-config-"));
+    const root = mkdtempSync(join(tmpdir(), "summing-codex-config-"));
     const home = join(root, "home");
     mkdirSync(home, { recursive: true });
     writeFileSync(join(home, "config.toml"), unsafe, "utf8");

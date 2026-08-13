@@ -1,0 +1,14 @@
+[Unit]
+Description=Fetch, verify, and atomically deploy SUMMING origin/master
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/opt/summing/.git
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/summing/deploy.env
+ExecStart=/opt/summing-current/deploy/summing-deploy
+TimeoutStartSec=45min
+UMask=0027
+PrivateTmp=true
+ProtectHome=true

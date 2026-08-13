@@ -6,7 +6,7 @@ import test from "node:test";
 import { ConfigError, loadConfig } from "../src/config.js";
 
 function fixture(): { root: string; configPath: string; workspace: string } {
-  const root = mkdtempSync(join(tmpdir(), "summate-config-"));
+  const root = mkdtempSync(join(tmpdir(), "summing-config-"));
   const workspace = join(root, "workspace");
   const configPath = join(root, "config.toml");
   mkdirSync(workspace);
@@ -48,13 +48,13 @@ test("loads the explicit project model", () => {
   const { root, configPath, workspace } = fixture();
   try {
     const config = loadConfig({
-      SUMMATE_DATA_DIR: join(root, "data"),
-      SUMMATE_CONFIG: configPath,
+      SUMMING_DATA_DIR: join(root, "data"),
+      SUMMING_CONFIG: configPath,
       TELEGRAM_BOT_TOKEN: "test-token",
       TELEGRAM_OWNER_ID: "42",
       OPENAI_API_KEY: "openai-test-key",
-      SUMMATE_DEPLOY_REQUEST: join(root, "deploy", "request.json"),
-      SUMMATE_DEPLOY_STATE: join(root, "deploy", "state.json"),
+      SUMMING_DEPLOY_REQUEST: join(root, "deploy", "request.json"),
+      SUMMING_DEPLOY_STATE: join(root, "deploy", "state.json"),
     });
     assert.equal(config.telegramOwnerId, 42);
     assert.equal(config.maxParallelConversations, 3);
@@ -80,8 +80,8 @@ test("deployment control stays disabled unless both absolute paths are configure
   const { root, configPath } = fixture();
   try {
     const disabled = loadConfig({
-      SUMMATE_DATA_DIR: join(root, "data"),
-      SUMMATE_CONFIG: configPath,
+      SUMMING_DATA_DIR: join(root, "data"),
+      SUMMING_CONFIG: configPath,
       TELEGRAM_BOT_TOKEN: "test-token",
       TELEGRAM_OWNER_ID: "42",
     });
@@ -89,13 +89,13 @@ test("deployment control stays disabled unless both absolute paths are configure
     assert.equal(disabled.deploymentStatePath, "");
     assert.throws(
       () => loadConfig({
-        SUMMATE_DATA_DIR: join(root, "data"),
-        SUMMATE_CONFIG: configPath,
+        SUMMING_DATA_DIR: join(root, "data"),
+        SUMMING_CONFIG: configPath,
         TELEGRAM_BOT_TOKEN: "test-token",
         TELEGRAM_OWNER_ID: "42",
-        SUMMATE_DEPLOY_REQUEST: "relative/request.json",
+        SUMMING_DEPLOY_REQUEST: "relative/request.json",
       }),
-      (error) => error instanceof ConfigError && error.message.includes("SUMMATE_DEPLOY_REQUEST"),
+      (error) => error instanceof ConfigError && error.message.includes("SUMMING_DEPLOY_REQUEST"),
     );
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -108,8 +108,8 @@ test("fails loudly without an owner", () => {
     assert.throws(
       () =>
         loadConfig({
-          SUMMATE_DATA_DIR: join(root, "data"),
-          SUMMATE_CONFIG: configPath,
+          SUMMING_DATA_DIR: join(root, "data"),
+          SUMMING_CONFIG: configPath,
           TELEGRAM_BOT_TOKEN: "test-token",
         }),
       (error) => error instanceof ConfigError && error.message.includes("TELEGRAM_OWNER_ID"),
@@ -123,8 +123,8 @@ test("supports Groq Whisper as an explicit transcription provider", () => {
   const { root, configPath } = fixture();
   try {
     const config = loadConfig({
-      SUMMATE_DATA_DIR: join(root, "data"),
-      SUMMATE_CONFIG: configPath,
+      SUMMING_DATA_DIR: join(root, "data"),
+      SUMMING_CONFIG: configPath,
       TELEGRAM_BOT_TOKEN: "test-token",
       TELEGRAM_OWNER_ID: "42",
       TRANSCRIPTION_PROVIDER: "groq",
@@ -144,8 +144,8 @@ test("rejects a transcription model that is unsupported by its provider", () => 
     assert.throws(
       () =>
         loadConfig({
-          SUMMATE_DATA_DIR: join(root, "data"),
-          SUMMATE_CONFIG: configPath,
+          SUMMING_DATA_DIR: join(root, "data"),
+          SUMMING_CONFIG: configPath,
           TELEGRAM_BOT_TOKEN: "test-token",
           TELEGRAM_OWNER_ID: "42",
           TRANSCRIPTION_PROVIDER: "groq",

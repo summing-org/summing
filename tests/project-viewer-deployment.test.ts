@@ -77,9 +77,9 @@ class FakeDeployment implements DeploymentControl {
   }
 }
 
-test("viewer exposes deployment controls only to the Summate administrator", async () => {
-  const root = mkdtempSync(join(tmpdir(), "summate-viewer-deploy-"));
-  const staticPath = join(root, "summate");
+test("viewer exposes deployment controls only to the SUMMING administrator", async () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-viewer-deploy-"));
+  const staticPath = join(root, "summing");
   const clientPath = join(root, "client");
   repository(staticPath);
   repository(clientPath);
@@ -88,8 +88,8 @@ test("viewer exposes deployment controls only to the Summate administrator", asy
   const port = await freePort();
   const staticWorkspace: WorkspaceConfig = { id: "repo", path: staticPath };
   const staticProject = new ProjectConfig(
-    "summate",
-    "Summate",
+    "summing",
+    "SUMMING",
     "repo",
     new Map([["repo", staticWorkspace]]),
     true,
@@ -107,7 +107,7 @@ test("viewer exposes deployment controls only to the Summate administrator", asy
     "",
     "medium",
     true,
-    new Map([["summate", staticProject]]),
+    new Map([["summing", staticProject]]),
     20,
     12,
     60,
@@ -133,7 +133,7 @@ test("viewer exposes deployment controls only to the Summate administrator", asy
     createdAt: Date.now() / 1_000,
   });
   const projects = new ProjectCatalog(config, state);
-  const adminConversation = state.bind(1, 1, "summate", "repo");
+  const adminConversation = state.bind(1, 1, "summing", "repo");
   const ownerConversation = state.bind(42, 1, "client", "repo");
   const deployment = new FakeDeployment();
   const viewer = new ProjectViewerServer(config, state, projects, deployment);

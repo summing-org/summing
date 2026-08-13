@@ -1,6 +1,6 @@
-# Summate 8.7
+# SUMMING 9.0
 
-Summate — один постоянно живущий агент с одним администратором и назначаемыми
+SUMMING — один постоянно живущий агент с одним администратором и назначаемыми
 владельцами проектов. Он работает на Linux VPS, принимает команды из Telegram
 forum topics и исполняет их через общий официальный Codex App Server с
 авторизацией ChatGPT subscription администратора.
@@ -38,7 +38,7 @@ Project
   сети, web search, plugins/connectors и доступа к runtime memory или файлам
   секретов;
 - Telegram documents до 20 МБ скачиваются в приватный spool и перед Run
-  копируются в исключённый из Git `.summate-runtime/attachments`; ZIP сначала
+  копируются в исключённый из Git `.summing-runtime/attachments`; ZIP сначала
   инспектируется как архив и не распаковывается автоматически на хосте;
 - voice/audio по умолчанию транскрибируются через OpenAI `gpt-transcribe`;
   Groq Whisper доступен как опция, в Codex передаётся только текст, а локальный
@@ -73,15 +73,15 @@ persistent threads, streaming и `turn/steer`:
 Для нового Ubuntu 24.04 x86-64 VPS обязательно выберите SSH-ключ и вставьте
 содержимое [deploy/cloud-init.yaml](deploy/cloud-init.yaml) в поле **Cloud config**
 формы создания сервера. Файл устанавливает системные пакеты, Node.js 24 LTS,
-Codex CLI, пользователя `summate`, 4 GiB swap, UFW и автоматические security
+Codex CLI, пользователя `summing`, 4 GiB swap, UFW и автоматические security
 updates. Секретов в cloud-init нет, сервис автоматически не запускается.
 
 После создания VPS дождитесь bootstrap и загрузите приватный репозиторий вместе
 с `.git`:
 
 ```bash
-summate_server=203.0.113.10
-ssh -i ~/.ssh/summing-deploy root@"${summate_server}" 'cloud-init status --wait'
+summing_server=203.0.113.10
+ssh -i ~/.ssh/summing-deploy root@"${summing_server}" 'cloud-init status --wait'
 rsync -az \
   --exclude node_modules \
   --exclude dist \
@@ -92,19 +92,19 @@ rsync -az \
   --exclude '/.env.*' \
   --exclude '/.codex' \
   --exclude '/config.toml' \
-  --exclude '/summate.env' \
+  --exclude '/summing.env' \
   --exclude '/data' \
   -e "ssh -i ~/.ssh/summing-deploy" \
-  ./ root@"${summate_server}":/opt/summate/
-ssh -i ~/.ssh/summing-deploy root@"${summate_server}"
+  ./ root@"${summing_server}":/opt/summing/
+ssh -i ~/.ssh/summing-deploy root@"${summing_server}"
 ```
 
 На VPS заполните `TELEGRAM_BOT_TOKEN`, Telegram ID администратора в
 `TELEGRAM_OWNER_ID` и отдельный `OPENAI_API_KEY`:
 
 ```bash
-nano /etc/summate/summate.env
-/opt/summate/deploy/activate.sh
+nano /etc/summing/summing.env
+/opt/summing/deploy/activate.sh
 ```
 
 `activate.sh` создаёт production-конфиг, выполняет `npm ci`, lint, тесты и
@@ -114,18 +114,18 @@ nano /etc/summate/summate.env
 API credentials или приватный deploy key в cloud-init: user-data сохраняется в
 metadata провайдера и самого VPS.
 
-Для автоматических обновлений настройте пользователю `summate` read-only SSH
+Для автоматических обновлений настройте пользователю `summing` read-only SSH
 deploy key к приватному репозиторию и убедитесь, что следующая команда работает
 без prompt:
 
 ```bash
-sudo -u summate env HOME=/var/lib/summate GIT_TERMINAL_PROMPT=0 \
-  git -C /opt/summate fetch origin master
+sudo -u summing env HOME=/var/lib/summing GIT_TERMINAL_PROMPT=0 \
+  git -C /opt/summing fetch origin master
 ```
 
-Ожидаемый URL `origin` закреплён в root-only `/etc/summate/deploy.env`. По
-умолчанию это `git@summing.github.com:summing-org/summate.git`; измените
-`SUMMATE_DEPLOY_EXPECTED_REMOTE`, если VPS использует другой эквивалентный SSH
+Ожидаемый URL `origin` закреплён в root-only `/etc/summing/deploy.env`. По
+умолчанию это `git@summing.github.com:summing-org/summing.git`; измените
+`SUMMING_DEPLOY_EXPECTED_REMOTE`, если VPS использует другой эквивалентный SSH
 URL.
 
 ## Ручная установка
@@ -134,21 +134,21 @@ URL.
 npm ci
 npm run build
 npm prune --omit=dev
-cp deploy/config.production.toml /var/lib/summate/data/config.toml
+cp deploy/config.production.toml /var/lib/summing/data/config.toml
 sudo install -d -m 0755 /etc/codex
 sudo install -m 0644 deploy/codex-requirements.toml /etc/codex/requirements.toml
 ```
 
 Настройте статические администраторские проекты в `config.toml`, секреты в
-`/etc/summate/summate.env`, затем
-установите [deploy/summate.service](deploy/summate.service). Unit ожидает Node.js
+`/etc/summing/summing.env`, затем
+установите [deploy/summing.service](deploy/summing.service). Unit ожидает Node.js
 в `/usr/local/bin/node`; при другом способе установки скорректируйте `ExecStart`.
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now summate
-sudo systemctl status summate
-sudo journalctl -u summate -f
+sudo systemctl enable --now summing
+sudo systemctl status summing
+sudo journalctl -u summing -f
 curl --fail http://127.0.0.1:8765/health
 ```
 
@@ -166,10 +166,10 @@ curl --fail http://127.0.0.1:8765/health
 ```
 
 `/project_create` создаёт пустой Git-репозиторий в
-`$SUMMATE_DATA_DIR/repositories/<project>/<repo>`. `/project_clone` клонирует
+`$SUMMING_DATA_DIR/repositories/<project>/<repo>`. `/project_clone` клонирует
 существующий remote туда же. Обе команды принимает только личный чат
 администратора; перезапуск не нужен. Не передавайте token в Git URL — настройте
-SSH/credential helper для системного пользователя `summate`.
+SSH/credential helper для системного пользователя `summing`.
 Идентификатор проекта должен соответствовать `[a-z0-9][a-z0-9._-]{0,63}`;
 последовательность `..` и окончание `.lock` запрещены, потому что ID входит в
 имя рабочей Git-ветки.
@@ -186,7 +186,7 @@ Codex-turn получает restricted read roots своего conversation work
 с read-only filesystem, выключенной сетью и `approvalPolicy = "never"`. Все
 slash-команды гостя блокируются runtime до обращения к Codex.
 
-Документ можно отправить с caption или без него. Summate сохранит его внутри
+Документ можно отправить с caption или без него. SUMMING сохранит его внутри
 runtime-каталога conversation и передаст Codex точный относительный путь. Архивы
 не исполняются и не распаковываются автоматически. Voice, Telegram audio и
 аудиодокументы поддерживаемых форматов по умолчанию отправляются в
@@ -207,7 +207,7 @@ runtime-каталога conversation и передаст Codex точный о�
 `@username_бота` или reply на его сообщение обходит ожидание пакета и означает:
 «ответь на это обязательно».
 
-Чтобы Summate действительно видел обычные сообщения, в Telegram нужно выполнить
+Чтобы SUMMING действительно видел обычные сообщения, в Telegram нужно выполнить
 одно из двух условий:
 
 1. сделать бота администратором forum group; или
@@ -253,7 +253,7 @@ Runtime сохраняет событие `my_chat_member`, поэтому до�
 ## Данные
 
 ```text
-$SUMMATE_DATA_DIR/
+$SUMMING_DATA_DIR/
 ├── config.toml
 ├── state.sqlite3
 ├── codex/
@@ -276,37 +276,37 @@ Viewer всегда слушает только `127.0.0.1:8766`. Без пуб�
 ревизией проекта:
 
 ```bash
-SUMMATE_VIEWER_DOMAIN=viewer.example.com \
+SUMMING_VIEWER_DOMAIN=viewer.example.com \
 ASH_SEO_REVISION=<full-commit-sha> \
 ENABLE_ASH_SEO_TIMER=0 \
-sudo /opt/summate/deploy/install-project-operations.sh
+sudo /opt/summing/deploy/install-project-operations.sh
 ```
 
-Installer создаёт отдельного `summate-runner`, rootless Docker с лимитом build
+Installer создаёт отдельного `summing-runner`, rootless Docker с лимитом build
 cache 8 ГБ, HTTPS proxy, project config/data и timer unit. Пользователь
-`summate` не получает Docker socket. Перед включением live timer замените
-placeholders в `/etc/summate-runner/projects/ash-seo.env` и проверьте
+`summing` не получает Docker socket. Перед включением live timer замените
+placeholders в `/etc/summing-runner/projects/ash-seo.env` и проверьте
 `ash-seo.config.json`, затем запустите Validate и Dry run из Viewer.
 
-## Автоматическое обновление Summate
+## Автоматическое обновление SUMMING
 
-`summate-deploy.timer` каждые 10 минут делает `fetch` закреплённого
+`summing-deploy.timer` каждые 10 минут делает `fetch` закреплённого
 `origin/master`. Ту же проверку администратор может немедленно запросить во
 вкладке **Настройки** Project Viewer. Владельцы назначенных проектов эту вкладку
 не видят и deploy API для них возвращает `403`.
 
-Worker никогда не делает `pull`, `reset` или checkout рабочего `/opt/summate`.
-Он экспортирует точный remote commit в `/opt/summate-releases/<sha>`, собирает и
-тестирует snapshot от отдельного пользователя `summate-builder`, ждёт завершения
-активных Codex runs, атомарно переключает `/opt/summate-current` и проверяет
-Summate и runner. При неуспешном health check symlink и сервисы автоматически
+Worker никогда не делает `pull`, `reset` или checkout рабочего `/opt/summing`.
+Он экспортирует точный remote commit в `/opt/summing-releases/<sha>`, собирает и
+тестирует snapshot от отдельного пользователя `summing-builder`, ждёт завершения
+активных Codex runs, атомарно переключает `/opt/summing-current` и проверяет
+SUMMING и runner. При неуспешном health check symlink и сервисы автоматически
 возвращаются на предыдущий release. Non-fast-forward обновления отклоняются.
 
 ```bash
-systemctl list-timers summate-deploy.timer
-systemctl status summate-deploy.service
-journalctl -u summate-deploy --since today
-sudo systemctl start summate-deploy.service
+systemctl list-timers summing-deploy.timer
+systemctl status summing-deploy.service
+journalctl -u summing-deploy --since today
+sudo systemctl start summing-deploy.service
 ```
 
 ## Тесты

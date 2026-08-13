@@ -55,7 +55,7 @@ write_files:
 
       [plugins]
 
-  - path: /usr/local/sbin/summate-bootstrap
+  - path: /usr/local/sbin/summing-bootstrap
     owner: root:root
     permissions: "0750"
     content: |
@@ -66,23 +66,23 @@ write_files:
       node_archive="node-${node_version}-linux-x64.tar.xz"
       node_dir="/opt/node-${node_version}"
 
-      if ! id summate >/dev/null 2>&1; then
+      if ! id summing >/dev/null 2>&1; then
         useradd \
           --system \
           --create-home \
-          --home-dir /var/lib/summate \
+          --home-dir /var/lib/summing \
           --shell /usr/sbin/nologin \
-          summate
+          summing
       fi
 
-      install -d -o summate -g summate -m 0700 /var/lib/summate/data
-      install -d -o summate -g summate -m 0700 /var/lib/summate/data/codex
-      install -d -o summate -g summate -m 0700 /var/lib/summate/data/worktrees
-      install -d -o root -g summate -m 0750 /etc/summate
-      install -d -o summate -g summate -m 0750 /opt/summate
-      install -d -o summate -g summate -m 0750 /srv/projects
-      chown root:summate /etc/summate/summate.env
-      chmod 0640 /etc/summate/summate.env
+      install -d -o summing -g summing -m 0700 /var/lib/summing/data
+      install -d -o summing -g summing -m 0700 /var/lib/summing/data/codex
+      install -d -o summing -g summing -m 0700 /var/lib/summing/data/worktrees
+      install -d -o root -g summing -m 0750 /etc/summing
+      install -d -o summing -g summing -m 0750 /opt/summing
+      install -d -o summing -g summing -m 0750 /srv/projects
+      chown root:summing /etc/summing/summing.env
+      chmod 0640 /etc/summing/summing.env
 
       if ! swapon --show=NAME --noheadings | grep -qx /swapfile; then
         if [ ! -f /swapfile ]; then
@@ -95,7 +95,7 @@ write_files:
       if ! grep -q '^/swapfile ' /etc/fstab; then
         printf '%s\n' '/swapfile none swap sw 0 0' >> /etc/fstab
       fi
-      printf '%s\n' 'vm.swappiness=10' > /etc/sysctl.d/60-summate-swap.conf
+      printf '%s\n' 'vm.swappiness=10' > /etc/sysctl.d/60-summing-swap.conf
       sysctl --system >/dev/null
 
       if [ ! -x "${node_dir}/bin/node" ]; then
@@ -121,12 +121,12 @@ write_files:
       ln -sfn "${node_dir}/bin/npx" /usr/local/bin/npx
       ln -sfn "${node_dir}/bin/corepack" /usr/local/bin/corepack
 
-      sudo -u summate \
-        env HOME=/var/lib/summate PATH=/usr/local/bin:/usr/bin:/bin \
+      sudo -u summing \
+        env HOME=/var/lib/summing PATH=/usr/local/bin:/usr/bin:/bin \
         bash -c \
-        'cd /var/lib/summate && curl -fsSL https://chatgpt.com/codex/install.sh | sh'
-      test -x /var/lib/summate/.local/bin/codex
-      ln -sfn /var/lib/summate/.local/bin/codex /usr/local/bin/codex
+        'cd /var/lib/summing && curl -fsSL https://chatgpt.com/codex/install.sh | sh'
+      test -x /var/lib/summing/.local/bin/codex
+      ln -sfn /var/lib/summing/.local/bin/codex /usr/local/bin/codex
 
       printf '%s\n' \
         'APT::Periodic::Update-Package-Lists "1";' \
@@ -143,7 +143,7 @@ write_files:
         'PermitRootLogin prohibit-password' \
         'PasswordAuthentication no' \
         'KbdInteractiveAuthentication no' \
-        > /etc/ssh/sshd_config.d/60-summate-hardening.conf
+        > /etc/ssh/sshd_config.d/60-summing-hardening.conf
       sshd -t
       systemctl reload ssh
 
@@ -152,16 +152,16 @@ write_files:
       codex --version
       git --version
 
-  - path: /etc/summate/summate.env
+  - path: /etc/summing/summing.env
     owner: root:root
     permissions: "0640"
     content: |
-      SUMMATE_DATA_DIR=/var/lib/summate/data
-      SUMMATE_CONFIG=/var/lib/summate/data/config.toml
-      SUMMATE_WORKTREE_ROOT=/var/lib/summate/data/worktrees
-      SUMMATE_DEPLOY_REQUEST=/var/lib/summate/deploy/request.json
-      SUMMATE_DEPLOY_STATE=/var/lib/summate/deploy/state.json
-      CODEX_HOME=/var/lib/summate/data/codex
+      SUMMING_DATA_DIR=/var/lib/summing/data
+      SUMMING_CONFIG=/var/lib/summing/data/config.toml
+      SUMMING_WORKTREE_ROOT=/var/lib/summing/data/worktrees
+      SUMMING_DEPLOY_REQUEST=/var/lib/summing/deploy/request.json
+      SUMMING_DEPLOY_STATE=/var/lib/summing/deploy/state.json
+      CODEX_HOME=/var/lib/summing/data/codex
       CODEX_BIN=/usr/local/bin/codex
       TELEGRAM_BOT_TOKEN=
       TELEGRAM_OWNER_ID=
@@ -171,24 +171,24 @@ write_files:
       GROQ_API_KEY=
       NODE_ENV=production
 
-  - path: /root/SUMMATE_NEXT_STEPS.txt
+  - path: /root/SUMMING_NEXT_STEPS.txt
     owner: root:root
     permissions: "0600"
     content: |
-      Summate host bootstrap is complete.
+      SUMMING host bootstrap is complete.
 
-      1. Upload the private repository, including .git, to /opt/summate.
+      1. Upload the private repository, including .git, to /opt/summing.
       2. Set TELEGRAM_BOT_TOKEN, TELEGRAM_OWNER_ID and OPENAI_API_KEY in:
-         /etc/summate/summate.env
+         /etc/summing/summing.env
       3. Run:
-         /opt/summate/deploy/activate.sh
+         /opt/summing/deploy/activate.sh
       4. Send /login to the bot and complete ChatGPT device-code login.
       5. In the administrator's private bot chat, create a managed project:
          /project_create client_name 123456789 repo_name
 
 runcmd:
-  - [bash, /usr/local/sbin/summate-bootstrap]
+  - [bash, /usr/local/sbin/summing-bootstrap]
 
 final_message: >-
-  Summate host bootstrap completed. Read /root/SUMMATE_NEXT_STEPS.txt and
+  SUMMING host bootstrap completed. Read /root/SUMMING_NEXT_STEPS.txt and
   upload the repository before activating the service.

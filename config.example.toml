@@ -29,22 +29,22 @@ max_file_bytes = 20000000
 port = 8765
 
 [viewer]
-# Project Viewer always listens on loopback. Set SUMMATE_VIEWER_URL after
+# Project Viewer always listens on loopback. Set SUMMING_VIEWER_URL after
 # configuring a public HTTPS reverse proxy.
 port = 8766
 public_url = ""
 auth_max_age_sec = 900
-runner_socket = "/run/summate-runner/runner.sock"
+runner_socket = "/run/summing-runner/runner.sock"
 
 # Static projects belong to TELEGRAM_OWNER_ID. The administrator can also create
-# managed projects under $SUMMATE_DATA_DIR/repositories with /project_create.
-[projects.summate]
-name = "Summate"
+# managed projects under $SUMMING_DATA_DIR/repositories with /project_create.
+[projects.summing]
+name = "SUMMING"
 default_workspace = "repo"
 self_change = true
 
-[projects.summate.workspaces.repo]
-path = "/opt/summate"
+[projects.summing.workspaces.repo]
+path = "/opt/summing"
 
 [projects.secret-cloud]
 name = "Secret Cloud"

@@ -1,5 +1,5 @@
 {
-  "configPath": "/etc/summate-runner/projects/ash-seo.config.json",
-  "envPath": "/etc/summate-runner/projects/ash-seo.env",
-  "dataPath": "/var/lib/summate-runs/ash-seo/data"
+  "configPath": "/etc/summing-runner/projects/ash-seo.config.json",
+  "envPath": "/etc/summing-runner/projects/ash-seo.env",
+  "dataPath": "/var/lib/summing-runs/ash-seo/data"
 }

@@ -1,6 +1,6 @@
-# Summate 8.7: архитектура, эксплуатация и разработка
+# SUMMING 9.0: архитектура, эксплуатация и разработка
 
-> Версия: **8.7.0**
+> Версия: **9.0.0**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
 > Последняя сверка с кодом: **12 августа 2026 года**.
 
@@ -14,12 +14,12 @@
 
 ## 1. Что это за проект
 
-Summate — постоянно работающий агент с одним администратором и назначаемыми
+SUMMING — постоянно работающий агент с одним администратором и назначаемыми
 владельцами проектов. Они общаются с ним через Telegram, а фактический агентный
 цикл выполняет один общий официальный Codex App Server, авторизованный ChatGPT
 account администратора.
 
-Summate не реализует собственную LLM, набор shell-инструментов или очередной
+SUMMING не реализует собственную LLM, набор shell-инструментов или очередной
 универсальный agent framework. Его задача значительно уже:
 
 1. связать Telegram topic с проектом и локальной рабочей областью;
@@ -35,7 +35,7 @@ Summate не реализует собственную LLM, набор shell-и�
 В результате граница ответственности выглядит так:
 
 ```text
-Telegram и Summate                  Codex App Server
+Telegram и SUMMING                  Codex App Server
 ---------------------------------  ---------------------------------
 администратор/owner/participant     модель и agent loop
 binding topic → project             editor/read-only Codex threads
@@ -125,16 +125,16 @@ path = "/srv/projects/secret-cloud/web-app"
 - обычным каталогом без Git.
 
 Для TOML-проектов каталог заранее готовит администратор. Для управляемых проектов
-Summate сам создаёт или клонирует Git-репозиторий в
-`$SUMMATE_DATA_DIR/repositories/<project-id>/<repo-id>`. Он настраивает локальную
-Git identity `Summate <summate@localhost>` и гарантирует существование начального
+SUMMING сам создаёт или клонирует Git-репозиторий в
+`$SUMMING_DATA_DIR/repositories/<project-id>/<repo-id>`. Он настраивает локальную
+Git identity `SUMMING <summing@localhost>` и гарантирует существование начального
 commit, чтобы conversation worktree можно было создать даже для нового или
 пустого remote.
 
-Summate не содержит GitHub App или PR/release pipeline. Обычные remotes,
+SUMMING не содержит GitHub App или PR/release pipeline. Обычные remotes,
 credentials и правила push принадлежат локальному Git/Codex. Token нельзя
 встраивать в Git URL: для приватного remote следует настроить SSH или credential
-helper пользователя systemd `summate`.
+helper пользователя systemd `summing`.
 
 ### 3.3. Conversation
 
@@ -248,7 +248,7 @@ Steer меняет уже выполняющийся turn. Он создаётс
 - командой `/steer <текст>`;
 - reply на одно из стриминговых сообщений текущего ответа.
 
-Summate вызывает официальный `turn/steer` с `expectedTurnId`. После успешной
+SUMMING вызывает официальный `turn/steer` с `expectedTurnId`. После успешной
 доставки запись помечается обработанной. Если steering отклонён или turn уже
 закрылся, сообщение не теряется: оно остаётся и становится частью следующего
 turn.
@@ -258,7 +258,7 @@ turn.
 Обычное сообщение во время Run не создаёт параллельную задачу в том же topic. Оно
 попадает в `pending_inputs` как follow-up.
 
-После завершения активного Run Summate:
+После завершения активного Run SUMMING:
 
 1. забирает оставшиеся steer и все follow-up;
 2. сохраняет их порядок;
@@ -302,16 +302,16 @@ offset сохраняется в SQLite. Поэтому такая ошибка 
 Сообщение может содержать `document`, `voice` или `audio`. Runtime сначала
 проверяет binding, ACL и participant rate limit, затем вызывает Telegram
 `getFile` и скачивает не более 20 МБ в приватный
-`$SUMMATE_DATA_DIR/attachments/<conversation-id>/`. Имя очищается от path
+`$SUMMING_DATA_DIR/attachments/<conversation-id>/`. Имя очищается от path
 components и управляющих символов; pending input хранит типизированные metadata,
 поэтому вложение переживает рестарт до начала Run.
 
 Документ перед Run копируется в
-`.summate-runtime/attachments/<message-id>-<input-id>-<name>`. Каталог исключён
+`.summing-runtime/attachments/<message-id>-<input-id>-<name>`. Каталог исключён
 из Git и доступен Codex только на чтение, в том числе в guest profile. ZIP не
 распаковывается host-процессом: это исключает zip-slip и decompression bomb на
 privileged boundary. Editor может распаковать проверенный архив только в
-`.summate-runtime/tmp`; read-only thread ограничивается `unzip -l`/`unzip -p` и
+`.summing-runtime/tmp`; read-only thread ограничивается `unzip -l`/`unzip -p` и
 другими не меняющими состояние inspection-командами.
 
 Voice, Telegram audio и аудиодокумент поддерживаемого формата отправляются по
@@ -331,24 +331,24 @@ Server или shell. В очередь передаётся полученный
 worktree на Conversation:
 
 ```text
-$SUMMATE_WORKTREE_ROOT/
+$SUMMING_WORKTREE_ROOT/
 └── tg-<hash>/
     ├── .git
     ├── файлы репозитория
-    └── .summate-runtime/
+    └── .summing-runtime/
 ```
 
 Ветка имеет вид:
 
 ```text
-summate/<project-id>/<conversation-id>
+summing/<project-id>/<conversation-id>
 ```
 
 При первом обращении ветка создаётся от текущего `HEAD` исходного checkout. При
 следующих обращениях используется тот же worktree и та же ветка. Если каталог
 worktree был удалён, но ветка сохранилась, она подключается без reset.
 
-Перед повторным использованием существующего worktree Summate сравнивает его
+Перед повторным использованием существующего worktree SUMMING сравнивает его
 общий Git directory с исходным репозиторием. Если topic перепривязали к Workspace
 из другого репозитория, но старый каталог `tg-<hash>` остался на диске, Run
 завершится ошибкой до ручной очистки или переноса старого worktree. Runtime сам
@@ -362,7 +362,7 @@ worktree был удалён, но ветка сохранилась, она п�
 Для Workspace-подкаталога monorepo создаётся worktree всего репозитория, но
 рабочим `cwd` Codex становится соответствующий подкаталог.
 
-Summate не делает автоматически merge, rebase, commit, push или удаление веток.
+SUMMING не делает автоматически merge, rebase, commit, push или удаление веток.
 Это обычные Git-действия, которые Codex выполняет только в рамках запроса
 владельца. Поэтому параллельность изолирует незавершённую работу, но интеграция
 веток остаётся явным решением.
@@ -371,16 +371,16 @@ Summate не делает автоматически merge, rebase, commit, push
 напрямую. Runs одного такого Workspace сериализуются: это сохраняет целостность
 read-only профиля, но не даёт изоляции незавершённых изменений между
 Conversations. Для параллельной разработки рекомендуется Git. Автоматическое добавление
-`.summate-runtime/` в Git `info/exclude` выполняется только для Git worktree.
+`.summing-runtime/` в Git `info/exclude` выполняется только для Git worktree.
 
 ## 6. Контекст и память
 
-В Summate осталось четыре уровня состояния.
+В SUMMING осталось четыре уровня состояния.
 
 ### 6.1. Identity
 
 ```text
-$SUMMATE_DATA_DIR/memory/identity.md
+$SUMMING_DATA_DIR/memory/identity.md
 ```
 
 Файл создаётся один раз и не перезаписывается при старте. Он описывает устойчивую
@@ -389,13 +389,13 @@ $SUMMATE_DATA_DIR/memory/identity.md
 ### 6.2. Project memory
 
 ```text
-$SUMMATE_DATA_DIR/projects/<project-id>/memory.md
+$SUMMING_DATA_DIR/projects/<project-id>/memory.md
 ```
 
 Это общая долговременная память всех Conversations проекта. Перед turn её снимок
-попадает в `.summate-runtime/memory/PROJECT_MEMORY.md`.
+попадает в `.summing-runtime/memory/PROJECT_MEMORY.md`.
 
-Контекст просит агента только добавлять устойчивые факты. После Run Summate
+Контекст просит агента только добавлять устойчивые факты. После Run SUMMING
 сравнивает локальный файл со снимком, сделанным перед Run:
 
 - append-only суффикс добавляется к текущему авторитетному файлу, если его там ещё
@@ -418,7 +418,7 @@ Git worktree.
 В рабочей области создаются:
 
 ```text
-.summate-runtime/
+.summing-runtime/
 ├── CONTEXT.md
 ├── memory/
 │   └── PROJECT_MEMORY.md
@@ -432,7 +432,7 @@ non-Git Workspace исключение отсутствует.
 
 ## 7. Codex App Server и ChatGPT subscription
 
-Summate использует один execution substrate: официальный `codex app-server`.
+SUMMING использует один execution substrate: официальный `codex app-server`.
 Связь с ним идёт по JSON Lines/JSON-RPC через stdin/stdout дочернего процесса.
 
 Используемая поверхность:
@@ -456,16 +456,16 @@ Summate использует один execution substrate: официальны�
 | `account/rateLimits/updated` | Немедленно перечитать snapshot лимитов. |
 
 ChatGPT OAuth-токены хранит и обновляет сам Codex в выделенном
-`$CODEX_HOME`. API key Summate не требует.
+`$CODEX_HOME`. API key SUMMING не требует.
 
-Перед каждым Run Summate создаёт запись `running` и атомарно помечает выбранные
+Перед каждым Run SUMMING создаёт запись `running` и атомарно помечает выбранные
 pending inputs как `consumed`, а затем вызывает `account/read`. Если account не
 авторизован, Run становится `failed`, но исходный input автоматически в очередь
 не возвращается — после входа его нужно отправить повторно. Direct editor Run
 просит выполнить `/login`, direct participant Run сообщает о недоступности, а
 ambient Run завершается без сообщения в группу.
 
-Для входа отправьте боту `/login` в **личном чате**. Summate не показывает
+Для входа отправьте боту `/login` в **личном чате**. SUMMING не показывает
 device code в группе. Команда доступна только администратору. После подтверждения
 проверьте `/status`. Все Project owners используют этот общий account и не
 выполняют отдельный login.
@@ -488,7 +488,7 @@ Telegram-бота. Это состояние `CODEX_HOME` на VPS; локаль
 
 Клиент включает experimental App Server API и при `thread/start` или
 `thread/resume` выбирает один из двух именованных профилей. Editor thread получает
-`summate-project`, в который входят:
+`summing-project`, в который входят:
 
 - `approvalPolicy = never`;
 - `runtimeWorkspaceRoots`, ограниченный conversation worktree;
@@ -497,14 +497,14 @@ Telegram-бота. Это состояние `CODEX_HOME` на VPS; локаль
   доступен только на чтение: standalone Codex повторно запускает этот binary
   внутри Linux sandbox при выполнении shell-команд;
 - read всего текущего worktree и write только текущего Workspace внутри него;
-- служебный `.summate-runtime` доступен на чтение, а запись разрешена только в
+- служебный `.summing-runtime` доступен на чтение, а запись разрешена только в
   каталогах `memory/` и `tmp/`; `attachments/` доступен только на чтение;
   permission profile не использует отдельный файл
   `PROJECT_MEMORY.md` как writable root;
 - `.git`-указатель worktree доступен на чтение, а project-scoped общий Git
   directory — на запись, чтобы owner мог выполнять `git add`, commit, rebase и
   push без доступа к metadata других репозиториев;
-- временные файлы editor создаются в `.summate-runtime/tmp` текущего worktree,
+- временные файлы editor создаются в `.summing-runtime/tmp` текущего worktree,
   а не в общем системном `/tmp`;
 - network выключен или, при `agent.network_access = true`, явно разрешены все
   домены;
@@ -518,9 +518,9 @@ Telegram-бота. Это состояние `CODEX_HOME` на VPS; локаль
   MCP/plugin servers, поэтому user/project config не может вернуть интеграции
   общего account администратора.
 
-Read-only Q&A thread получает `summate-project-readonly`: Workspace доступен
+Read-only Q&A thread получает `summing-project-readonly`: Workspace доступен
 только на чтение, network, web search, Browser и Computer Use выключены, а
-`.summate-runtime` (кроме read-only `attachments/`), `.env`, `.envrc`, `.ssh`, Git/package/cloud credentials,
+`.summing-runtime` (кроме read-only `attachments/`), `.env`, `.envrc`, `.ssh`, Git/package/cloud credentials,
 private keys, certificates и symlinks перед каждым guest run рекурсивно
 обнаруживаются host-процессом и закрываются точными deny-путями без ограничения
 глубины. Его prompt дополнительно
@@ -532,7 +532,7 @@ profile и `approvalPolicy = never` являются технической гр
 `turn/start` повторяет `runtimeWorkspaceRoots` и наследует профиль thread. Поля
 legacy `sandbox`/`sandboxPolicy` вместе с именованным профилем не передаются.
 
-У Summate нет Telegram-интерфейса подтверждений. Если управляемая политика всё же
+У SUMMING нет Telegram-интерфейса подтверждений. Если управляемая политика всё же
 присылает command/file approval request, клиент отвечает `decline`; permission
 request получает пустой набор permissions, а legacy approvals — явный отказ.
 Любой другой server-initiated request получает ошибку `-32601`.
@@ -542,7 +542,7 @@ App Server запускается с минимальным allowlist перем
 сверена с официальной документацией Codex App Server и реальным установленным
 сервером.
 
-`CODEX_HOME` должен быть выделен только Summate и использоваться для auth/state.
+`CODEX_HOME` должен быть выделен только SUMMING и использоваться для auth/state.
 Runtime откажется запускаться, если его `config.toml` содержит MCP servers или
 hooks. `deploy/activate.sh` при каждом развёртывании обновляет системные Codex
 requirements из [deploy/codex-requirements.toml](deploy/codex-requirements.toml).
@@ -578,17 +578,17 @@ requirements из [deploy/codex-requirements.toml](deploy/codex-requirements.tom
 В конфиге собственный репозиторий можно отметить:
 
 ```toml
-[projects.summate]
+[projects.summing]
 self_change = true
 ```
 
-Флаг лишь сообщает контексту, что Workspace является телом Summate. Отдельного
+Флаг лишь сообщает контексту, что Workspace является телом SUMMING. Отдельного
 механизма автоматического самоизменения он не включает. Изменять код разрешено
 только по прямой команде администратора.
 
 `self_change` не является единственным authorization gate. Статический проект
-Summate принадлежит администратору, а значение флага попадает в
-`.summate-runtime/CONTEXT.md`; прямой запрос администратора дополнительно
+SUMMING принадлежит администратору, а значение флага попадает в
+`.summing-runtime/CONTEXT.md`; прямой запрос администратора дополнительно
 обеспечивается конституцией и инструкцией модели.
 
 Ожидаемый процесс:
@@ -609,7 +609,7 @@ Summate принадлежит администратору, а значение
 Project Viewer — второй loopback HTTP server (`127.0.0.1:8766`). Статический
 mobile-first интерфейс и JSON API показывают:
 
-- tracked/untracked дерево без `.git`, `.summate-runtime`, secrets, dependency,
+- tracked/untracked дерево без `.git`, `.summing-runtime`, secrets, dependency,
   build и persistent-data каталогов;
 - только regular text files до 1 МБ без symlink traversal;
 - working diff относительно `HEAD`, включая синтетический diff untracked files;
@@ -629,17 +629,17 @@ identity именно в private bot chat.
 snapshot и сохраняется patch в `run-artifacts`. Snapshot включает tracked и
 untracked, но соблюдает `.gitignore`.
 
-Runner работает отдельным Unix user `summate-runner` и использует собственный
-rootless Docker daemon. Пользователь `summate` не получает Docker socket. Через
+Runner работает отдельным Unix user `summing-runner` и использует собственный
+rootless Docker daemon. Пользователь `summing` не получает Docker socket. Через
 Unix socket принимаются только project id, одна из четырёх фиксированных
-операций и Git archive до 50 МБ. Runner не читает conversation worktree: Summate
+операций и Git archive до 50 МБ. Runner не читает conversation worktree: SUMMING
 сам создаёт immutable archive выбранной ревизии и передаёт его в запросе.
 Контейнер запускается read-only, без capabilities, с `no-new-privileges`, PID,
 CPU и memory limits; writable остаётся только project data bind mount.
 
 `validate`, `dry-run` и `build` могут использовать временный snapshot грязного
 worktree. `run` требует чистый committed `HEAD`. Периодический запуск читает
-`/etc/summate-runner/schedules/<project>.json`, поэтому всегда закреплён на
+`/etc/summing-runner/schedules/<project>.json`, поэтому всегда закреплён на
 явном полном SHA и не меняется от последующих commits самопроизвольно.
 
 ## 10. Telegram-команды
@@ -679,8 +679,8 @@ worktree в SQLite, очищает active state и помечает ожидаю
 При значениях путей по умолчанию состояние выглядит так:
 
 ```text
-$SUMMATE_DATA_DIR/
-├── config.toml                    # default SUMMATE_CONFIG
+$SUMMING_DATA_DIR/
+├── config.toml                    # default SUMMING_CONFIG
 ├── state.sqlite3
 ├── state.sqlite3-wal
 ├── state.sqlite3-shm
@@ -695,14 +695,14 @@ $SUMMATE_DATA_DIR/
 │   └── <project-id>/<repo-id>/
 ├── run-artifacts/                 # before/after snapshots и patch каждого editor Run
 │   └── <conversation-id>/<run-id>/
-└── worktrees/                     # default SUMMATE_WORKTREE_ROOT
+└── worktrees/                     # default SUMMING_WORKTREE_ROOT
     └── <conversation-id>/
 ```
 
-`SUMMATE_CONFIG`, `CODEX_HOME` и `SUMMATE_WORKTREE_ROOT` могут указывать за
+`SUMMING_CONFIG`, `CODEX_HOME` и `SUMMING_WORKTREE_ROOT` могут указывать за
 пределы data dir. Единственный жёстко расположенный внутри data dir файл базы —
 `state.sqlite3`; identity и project memory также всегда строятся от
-`SUMMATE_DATA_DIR`.
+`SUMMING_DATA_DIR`.
 
 SQLite хранит:
 
@@ -761,7 +761,7 @@ Telegram-проекты находятся в SQLite и не записываю�
 | `viewer.port` | Loopback-порт Project Viewer. | 8766 |
 | `viewer.public_url` | Публичный HTTPS URL Mini App. | пусто |
 | `viewer.auth_max_age_sec` | Максимальный возраст Telegram initData. | 900 |
-| `viewer.runner_socket` | Unix socket изолированного runner. | `/run/summate-runner/runner.sock` |
+| `viewer.runner_socket` | Unix socket изолированного runner. | `/run/summing-runner/runner.sock` |
 | `projects.<id>.name` | Отображаемое имя. | id |
 | `projects.<id>.default_workspace` | Workspace для короткого `/bind`. | первый |
 | `projects.<id>.self_change` | Пометка собственного репозитория. | false |
@@ -779,7 +779,7 @@ health port — 1–65535. `codex_usage.timezone` проверяется чер�
 ### 12.2. Environment
 
 Секреты и системные пути находятся в
-[summate.env.example](summate.env.example):
+[summing.env.example](summing.env.example):
 
 | Переменная | Назначение |
 |---|---|
@@ -789,17 +789,17 @@ health port — 1–65535. `codex_usage.timezone` проверяется чер�
 | `TRANSCRIPTION_MODEL` | Override модели выбранного provider. |
 | `OPENAI_API_KEY` | Секрет OpenAI для дефолтной транскрипции voice/audio. |
 | `GROQ_API_KEY` | Секрет Groq для транскрипции voice/audio. |
-| `SUMMATE_DATA_DIR` | Корень durable state. |
-| `SUMMATE_CONFIG` | Путь к TOML. |
-| `SUMMATE_WORKTREE_ROOT` | Каталог conversation worktrees. |
+| `SUMMING_DATA_DIR` | Корень durable state. |
+| `SUMMING_CONFIG` | Путь к TOML. |
+| `SUMMING_WORKTREE_ROOT` | Каталог conversation worktrees. |
 | `CODEX_HOME` | Выделенное состояние/auth Codex. |
 | `CODEX_BIN` | Путь или executable name команды `codex`. |
 | `NODE_ENV` | Режим Node.js; в production выставляется `production`. |
-| `SUMMATE_VIEWER_URL` | Override публичного HTTPS URL Viewer. |
-| `SUMMATE_VIEWER_LOCAL_TOKEN` | Bearer token только для доступа через SSH tunnel. |
-| `SUMMATE_RUNNER_SOCKET` | Unix socket project runner. |
+| `SUMMING_VIEWER_URL` | Override публичного HTTPS URL Viewer. |
+| `SUMMING_VIEWER_LOCAL_TOKEN` | Bearer token только для доступа через SSH tunnel. |
+| `SUMMING_RUNNER_SOCKET` | Unix socket project runner. |
 
-Значения по умолчанию: `SUMMATE_DATA_DIR=~/Summate/data`, config —
+Значения по умолчанию: `SUMMING_DATA_DIR=~/summing/data`, config —
 `<data>/config.toml`, worktrees — `<data>/worktrees`, `CODEX_HOME=<data>/codex`,
 `CODEX_BIN=codex`. `CODEX_BIN` также можно задать как `agent.codex_binary` в TOML,
 но environment имеет приоритет. `TELEGRAM_OWNER_ID` должен быть положительным
@@ -807,14 +807,14 @@ health port — 1–65535. `codex_usage.timezone` проверяется чер�
 `<data>/repositories`; отдельная переменная пути намеренно не предусмотрена.
 `NODE_ENV` самим runtime не читается.
 
-Не используйте общий пользовательский `~/.codex` как `CODEX_HOME`: Summate
+Не используйте общий пользовательский `~/.codex` как `CODEX_HOME`: SUMMING
 ожидает отдельный auth-only каталог. Для ручной установки обязательно установите
 [deploy/codex-requirements.toml](deploy/codex-requirements.toml) в
 `/etc/codex/requirements.toml`; `cloud-init` и `deploy/activate.sh` делают это
 автоматически.
 
-Для unit-файла из примера EnvironmentFile должен принадлежать `root:summate` и
-иметь mode `0640`; `config.toml` принадлежит пользователю `summate` и имеет mode
+Для unit-файла из примера EnvironmentFile должен принадлежать `root:summing` и
+иметь mode `0640`; `config.toml` принадлежит пользователю `summing` и имеет mode
 `0600`.
 
 ## 13. Развёртывание на VPS
@@ -849,12 +849,12 @@ codex app-server --help
 - устанавливает зафиксированный Node.js 24 LTS из официального binary archive и
   проверяет SHA-256 по официальному `SHASUMS256.txt`;
 - устанавливает актуальный Codex CLI официальным standalone installer;
-- создаёт непривилегированного пользователя `summate` и каталоги данных;
+- создаёт непривилегированного пользователя `summing` и каталоги данных;
 - создаёт 4 GiB swap со `swappiness=10` для VPS с 4 GiB RAM;
 - оставляет снаружи только SSH 22/tcp, запрещает password login и сохраняет
   root login только по SSH-ключу;
 - включает ежедневные security updates;
-- не запускает Summate до загрузки исходников и добавления credentials.
+- не запускает SUMMING до загрузки исходников и добавления credentials.
 
 Cloud-init user-data сохраняется в metadata Hetzner и локально на VPS. Поэтому в
 нём намеренно нет Telegram token, transcription credentials, приватного Git deploy key
@@ -864,8 +864,8 @@ Cloud-init user-data сохраняется в metadata Hetzner и локаль�
 bootstrap и перенесите текущий checkout вместе с `.git`:
 
 ```bash
-summate_server=203.0.113.10
-ssh -i ~/.ssh/summing-deploy root@"${summate_server}" 'cloud-init status --wait'
+summing_server=203.0.113.10
+ssh -i ~/.ssh/summing-deploy root@"${summing_server}" 'cloud-init status --wait'
 rsync -az \
   --exclude node_modules \
   --exclude dist \
@@ -876,10 +876,10 @@ rsync -az \
   --exclude '/.env.*' \
   --exclude '/.codex' \
   --exclude '/config.toml' \
-  --exclude '/summate.env' \
+  --exclude '/summing.env' \
   --exclude '/data' \
   -e "ssh -i ~/.ssh/summing-deploy" \
-  ./ root@"${summate_server}":/opt/summate/
+  ./ root@"${summing_server}":/opt/summing/
 ```
 
 `.git` нужен для постоянных worktree, веток и self-change workflow; не заменяйте
@@ -887,18 +887,18 @@ rsync -az \
 заполните credentials и активируйте инсталляцию:
 
 ```bash
-ssh -i ~/.ssh/summing-deploy root@"${summate_server}"
-nano /etc/summate/summate.env
+ssh -i ~/.ssh/summing-deploy root@"${summing_server}"
+nano /etc/summing/summing.env
 # TELEGRAM_BOT_TOKEN=...
 # TELEGRAM_OWNER_ID=...
 # OPENAI_API_KEY=...
-/opt/summate/deploy/activate.sh
+/opt/summing/deploy/activate.sh
 ```
 
 [deploy/activate.sh](deploy/activate.sh) создаёт production config при его
 отсутствии, проверяет credentials, выполняет `npm ci`, lint, тесты, production
 build и `npm prune --omit=dev`, устанавливает units, создаёт первоначальный
-`/opt/summate-current` и ждёт успешный loopback health check. Существующие
+`/opt/summing-current` и ждёт успешный loopback health check. Существующие
 `config.toml`, application environment и deploy environment он не
 перезаписывает, поэтому сценарий можно безопасно повторить после обновления
 кода.
@@ -911,19 +911,19 @@ build и `npm prune --omit=dev`, устанавливает units, создаё�
 ### 13.3. Ручная подготовка пользователя и каталогов
 
 ```bash
-sudo useradd --system --create-home --home-dir /var/lib/summate summate
-sudo install -d -o summate -g summate -m 0700 /var/lib/summate/data
-sudo install -d -o root -g summate -m 0750 /etc/summate
+sudo useradd --system --create-home --home-dir /var/lib/summing summing
+sudo install -d -o summing -g summing -m 0700 /var/lib/summing/data
+sudo install -d -o root -g summing -m 0750 /etc/summing
 ```
 
-Расположите код, например, в `/opt/summate`, а статические проектные репозитории —
-в `/srv/projects`. Пользователь `summate` должен иметь права на Workspace из
+Расположите код, например, в `/opt/summing`, а статические проектные репозитории —
+в `/srv/projects`. Пользователь `summing` должен иметь права на Workspace из
 конфига. Управляемые Telegram-repositories runtime создаёт сам внутри data dir.
 
 ### 13.4. Node.js и сборка
 
 ```bash
-cd /opt/summate
+cd /opt/summing
 npm ci
 npm run build
 npm prune --omit=dev
@@ -944,12 +944,12 @@ SQLite addon и toolchain для его сборки на VPS; использу�
 ### 13.5. Конфиг и секреты
 
 ```bash
-sudo cp deploy/config.production.toml /var/lib/summate/data/config.toml
-sudo cp summate.env.example /etc/summate/summate.env
-sudo chown summate:summate /var/lib/summate/data/config.toml
-sudo chown root:summate /etc/summate/summate.env
-sudo chmod 0600 /var/lib/summate/data/config.toml
-sudo chmod 0640 /etc/summate/summate.env
+sudo cp deploy/config.production.toml /var/lib/summing/data/config.toml
+sudo cp summing.env.example /etc/summing/summing.env
+sudo chown summing:summing /var/lib/summing/data/config.toml
+sudo chown root:summing /etc/summing/summing.env
+sudo chmod 0600 /var/lib/summing/data/config.toml
+sudo chmod 0640 /etc/summing/summing.env
 ```
 
 Отредактируйте token, Telegram ID администратора, `CODEX_BIN` и пути статических
@@ -957,24 +957,24 @@ Workspace.
 
 ### 13.6. Systemd
 
-Скопируйте [deploy/summate.service](deploy/summate.service):
+Скопируйте [deploy/summing.service](deploy/summing.service):
 
 ```bash
-sudo cp deploy/summate.service /etc/systemd/system/summate.service
+sudo cp deploy/summing.service /etc/systemd/system/summing.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now summate
+sudo systemctl enable --now summing
 ```
 
 Unit запускает `/usr/local/bin/node --enable-source-maps`, читает
-`/etc/summate/summate.env`, работает от `summate:summate` с `UMask=0077` и
+`/etc/summing/summing.env`, работает от `summing:summing` с `UMask=0077` и
 останавливает всю process group. Cloud-init устанавливает Node именно в этот
 путь. При другом способе установки исправьте `ExecStart` до первого запуска.
 
 Проверка:
 
 ```bash
-systemctl status summate
-journalctl -u summate -f
+systemctl status summing
+journalctl -u summing -f
 curl --fail http://127.0.0.1:8765/health
 ```
 
@@ -985,17 +985,17 @@ ChatGPT device-code flow, создайте Project через `/project_create` 
 ### 13.7. Атомарные обновления из origin
 
 Production не запускается непосредственно из изменяемого Git checkout.
-`summate.service`, runner и scheduled runner CLI используют symlink
-`/opt/summate-current`. Первоначально он указывает на `/opt/summate`; после
+`summing.service`, runner и scheduled runner CLI используют symlink
+`/opt/summing-current`. Первоначально он указывает на `/opt/summing`; после
 первого обновления — на неизменяемый каталог
-`/opt/summate-releases/<full-commit-sha>`.
+`/opt/summing-releases/<full-commit-sha>`.
 
-Один `summate-deploy.service` обслуживает два источника запроса:
+Один `summing-deploy.service` обслуживает два источника запроса:
 
-- `summate-deploy.timer` проверяет `origin/master` каждые 10 минут;
+- `summing-deploy.timer` проверяет `origin/master` каждые 10 минут;
 - администраторская кнопка **Настройки → Обновиться сейчас** атомарно обновляет
-  `/var/lib/summate/deploy/request.json`, который наблюдает
-  `summate-deploy.path`.
+  `/var/lib/summing/deploy/request.json`, который наблюдает
+  `summing-deploy.path`.
 
 Request-файл не содержит команды или revision и не интерпретируется worker:
 каждый запуск самостоятельно получает и проверяет текущий remote ref. Deploy
@@ -1006,10 +1006,10 @@ owner получает `403`. Локальный SSH-tunnel bearer token счи�
 Порядок deployment:
 
 1. под process-wide `flock` получить закреплённый `origin/master` от имени
-   `summate`, не меняя index, branch или working tree `/opt/summate`;
+   `summing`, не меняя index, branch или working tree `/opt/summing`;
 2. отклонить неожиданный remote URL и non-fast-forward переход;
 3. экспортировать точный commit через `git archive` во временный release;
-4. от имени отдельного `summate-builder`, не имеющего доступа к application
+4. от имени отдельного `summing-builder`, не имеющего доступа к application
    secrets и data dir, выполнить `npm ci`, lint, тесты и production prune;
 5. дождаться `active = 0`, атомарно заменить symlink и перезапустить runner и
    основной сервис;
@@ -1017,21 +1017,21 @@ owner получает `403`. Локальный SSH-tunnel bearer token счи�
    и повторно запустить старый release;
 7. сохранить JSON-состояние для Mini App и оставить последние пять releases.
 
-Root-only настройки находятся в `/etc/summate/deploy.env`. В частности,
-`SUMMATE_DEPLOY_EXPECTED_REMOTE` должен точно совпадать с `git remote get-url
+Root-only настройки находятся в `/etc/summing/deploy.env`. В частности,
+`SUMMING_DEPLOY_EXPECTED_REMOTE` должен точно совпадать с `git remote get-url
 origin`; значение по умолчанию —
-`git@summing.github.com:summing-org/summate.git`. У пользователя `summate`
+`git@summing.github.com:summing-org/summing.git`. У пользователя `summing`
 должен быть read-only deploy key и заранее проверенный SSH host key. Application
-secrets из `/etc/summate/summate.env` worker не загружает.
+secrets из `/etc/summing/summing.env` worker не загружает.
 
 Диагностика и ручной запуск того же безопасного контура:
 
 ```bash
-systemctl list-timers summate-deploy.timer
-systemctl status summate-deploy.path summate-deploy.timer summate-deploy.service
-journalctl -u summate-deploy --since today
-sudo systemctl start summate-deploy.service
-cat /var/lib/summate/deploy/state.json
+systemctl list-timers summing-deploy.timer
+systemctl status summing-deploy.path summing-deploy.timer summing-deploy.service
+journalctl -u summing-deploy --since today
+sudo systemctl start summing-deploy.service
+cat /var/lib/summing/deploy/state.json
 ```
 
 ## 14. Операционное управление
@@ -1039,12 +1039,12 @@ cat /var/lib/summate/deploy/state.json
 В проекте нет собственного CLI. Операционные команды стандартные:
 
 ```bash
-sudo systemctl start summate
-sudo systemctl stop summate
-sudo systemctl restart summate
-sudo systemctl status summate
-journalctl -u summate --since today
-journalctl -u summate -f
+sudo systemctl start summing
+sudo systemctl stop summing
+sudo systemctl restart summing
+sudo systemctl status summing
+journalctl -u summing --since today
+journalctl -u summing -f
 curl --fail --silent http://127.0.0.1:8765/health
 curl --fail --silent http://127.0.0.1:8765/state
 ```
@@ -1054,7 +1054,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "8.7.0",
+  "version": "9.0.0",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",
@@ -1116,8 +1116,8 @@ at-least-once recovery: prompt может выполниться повторн�
 - `memory/`;
 - `projects/`;
 - `repositories/` со всеми управляемыми Git refs и незапушенными commits;
-- `SUMMATE_WORKTREE_ROOT`, если нужно сохранить незакоммиченные изменения;
-- `run-artifacts/`, `/etc/summate-runner` и `/var/lib/summate-runs` при
+- `SUMMING_WORKTREE_ROOT`, если нужно сохранить незакоммиченные изменения;
+- `run-artifacts/`, `/etc/summing-runner` и `/var/lib/summing-runs` при
   использовании Viewer/runner;
 - исходные Git-репозитории и их refs, если они не гарантированно находятся в
   origin.
@@ -1134,9 +1134,9 @@ config, Codex home или worktree root вынесены за data dir, backup �
 Самый простой безопасный порядок:
 
 ```bash
-sudo systemctl stop summate
-# сделать snapshot /var/lib/summate/data и локальных Git-репозиториев
-sudo systemctl start summate
+sudo systemctl stop summing
+# сделать snapshot /var/lib/summing/data и локальных Git-репозиториев
+sudo systemctl start summing
 ```
 
 Для online backup SQLite следует использовать механизм SQLite backup, а не
@@ -1149,7 +1149,7 @@ sudo systemctl start summate
 3. проверить `config.toml` и `CODEX_BIN`;
 4. запустить сервис;
 5. проверить journal, health и `/status`;
-6. если Codex thread больше не возобновляется, Summate автоматически создаст
+6. если Codex thread больше не возобновляется, SUMMING автоматически создаст
    новый и сохранит Project memory/worktree.
 
 ## 16. Диагностика
@@ -1157,8 +1157,8 @@ sudo systemctl start summate
 ### Сервис постоянно рестартует
 
 ```bash
-systemctl status summate
-journalctl -u summate -n 200 --no-pager
+systemctl status summing
+journalctl -u summing -n 200 --no-pager
 ```
 
 Частые причины: отсутствующий config, неверный `CODEX_BIN`, занятый health port,
@@ -1185,10 +1185,10 @@ login под другим Unix-user/Home.
 Обе команды принимаются только от `TELEGRAM_OWNER_ID` в личном чате. ID Project
 и repository должны соответствовать `[a-z0-9][a-z0-9._-]{0,63}`, owner id должен
 быть положительным числом. Если каталог
-`$SUMMATE_DATA_DIR/repositories/<project>/<repo>` остался после прерванной
+`$SUMMING_DATA_DIR/repositories/<project>/<repo>` остался после прерванной
 операции, runtime намеренно не удаляет его и просит администратора сначала
 проверить содержимое. Для private clone проверьте non-interactive credentials
-пользователя `summate`; `GIT_TERMINAL_PROMPT=0` запрещает зависнуть на запросе
+пользователя `summing`; `GIT_TERMINAL_PROMPT=0` запрещает зависнуть на запросе
 пароля.
 
 ### Обычное сообщение «пропало» во время ответа
@@ -1213,12 +1213,12 @@ follow-up. Для явного поведения используйте `/steer
 ```bash
 git -C /path/to/repo status
 git -C /path/to/repo worktree list
-git -C /path/to/repo branch --list 'summate/*'
+git -C /path/to/repo branch --list 'summing/*'
 ```
 
-Целевой каталог не должен содержать посторонние файлы. Summate не удаляет его
+Целевой каталог не должен содержать посторонние файлы. SUMMING не удаляет его
 автоматически. Если journal сообщает, что worktree принадлежит другому
-репозиторию, сравните исходный repo и `$SUMMATE_WORKTREE_ROOT/tg-<hash>` через
+репозиторию, сравните исходный repo и `$SUMMING_WORKTREE_ROOT/tg-<hash>` через
 `git worktree list`; дальнейшая очистка — явная операторская операция.
 
 ### Panic stop
@@ -1226,13 +1226,13 @@ git -C /path/to/repo branch --list 'summate/*'
 После `/panic` состояние ожидаемо:
 
 ```bash
-systemctl status summate
+systemctl status summing
 ```
 
 Вернуть сервис может только администратор:
 
 ```bash
-sudo systemctl start summate
+sudo systemctl start summing
 ```
 
 ## 17. Разработка и проверка
@@ -1276,10 +1276,10 @@ deploy/
 ├── cloud-init.yaml         # bootstrap чистого Ubuntu/Hetzner VPS
 ├── activate.sh             # сборка, установка unit и первый запуск
 ├── install-project-operations.sh # rootless Docker, Caddy, runner и timer
-├── config.production.toml  # минимальный production config для Summate
-├── summate.service         # основной Telegram runtime
-├── summate-runner.service  # изолированный Docker runner
-└── summate-ash-seo.timer   # pinned daily schedule
+├── config.production.toml  # минимальный production config для SUMMING
+├── summing.service         # основной Telegram runtime
+├── summing-runner.service  # изолированный Docker runner
+└── summing-ash-seo.timer   # pinned daily schedule
 ```
 
 Локальные проверки:

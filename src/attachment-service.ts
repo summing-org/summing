@@ -196,7 +196,7 @@ abstract class MultipartAudioTranscriber implements AudioTranscriber {
       throw new AttachmentError(
         `Транскрипция аудио через ${this.providerName} не настроена: ` +
           `администратору нужно добавить ${this.apiKeyName} ` +
-          "в /etc/summate/summate.env и перезапустить сервис.",
+          "в /etc/summing/summing.env и перезапустить сервис.",
       );
     }
     const form = new FormData();

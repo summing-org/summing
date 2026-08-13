@@ -1,6 +1,6 @@
 export function helpMessage(isAdministrator: boolean): string {
   const lines = [
-    "*Помощь по Summate*",
+    "*Помощь по SUMMING*",
     "Аргументы в `<угловых скобках>` обязательны, в `[квадратных]` — нет",
     "",
     "*Проекты*",
@@ -35,13 +35,13 @@ export function helpMessage(isAdministrator: boolean): string {
       "`/limits` — показать 5\\-часовой и недельный Codex limits этого VPS",
       "`/topics` — показать обнаруженные Telegram группы, топики и привязки",
       "`/bind_topic <chat_id> <topic_id> <project> [workspace]` — привязать топик из личного чата",
-      "Пример: `/bind_topic -1001234567890 42 summate repo`",
+      "Пример: `/bind_topic -1001234567890 42 summing repo`",
       "`/project_create <project> <owner_id> <repo>` — создать локальный Git\\-проект",
       "Пример: `/project_create shop 123456789 backend`",
       "`/project_clone <project> <owner_id> <repo> <git_url>` — клонировать Git\\-проект",
       "Пример: `/project_clone shop 123456789 backend https://github.com/acme/backend.git`",
-      "`/restart` — перезапустить Summate",
-      "`/panic` — немедленно остановить Summate без автоматического рестарта",
+      "`/restart` — перезапустить SUMMING",
+      "`/panic` — немедленно остановить SUMMING без автоматического рестарта",
     );
   }
 

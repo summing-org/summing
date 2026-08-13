@@ -19,13 +19,13 @@ function fixture(): {
   config: RuntimeConfig;
   state: StateStore;
 } {
-  const root = mkdtempSync(join(tmpdir(), "summate-project-catalog-"));
-  const staticPath = join(root, "summate");
+  const root = mkdtempSync(join(tmpdir(), "summing-project-catalog-"));
+  const staticPath = join(root, "summing");
   mkdirSync(staticPath);
   const workspace: WorkspaceConfig = { id: "repo", path: staticPath };
   const staticProject = new ProjectConfig(
-    "summate",
-    "Summate",
+    "summing",
+    "SUMMING",
     "repo",
     new Map([["repo", workspace]]),
     true,
@@ -43,7 +43,7 @@ function fixture(): {
     "",
     "medium",
     true,
-    new Map([["summate", staticProject]]),
+    new Map([["summing", staticProject]]),
   );
   return {
     root,
@@ -63,11 +63,11 @@ test("creates a persistent managed Git repository and enforces project ownership
     assert.equal(git(repository, "branch", "--show-current"), "main");
     assert.ok(git(repository, "rev-parse", "HEAD"));
     assert.equal(catalog.canAccess(42, "client_name"), true);
-    assert.equal(catalog.canAccess(42, "summate"), false);
+    assert.equal(catalog.canAccess(42, "summing"), false);
     assert.deepEqual(catalog.visibleTo(42).map((entry) => entry.project.id), ["client_name"]);
     assert.deepEqual(
       catalog.visibleTo(1).map((entry) => entry.project.id),
-      ["client_name", "summate"],
+      ["client_name", "summing"],
     );
 
     state.close();
@@ -128,7 +128,7 @@ test("clones an existing repository into the managed project root", async () => 
   }
 });
 
-test("rejects project identifiers that cannot be used in Summate Git branches", async () => {
+test("rejects project identifiers that cannot be used in SUMMING Git branches", async () => {
   const { root, config, state } = fixture();
   try {
     const catalog = new ProjectCatalog(config, state);

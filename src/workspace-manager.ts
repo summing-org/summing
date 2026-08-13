@@ -1,5 +1,4 @@
 import {
-  appendFileSync,
   chmodSync,
   closeSync,
   constants,
@@ -11,6 +10,7 @@ import {
   readFileSync,
   realpathSync,
   readdirSync,
+  renameSync,
   statSync,
   unlinkSync,
   writeFileSync,
@@ -38,6 +38,10 @@ export interface MaterializedAttachment {
 }
 
 export class WorkspaceError extends Error {}
+
+const LEGACY_IDENTITY = "Sum" + "mate";
+const LEGACY_RUNTIME_DIRECTORY = `.${LEGACY_IDENTITY.toLowerCase()}-runtime`;
+const LEGACY_BRANCH_PREFIX = LEGACY_IDENTITY.toLowerCase();
 
 interface ProcessResult {
   code: number;
@@ -103,18 +107,18 @@ export class WorkspaceManager {
     mkdirSync(resolve(this.identityPath, ".."), { recursive: true });
     mkdirSync(this.projectsRoot, { recursive: true });
     const previousDefaultIdentities = [
-      "# Summate identity\n\n" +
-        "I am Summate, one persistent agent serving one owner through Telegram.\n" +
+      `# ${LEGACY_IDENTITY} identity\n\n` +
+        `I am ${LEGACY_IDENTITY}, one persistent agent serving one owner through Telegram.\n` +
         "I preserve continuity across projects and change my own code only on the " +
         "owner's direct request.\n",
-      "# Summate identity\n\n" +
-        "I am Summate, one persistent agent serving project owners through Telegram.\n" +
+      `# ${LEGACY_IDENTITY} identity\n\n` +
+        `I am ${LEGACY_IDENTITY}, one persistent agent serving project owners through Telegram.\n` +
         "I preserve continuity across projects and change my own code only on the " +
         "administrator's direct request.\n",
     ];
     const defaultIdentity =
-      "# Summate identity\n\n" +
-      "I am Summate, one persistent agent serving project owners and answering " +
+      "# SUMMING identity\n\n" +
+      "I am SUMMING, one persistent agent serving project owners and answering " +
       "read-only questions from their group participants through Telegram.\n" +
       "I preserve continuity across projects and change my own code only on the " +
       "administrator's direct request.\n";
@@ -176,7 +180,7 @@ export class WorkspaceManager {
       gitMetadataRoots = [];
     } else {
       const worktreeRoot = resolve(this.config.worktreeRoot, conversation.id);
-      const branch = `summate/${project.id}/${conversation.id}`;
+      const branch = `summing/${project.id}/${conversation.id}`;
       await this.ensureWorktree(gitRoot, worktreeRoot, branch, signal);
       const relativeWorkspace = relative(gitRoot, resolve(source));
       if (relativeWorkspace === ".." || relativeWorkspace.startsWith(`..${sep}`)) {
@@ -194,6 +198,7 @@ export class WorkspaceManager {
       }
     }
     const memory = readFileSync(this.projectMemoryPath(project.id), "utf8");
+    this.migrateRuntimeDirectory(path);
     this.writeContext(path, project, workspace, memory);
     return {
       path,
@@ -225,7 +230,7 @@ export class WorkspaceManager {
           const lowerName = entry.name.toLowerCase();
           const sensitive =
             lowerName === ".git" ||
-            lowerName === ".summate-runtime" ||
+            lowerName === ".summing-runtime" ||
             lowerName === ".ssh" ||
             lowerName === ".gnupg" ||
             lowerName === ".aws" ||
@@ -285,7 +290,7 @@ export class WorkspaceManager {
     items: Array<{ inputId: number; telegramMessageId: number; attachment: StoredAttachment }>,
   ): MaterializedAttachment[] {
     const spoolRoot = resolve(this.config.dataDir, "attachments");
-    const destinationRoot = resolve(prepared.path, ".summate-runtime", "attachments");
+    const destinationRoot = resolve(prepared.path, ".summing-runtime", "attachments");
     this.ensureRuntimeDirectory(destinationRoot, 0o700);
     return items.map(({ inputId, telegramMessageId, attachment }) => {
       const requestedSource = resolve(attachment.filePath);
@@ -367,6 +372,7 @@ export class WorkspaceManager {
           `existing worktree belongs to another repository: ${target}; clean it before rebinding`,
         );
       }
+      await this.migrateWorktreeBranch(target, branch, signal);
       await this.excludeRuntimeFiles(target, signal);
       return;
     }
@@ -381,6 +387,24 @@ export class WorkspaceManager {
       await this.runGit(gitRoot, signal, "worktree", "add", "-b", branch, target, "HEAD");
     }
     await this.excludeRuntimeFiles(target, signal);
+  }
+
+  private async migrateWorktreeBranch(
+    target: string,
+    branch: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const current = await runProcess(
+      "git",
+      ["-C", target, "symbolic-ref", "--quiet", "--short", "HEAD"],
+      60_000,
+      signal,
+    );
+    if (current.code !== 0) return;
+    const legacyBranch = branch.replace(/^summing\//, `${LEGACY_BRANCH_PREFIX}/`);
+    if (current.stdout.trim() === legacyBranch) {
+      await this.runGit(target, signal, "branch", "-m", branch);
+    }
   }
 
   private async branchExists(root: string, branch: string, signal?: AbortSignal): Promise<boolean> {
@@ -416,10 +440,33 @@ export class WorkspaceManager {
     const exclude = resolve(worktree, raw);
     mkdirSync(resolve(exclude, ".."), { recursive: true });
     const existing = existsSync(exclude) ? readFileSync(exclude, "utf8") : "";
-    if (!existing.split(/\r?\n/).includes(".summate-runtime/")) {
-      const separator = existing && !existing.endsWith("\n") ? "\n" : "";
-      appendFileSync(exclude, `${separator}.summate-runtime/\n`, "utf8");
+    const legacyEntry = `${LEGACY_RUNTIME_DIRECTORY}/`;
+    const retained = existing
+      .split(/\r?\n/)
+      .filter((line) => line !== legacyEntry)
+      .join("\n")
+      .replace(/\n+$/, "");
+    if (!retained.split(/\r?\n/).includes(".summing-runtime/")) {
+      writeFileSync(exclude, `${retained ? `${retained}\n` : ""}.summing-runtime/\n`, "utf8");
+    } else if (retained !== existing.replace(/\n+$/, "")) {
+      writeFileSync(exclude, `${retained}\n`, "utf8");
     }
+  }
+
+  private migrateRuntimeDirectory(path: string): void {
+    const legacyDirectory = resolve(path, LEGACY_RUNTIME_DIRECTORY);
+    if (!existsSync(legacyDirectory)) return;
+    const legacyStat = lstatSync(legacyDirectory);
+    if (legacyStat.isSymbolicLink() || !legacyStat.isDirectory()) {
+      throw new WorkspaceError(`refusing unsafe legacy runtime directory: ${legacyDirectory}`);
+    }
+    const runtimeDirectory = resolve(path, ".summing-runtime");
+    if (existsSync(runtimeDirectory)) {
+      throw new WorkspaceError(
+        `both legacy and SUMMING runtime directories exist in workspace: ${path}`,
+      );
+    }
+    renameSync(legacyDirectory, runtimeDirectory);
   }
 
   private writeContext(
@@ -428,7 +475,7 @@ export class WorkspaceManager {
     workspace: WorkspaceConfig,
     projectMemory: string,
   ): void {
-    const runtimeDir = resolve(path, ".summate-runtime");
+    const runtimeDir = resolve(path, ".summing-runtime");
     if (existsSync(runtimeDir)) {
       const runtimeStat = lstatSync(runtimeDir);
       if (runtimeStat.isSymbolicLink() || !runtimeStat.isDirectory()) {
@@ -456,7 +503,7 @@ export class WorkspaceManager {
     this.writeRuntimeFile(resolve(memoryDir, "PROJECT_MEMORY.md"), projectMemory);
     this.writeRuntimeFile(
       resolve(runtimeDir, "CONTEXT.md"),
-      "# Summate runtime context\n\n" +
+      "# SUMMING runtime context\n\n" +
         "Read this file before acting. It is private runtime context and is excluded from Git.\n\n" +
         `## Identity\n\n${identity.trimEnd()}\n\n` +
         "## Project\n\n" +
@@ -465,9 +512,9 @@ export class WorkspaceManager {
         `## Durable project memory\n\n${projectMemory.trimEnd()}\n\n` +
         "## Memory rule\n\n" +
         "If this run establishes a durable project fact, append it to " +
-        "`.summate-runtime/memory/PROJECT_MEMORY.md`. Do not rewrite or delete existing memory. " +
+        "`.summing-runtime/memory/PROJECT_MEMORY.md`. Do not rewrite or delete existing memory. " +
         "Conversation-specific details belong in the Codex thread, not in project memory. " +
-        "Change Summate itself only when the administrator directly asks.\n",
+        "Change SUMMING itself only when the administrator directly asks.\n",
     );
   }
 
@@ -518,7 +565,7 @@ export class WorkspaceManager {
     projectId: string,
     prepared: PreparedWorkspace,
   ): Promise<string | null> {
-    const runtimeDir = resolve(prepared.path, ".summate-runtime");
+    const runtimeDir = resolve(prepared.path, ".summing-runtime");
     const memoryDir = resolve(runtimeDir, "memory");
     const localPath = resolve(memoryDir, "PROJECT_MEMORY.md");
     if (!existsSync(localPath)) return null;

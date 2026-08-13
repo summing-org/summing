@@ -7,7 +7,7 @@ import test from "node:test";
 import { GitInspector, GitInspectorError } from "../src/git-inspector.js";
 
 function repository(): string {
-  const root = mkdtempSync(join(tmpdir(), "summate-inspector-"));
+  const root = mkdtempSync(join(tmpdir(), "summing-inspector-"));
   execFileSync("git", ["init", "--initial-branch=main", root]);
   execFileSync("git", ["-C", root, "config", "user.name", "Test"]);
   execFileSync("git", ["-C", root, "config", "user.email", "test@example.test"]);

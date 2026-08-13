@@ -67,7 +67,7 @@ export class RuntimeConfig {
     readonly viewerPublicUrl = "",
     readonly viewerAuthMaxAgeSeconds = 900,
     readonly viewerLocalToken = "",
-    readonly runnerSocket = "/run/summate-runner/runner.sock",
+    readonly runnerSocket = "/run/summing-runner/runner.sock",
     readonly deploymentRequestPath = "",
     readonly deploymentStatePath = "",
     readonly codexLimitsProfileEnabled = true,
@@ -200,10 +200,10 @@ function loadProjects(value: unknown): ReadonlyMap<string, ProjectConfig> {
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig {
-  const dataDir = expandPath(env.SUMMATE_DATA_DIR || "~/Summate/data", "SUMMATE_DATA_DIR");
+  const dataDir = expandPath(env.SUMMING_DATA_DIR || "~/summing/data", "SUMMING_DATA_DIR");
   const configPath = expandPath(
-    env.SUMMATE_CONFIG || `${dataDir}/config.toml`,
-    "SUMMATE_CONFIG",
+    env.SUMMING_CONFIG || `${dataDir}/config.toml`,
+    "SUMMING_CONFIG",
   );
   try {
     if (!statSync(configPath).isFile()) throw new Error("not a file");
@@ -230,8 +230,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig 
   const viewer = table(raw.viewer) ?? {};
   const codexHome = expandPath(env.CODEX_HOME || `${dataDir}/codex`, "CODEX_HOME");
   const worktreeRoot = expandPath(
-    env.SUMMATE_WORKTREE_ROOT || `${dataDir}/worktrees`,
-    "SUMMATE_WORKTREE_ROOT",
+    env.SUMMING_WORKTREE_ROOT || `${dataDir}/worktrees`,
+    "SUMMING_WORKTREE_ROOT",
   );
   const configuredTranscriptionProvider = String(transcription.provider || "openai").trim();
   const transcriptionProvider = String(
@@ -262,7 +262,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig 
   }
 
   const viewerPublicUrl = String(
-    env.SUMMATE_VIEWER_URL || viewer.public_url || "",
+    env.SUMMING_VIEWER_URL || viewer.public_url || "",
   ).trim().replace(/\/$/, "");
   if (viewerPublicUrl && !viewerPublicUrl.startsWith("https://")) {
     throw new ConfigError("viewer.public_url must use HTTPS");
@@ -329,16 +329,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig 
       86_400,
       true,
     ),
-    String(env.SUMMATE_VIEWER_LOCAL_TOKEN || "").trim(),
+    String(env.SUMMING_VIEWER_LOCAL_TOKEN || "").trim(),
     expandPath(
-      env.SUMMATE_RUNNER_SOCKET || viewer.runner_socket || "/run/summate-runner/runner.sock",
+      env.SUMMING_RUNNER_SOCKET || viewer.runner_socket || "/run/summing-runner/runner.sock",
       "viewer.runner_socket",
     ),
-    env.SUMMATE_DEPLOY_REQUEST
-      ? expandPath(env.SUMMATE_DEPLOY_REQUEST, "SUMMATE_DEPLOY_REQUEST")
+    env.SUMMING_DEPLOY_REQUEST
+      ? expandPath(env.SUMMING_DEPLOY_REQUEST, "SUMMING_DEPLOY_REQUEST")
       : "",
-    env.SUMMATE_DEPLOY_STATE
-      ? expandPath(env.SUMMATE_DEPLOY_STATE, "SUMMATE_DEPLOY_STATE")
+    env.SUMMING_DEPLOY_STATE
+      ? expandPath(env.SUMMING_DEPLOY_STATE, "SUMMING_DEPLOY_STATE")
       : "",
     Boolean(codexUsage.profile_enabled ?? true),
     boundedNumber(

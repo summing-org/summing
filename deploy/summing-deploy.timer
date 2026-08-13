@@ -1,11 +1,11 @@
 [Unit]
-Description=Check origin/master for a Summate update every ten minutes
+Description=Check origin/master for a SUMMING update every ten minutes
 
 [Timer]
 OnBootSec=3min
 OnUnitActiveSec=10min
 RandomizedDelaySec=30
-Unit=summate-deploy.service
+Unit=summing-deploy.service
 
 [Install]
 WantedBy=timers.target

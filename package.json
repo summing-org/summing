@@ -1,6 +1,6 @@
 {
-  "name": "summate",
-  "version": "8.7.0",
+  "name": "summing",
+  "version": "9.0.0",
   "description": "Persistent Telegram agent backed by the official Codex App Server",
   "type": "module",
   "private": true,

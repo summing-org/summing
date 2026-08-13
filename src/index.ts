@@ -1,9 +1,9 @@
 import { ConfigError, loadConfig } from "./config.js";
-import { SummateRuntime } from "./runtime.js";
+import { SummingRuntime } from "./runtime.js";
 
 async function main(): Promise<number> {
   try {
-    const runtime = new SummateRuntime(loadConfig());
+    const runtime = new SummingRuntime(loadConfig());
     process.once("SIGTERM", () => runtime.requestStop(0));
     process.once("SIGINT", () => runtime.requestStop(0));
     return await runtime.run();

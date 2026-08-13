@@ -28,8 +28,8 @@ interface RpcMessage extends JsonRecord {
 
 export class CodexProtocolError extends Error {}
 
-const PROJECT_PERMISSION_PROFILE = "summate-project";
-const READ_ONLY_PERMISSION_PROFILE = "summate-project-readonly";
+const PROJECT_PERMISSION_PROFILE = "summing-project";
+const READ_ONLY_PERMISSION_PROFILE = "summing-project-readonly";
 
 function executableReadRoot(command: string): string | null {
   const candidates = command.includes("/")
@@ -103,9 +103,9 @@ export class CodexAppServer extends EventEmitter {
       "initialize",
       {
         clientInfo: {
-          name: "summate_telegram",
-          title: "Summate Telegram",
-          version: "8.7.0",
+          name: "summing_telegram",
+          title: "SUMMING Telegram",
+          version: "9.0.0",
         },
         capabilities: {
           experimentalApi: true,
@@ -299,7 +299,7 @@ export class CodexAppServer extends EventEmitter {
       approvalPolicy: "never",
       permissions: permissionProfile,
       config: this.permissionConfig(cwd, options),
-      serviceName: "summate_telegram",
+      serviceName: "summing_telegram",
       dynamicTools: [],
       selectedCapabilityRoots: [],
     };
@@ -379,9 +379,9 @@ export class CodexAppServer extends EventEmitter {
     }
     const runtimeSubpath =
       writableSubpath === "."
-        ? ".summate-runtime"
-        : `${writableSubpath}/.summate-runtime`;
-    const runtimeTempPath = resolve(cwd, ".summate-runtime", "tmp");
+        ? ".summing-runtime"
+        : `${writableSubpath}/.summing-runtime`;
+    const runtimeTempPath = resolve(cwd, ".summing-runtime", "tmp");
     const runtimeAttachmentsSubpath = `${runtimeSubpath}/attachments`;
     const workspaceRoots: JsonRecord = { ".": "read" };
     if (!options.readOnly) {
@@ -506,7 +506,7 @@ export class CodexAppServer extends EventEmitter {
             : value !== undefined;
       if (configured) {
         throw new CodexProtocolError(
-          `Summate CODEX_HOME must not define ${key}; use a dedicated auth-only CODEX_HOME`,
+          `SUMMING CODEX_HOME must not define ${key}; use a dedicated auth-only CODEX_HOME`,
         );
       }
     }

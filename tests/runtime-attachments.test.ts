@@ -4,11 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { ProjectConfig, RuntimeConfig, type WorkspaceConfig } from "../src/config.js";
-import { SummateRuntime } from "../src/runtime.js";
+import { SummingRuntime } from "../src/runtime.js";
 import type { TelegramObject } from "../src/telegram-api.js";
 
 test("voice is transcribed through the configured provider while documents remain queued attachments", async () => {
-  const root = mkdtempSync(join(tmpdir(), "summate-runtime-attachments-"));
+  const root = mkdtempSync(join(tmpdir(), "summing-runtime-attachments-"));
   const repository = join(root, "repository");
   mkdirSync(repository);
   const workspace: WorkspaceConfig = { id: "repo", path: repository };
@@ -39,7 +39,7 @@ test("voice is transcribed through the configured provider while documents remai
     "gpt-transcribe",
     "openai-key",
   );
-  const runtime = new SummateRuntime(config);
+  const runtime = new SummingRuntime(config);
   const conversation = runtime.state.bind(1, 0, "demo", "repo");
   Object.assign(runtime, { startProcessor: (): void => undefined });
   runtime.attachments.download = async (message) => {
