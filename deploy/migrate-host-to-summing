@@ -34,6 +34,8 @@ retired_config=/etc/${retired_name}
 product_config=/etc/${product_name}
 retired_runner_config=/etc/${retired_name}-runner
 product_runner_config=/etc/${product_name}-runner
+retired_runtime=/run/${retired_name}
+product_runtime=/run/${product_name}
 
 expected_remote=${SUMMING_MIGRATION_EXPECTED_REMOTE:-git@summing.github.com:summing-org/summing.git}
 mode=${1:---check}
@@ -106,6 +108,9 @@ rewrite_file() {
     -e "s#/var/lib/${retired_name}#/var/lib/${product_name}#g" \
     -e "s#/etc/${retired_name}#/etc/${product_name}#g" \
     -e "s#/run/${retired_name}#/run/${product_name}#g" \
+    -e "s#/${retired_name}\.env#/${product_name}.env#g" \
+    -e "s#${retired_name}_github#${product_name}_github#g" \
+    -e "s#github_${retired_name}#github_${product_name}#g" \
     -e "s#/repositories/${retired_name}/#/repositories/${product_name}/#g" \
     -e "s#/projects/${retired_name}/#/projects/${product_name}/#g" \
     -e "s#summing-org/${retired_name}\.git#summing-org/${product_name}.git#g" \
@@ -137,9 +142,27 @@ mapped_operational_path() {
   local value=$1
   value=${value/#${retired_repo}/${product_repo}}
   value=${value/#${retired_home}/${product_home}}
+  value=${value/#${retired_config}/${product_config}}
+  value=${value/#${retired_runtime}/${product_runtime}}
   value=${value//\/repositories\/${retired_name}\//\/repositories\/${product_name}\/}
   value=${value//\/projects\/${retired_name}\//\/projects\/${product_name}\/}
   printf '%s\n' "${value}"
+}
+
+rewrite_absolute_symlinks() {
+  local root=$1
+  [ -d "${root}" ] || return 0
+  local path
+  local target
+  local mapped_target
+  while IFS= read -r -d '' path; do
+    target=$(readlink "${path}")
+    [[ "${target}" == /* ]] || continue
+    mapped_target=$(mapped_operational_path "${target}")
+    if [ "${mapped_target}" != "${target}" ]; then
+      ln -sfn -- "${mapped_target}" "${path}"
+    fi
+  done < <(find "${root}" -type l -print0)
 }
 
 migrated_branch_name() {
@@ -311,7 +334,7 @@ if [ "${EUID}" -ne 0 ]; then
   fail "run this migration as root"
 fi
 
-for command in cp curl date find getent git grep groupmod id install jq ln loginctl \
+for command in cp curl date find getent git grep groupmod hostnamectl id install jq ln loginctl \
   mktemp mv npm rm runuser sed sqlite3 systemctl tr usermod; do
   require_command "${command}"
 done
@@ -326,6 +349,17 @@ id "${retired_app_user}" >/dev/null 2>&1 || fail "source application user is mis
 id "${retired_builder_user}" >/dev/null 2>&1 || fail "source builder user is missing"
 getent group "${retired_app_user}" >/dev/null 2>&1 || fail "source application group is missing"
 getent group "${retired_builder_user}" >/dev/null 2>&1 || fail "source builder group is missing"
+for key_name in \
+  "${retired_name}_github" \
+  "${retired_name}_github.pub" \
+  "id_ed25519_github_${retired_name}" \
+  "id_ed25519_github_${retired_name}.pub"; do
+  product_key_name=${key_name//${retired_name}/${product_name}}
+  if [ -e "${retired_home}/.ssh/${key_name}" ] && \
+    [ -e "${retired_home}/.ssh/${product_key_name}" ]; then
+    fail "both retired and SUMMING SSH identity files exist: ${key_name}"
+  fi
+done
 
 for user in "${product_app_user}" "${product_builder_user}" "${product_runner_user}"; do
   if id "${user}" >/dev/null 2>&1; then fail "target user already exists: ${user}"; fi
@@ -405,6 +439,8 @@ if [ "${snapshot_waived}" = 1 ]; then backup_mode=snapshot-waived; fi
 
 timestamp=$(date -u +%Y%m%dT%H%M%SZ)
 recovery_dir=/var/backups/summing-host-migration-${timestamp}
+source_hostname=$(hostnamectl --static)
+target_hostname=${source_hostname//${retired_name}/${product_name}}
 app_enabled=0
 runner_enabled=0
 schedule_enabled=0
@@ -420,6 +456,9 @@ systemctl stop \
   "${retired_name}-ash-seo.service" \
   "${retired_name}-runner.service" \
   "${retired_name}.service" >/dev/null 2>&1 || true
+systemctl disable \
+  "${retired_name}-runner.service" \
+  "${retired_name}.service" >/dev/null 2>&1 || true
 for unit in "${retired_name}.service" "${retired_name}-runner.service"; do
   if systemctl is-active --quiet "${unit}"; then fail "failed to stop ${unit}"; fi
 done
@@ -433,6 +472,8 @@ printf '%s\n' \
     git -C "${retired_repo}" rev-parse HEAD)" \
   "source_remote=$(runuser -u "${retired_app_user}" -- \
     git -C "${retired_repo}" remote get-url origin)" \
+  "source_hostname=${source_hostname}" \
+  "target_hostname=${target_hostname}" \
   "backup_mode=${backup_mode}" \
   > "${recovery_dir}/manifest"
 cp -a "${retired_config}" "${recovery_dir}/config"
@@ -485,7 +526,26 @@ product_env=${product_config}/${product_name}.env
 if [ -f "${retired_env}" ]; then mv "${retired_env}" "${product_env}"; fi
 rewrite_tree "${product_config}"
 rewrite_tree "${product_runner_config}"
+move_optional \
+  "${product_home}/.ssh/${retired_name}_github" \
+  "${product_home}/.ssh/${product_name}_github"
+move_optional \
+  "${product_home}/.ssh/${retired_name}_github.pub" \
+  "${product_home}/.ssh/${product_name}_github.pub"
+move_optional \
+  "${product_home}/.ssh/id_ed25519_github_${retired_name}" \
+  "${product_home}/.ssh/id_ed25519_github_${product_name}"
+move_optional \
+  "${product_home}/.ssh/id_ed25519_github_${retired_name}.pub" \
+  "${product_home}/.ssh/id_ed25519_github_${product_name}.pub"
+rewrite_file "${product_home}/.ssh/config"
+rewrite_tree "${product_home}/.ssh/config.d"
 rewrite_tree "${product_runner_home}/.config"
+rewrite_absolute_symlinks "${product_home}"
+rewrite_absolute_symlinks "${product_builder_home}"
+rewrite_absolute_symlinks "${product_runner_home}"
+rewrite_absolute_symlinks "${product_config}"
+rewrite_absolute_symlinks "${product_runner_config}"
 rewrite_product_config "${product_home}/data/config.toml"
 rewrite_identity_asset "${product_home}/data/memory/identity.md"
 
@@ -512,6 +572,14 @@ else
 fi
 
 ln -sfn "${product_home}/.local/bin/codex" /usr/local/bin/codex
+
+if [ "${source_hostname}" != "${target_hostname}" ]; then
+  hostnamectl set-hostname "${target_hostname}"
+  if [ -f /etc/hosts ]; then
+    hostname_pattern=${source_hostname//./\\.}
+    sed -i "s/${hostname_pattern}/${target_hostname}/g" /etc/hosts
+  fi
+fi
 
 if [ -n "${runner_uid}" ]; then
   loginctl enable-linger "${product_runner_user}"
@@ -572,6 +640,10 @@ for unit in \
   fi
 done
 systemctl daemon-reload
+systemctl reset-failed \
+  "${retired_name}.service" \
+  "${retired_name}-runner.service" \
+  "${retired_name}-deploy.service" >/dev/null 2>&1 || true
 
 "${product_repo}/deploy/activate.sh"
 if [ "${app_enabled}" = 0 ]; then systemctl disable --now summing.service; fi

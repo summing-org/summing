@@ -67,6 +67,14 @@ test("host identity migration is guarded, recoverable, and preserves worktrees",
   assert.match(migration, /usermod --login/);
   assert.match(migration, /groupmod --new-name/);
   assert.match(migration, /git -C "\$\{worktree\}" branch -m/);
+  assert.match(migration, /rewrite_absolute_symlinks "\$\{product_home\}"/);
+  assert.match(migration, /rewrite_absolute_symlinks "\$\{product_runner_home\}"/);
+  assert.match(migration, /"\$\{product_home\}\/\.ssh\/\$\{retired_name\}_github"/);
+  assert.match(migration, /rewrite_file "\$\{product_home\}\/\.ssh\/config"/);
+  assert.match(migration, /rewrite_tree "\$\{product_home\}\/\.ssh\/config\.d"/);
+  assert.match(migration, /hostnamectl set-hostname "\$\{target_hostname\}"/);
+  assert.match(migration, /systemctl disable \\\n+  "\$\{retired_name\}-runner\.service"/);
+  assert.match(migration, /systemctl reset-failed/);
   assert.match(migration, /pre-9-releases/);
   assert.match(migration, /"\$\{product_repo\}\/deploy\/activate\.sh"/);
   assert.match(migration, /\/run\/summing-runner\/runner\.sock/);
