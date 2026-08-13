@@ -152,9 +152,17 @@ install -o root -g root -m 0644 \
   "${repo_dir}/deploy/summate-deploy.timer" \
   /etc/systemd/system/summate-deploy.timer
 if id summate-runner >/dev/null 2>&1 && [ -f /etc/systemd/system/summate-runner.service ]; then
-  install -o root -g root -m 0644 \
+  runner_uid=$(id -u summate-runner)
+  temporary_runner_unit=$(mktemp /run/summate-runner.service.XXXXXX)
+  trap 'rm -f "${temporary_runner_unit}"' EXIT
+  sed "s/RUNNER_UID/${runner_uid}/g" \
     "${repo_dir}/deploy/summate-runner.service" \
+    > "${temporary_runner_unit}"
+  install -o root -g root -m 0644 \
+    "${temporary_runner_unit}" \
     /etc/systemd/system/summate-runner.service
+  rm -f "${temporary_runner_unit}"
+  trap - EXIT
   install -o root -g root -m 0644 \
     "${repo_dir}/deploy/summate-ash-seo.service" \
     /etc/systemd/system/summate-ash-seo.service

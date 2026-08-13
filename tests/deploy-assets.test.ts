@@ -33,6 +33,8 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
   assert.match(timer, /OnUnitActiveSec=10min/);
   assert.match(path, /PathChanged=\/var\/lib\/summate\/deploy\/request\.json/);
   assert.match(activation, /systemctl start summate-deploy\.path summate-deploy\.timer/);
+  assert.match(activation, /runner_uid=\$\(id -u summate-runner\)/);
+  assert.match(activation, /sed "s\/RUNNER_UID\/\$\{runner_uid\}\/g"/);
 });
 
 test("all production processes execute through the current release symlink", () => {
