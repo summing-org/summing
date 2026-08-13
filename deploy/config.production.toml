@@ -10,6 +10,11 @@ participant_rate_limit_messages = 12
 participant_rate_limit_window_sec = 60
 network_access = true
 
+[codex_usage]
+profile_enabled = true
+refresh_interval_sec = 900
+timezone = "Europe/Moscow"
+
 [transcription]
 provider = "openai"
 model = "gpt-transcribe"

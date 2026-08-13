@@ -32,6 +32,7 @@ export function helpMessage(isAdministrator: boolean): string {
       "",
       "*Только для администратора*",
       "`/login` — войти в ChatGPT через device code в личном чате",
+      "`/limits` — показать 5\\-часовой и недельный Codex limits этого VPS",
       "`/topics` — показать обнаруженные Telegram группы, топики и привязки",
       "`/bind_topic <chat_id> <topic_id> <project> [workspace]` — привязать топик из личного чата",
       "Пример: `/bind_topic -1001234567890 42 summate repo`",

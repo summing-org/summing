@@ -78,6 +78,12 @@ export class TelegramAPI {
     return record(await this.call("getMe", {})) ?? {};
   }
 
+  async setMyShortDescription(shortDescription: string): Promise<void> {
+    await this.call("setMyShortDescription", {
+      short_description: shortDescription.slice(0, 120),
+    });
+  }
+
   async downloadFile(
     fileId: string,
     maximumBytes: number,

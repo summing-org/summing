@@ -77,6 +77,23 @@ test("getUpdates subscribes to messages and bot membership changes", async () =>
   }
 });
 
+test("setMyShortDescription updates the bot profile within Telegram limits", async () => {
+  const api = new TelegramAPI("token");
+  let payload: Record<string, unknown> = {};
+  api.call = async (method, input) => {
+    assert.equal(method, "setMyShortDescription");
+    payload = input;
+    return true;
+  };
+
+  try {
+    await api.setMyShortDescription("x".repeat(140));
+    assert.equal(String(payload.short_description).length, 120);
+  } finally {
+    await api.close();
+  }
+});
+
 test("downloadFile resolves Telegram file path and enforces byte limit", async () => {
   const api = new TelegramAPI("secret-token");
   api.call = async (method, input) => {

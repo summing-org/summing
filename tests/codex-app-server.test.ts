@@ -254,6 +254,23 @@ test("thread and turn requests use official v2 shapes", async (context) => {
   );
 });
 
+test("reads ChatGPT rate limits through the account RPC", async () => {
+  class FakeCodex extends CodexAppServer {
+    readonly calls: Array<[string, JsonRecord]> = [];
+
+    override async request(method: string, params: JsonRecord = {}): Promise<unknown> {
+      this.calls.push([method, params]);
+      return { rateLimits: { primary: { usedPercent: 25 } } };
+    }
+  }
+
+  const client = new FakeCodex("codex", "/tmp/codex-test");
+  assert.deepEqual(await client.rateLimits(), {
+    rateLimits: { primary: { usedPercent: 25 } },
+  });
+  assert.deepEqual(client.calls, [["account/rateLimits/read", {}]]);
+});
+
 test("refuses shared Codex configuration that could expand project permissions", async () => {
   for (const unsafe of [
     '[mcp_servers.leak]\ncommand = "/usr/bin/false"\n',

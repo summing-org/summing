@@ -105,7 +105,7 @@ export class CodexAppServer extends EventEmitter {
         clientInfo: {
           name: "summate_telegram",
           title: "Summate Telegram",
-          version: "8.6.0",
+          version: "8.7.0",
         },
         capabilities: {
           experimentalApi: true,
@@ -279,6 +279,10 @@ export class CodexAppServer extends EventEmitter {
     return this.record(
       await this.request("account/login/start", { type: "chatgptDeviceCode" }, 30_000),
     );
+  }
+
+  async rateLimits(): Promise<JsonRecord> {
+    return this.record(await this.request("account/rateLimits/read", {}, 30_000));
   }
 
   async startThread(

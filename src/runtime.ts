@@ -9,6 +9,12 @@ import {
   type JsonRecord,
 } from "./codex-app-server.js";
 import {
+  codexLimitsMessage,
+  codexLimitsProfileText,
+  parseCodexRateLimits,
+  type CodexRateLimitsSnapshot,
+} from "./codex-rate-limits.js";
+import {
   AttachmentError,
   AttachmentService,
   type AudioTranscriber,
@@ -236,6 +242,10 @@ export class SummateRuntime {
   private stopping = false;
   private exitCode = 0;
   private accountState: JsonRecord = {};
+  private codexLimitsState: CodexRateLimitsSnapshot | null = null;
+  private codexLimitsRefresh: Promise<CodexRateLimitsSnapshot | null> | null = null;
+  private codexLimitsTimer: NodeJS.Timeout | null = null;
+  private codexLimitsProfileDescription = "";
   private lastTelegramPoll: number | null = null;
   private readonly processors = new Map<string, Promise<void>>();
   private readonly provisioning = new Map<string, ProvisioningTask>();
@@ -286,6 +296,12 @@ export class SummateRuntime {
       this.telegramBotId = Number(me.id ?? 0);
       this.telegramUsername = String(me.username ?? "").replace(/^@/, "").toLowerCase();
       console.info(`Telegram bot connected: @${this.telegramUsername || "unknown"}`);
+      try {
+        await this.refreshCodexLimits();
+      } catch (error) {
+        console.warn("could not refresh Codex limits on startup", error);
+      }
+      this.scheduleCodexLimitsRefresh();
       await this.health.start();
       await this.viewer.start();
       for (const conversation of this.state.listConversations()) {
@@ -303,6 +319,7 @@ export class SummateRuntime {
       this.stopping = true;
       this.shutdownController.abort();
       this.clearAmbientTimers();
+      this.clearCodexLimitsTimer();
       await this.telegram.close();
       await this.codex.close(this.exitCode === 99);
       for (const active of this.activeByThread.values()) {
@@ -327,17 +344,26 @@ export class SummateRuntime {
     this.stopping = true;
     this.shutdownController.abort();
     this.clearAmbientTimers();
+    this.clearCodexLimitsTimer();
     this.shutdown.resolve(undefined);
   }
 
   status(): Record<string, unknown> {
     const account = record(this.accountState.account);
+    const weekly = this.codexLimitsState?.weekly ?? null;
     return {
       ok: this.codex.running && !this.stopping,
-      version: "8.6.0",
+      version: "8.7.0",
       codex_running: this.codex.running,
       auth: account?.type ?? null,
       plan: account?.planType ?? null,
+      codex_limits: weekly
+        ? {
+            weekly_remaining_percent: weekly.remainingPercent,
+            weekly_resets_at: weekly.resetsAt,
+            updated_at: this.codexLimitsState?.capturedAt ?? null,
+          }
+        : null,
       transcription: {
         provider: this.config.transcriptionProvider,
         configured: Boolean(this.transcriptionApiKey()),
@@ -350,6 +376,62 @@ export class SummateRuntime {
       },
       ...this.state.counts(),
     };
+  }
+
+  private async refreshCodexLimits(): Promise<CodexRateLimitsSnapshot | null> {
+    if (this.codexLimitsRefresh) return this.codexLimitsRefresh;
+    const refresh = (async (): Promise<CodexRateLimitsSnapshot | null> => {
+      this.accountState = await this.codex.account();
+      if (!record(this.accountState.account)) {
+        this.codexLimitsState = null;
+        await this.updateCodexLimitsProfile("⚪ Codex: требуется /login");
+        return null;
+      }
+      const snapshot = parseCodexRateLimits(await this.codex.rateLimits());
+      this.codexLimitsState = snapshot;
+      await this.updateCodexLimitsProfile(
+        codexLimitsProfileText(snapshot, this.config.codexLimitsTimeZone),
+      );
+      return snapshot;
+    })();
+    this.codexLimitsRefresh = refresh;
+    try {
+      return await refresh;
+    } finally {
+      if (this.codexLimitsRefresh === refresh) this.codexLimitsRefresh = null;
+    }
+  }
+
+  private async updateCodexLimitsProfile(description: string): Promise<void> {
+    if (
+      !this.config.codexLimitsProfileEnabled ||
+      description === this.codexLimitsProfileDescription
+    ) {
+      return;
+    }
+    try {
+      await this.telegram.setMyShortDescription(description);
+      this.codexLimitsProfileDescription = description;
+    } catch (error) {
+      console.warn("could not update Telegram bot limit status", error);
+    }
+  }
+
+  private scheduleCodexLimitsRefresh(): void {
+    this.clearCodexLimitsTimer();
+    if (this.stopping) return;
+    this.codexLimitsTimer = setTimeout(() => {
+      void this.refreshCodexLimits()
+        .catch((error) => console.warn("could not refresh Codex limits", error))
+        .finally(() => this.scheduleCodexLimitsRefresh());
+    }, this.config.codexLimitsRefreshIntervalSeconds * 1_000);
+    this.codexLimitsTimer.unref();
+  }
+
+  private clearCodexLimitsTimer(): void {
+    if (!this.codexLimitsTimer) return;
+    clearTimeout(this.codexLimitsTimer);
+    this.codexLimitsTimer = null;
   }
 
   private async pollTelegram(): Promise<void> {
@@ -798,6 +880,31 @@ export class SummateRuntime {
       const url = result.verificationUrl ?? "https://auth.openai.com/codex/device";
       const code = result.userCode ?? "(код не получен)";
       await this.reply(chatId, topicId, messageId, `Откройте ${String(url)}\nКод: ${String(code)}\nПосле входа используйте /status.`);
+      return;
+    }
+    if (command === "/limits") {
+      if (!isAdministrator) {
+        await this.reply(chatId, topicId, messageId, "Команда доступна только администратору.");
+        return;
+      }
+      if (chatType !== "private") {
+        await this.reply(
+          chatId,
+          topicId,
+          messageId,
+          "Проверяйте Codex limits в личном чате с ботом.",
+        );
+        return;
+      }
+      const snapshot = await this.refreshCodexLimits();
+      await this.reply(
+        chatId,
+        topicId,
+        messageId,
+        snapshot
+          ? codexLimitsMessage(snapshot, this.config.codexLimitsTimeZone)
+          : "Codex не авторизован на VPS. Выполните /login.",
+      );
       return;
     }
     if (command === "/project_create" || command === "/project_clone") {
@@ -1774,11 +1881,15 @@ export class SummateRuntime {
       this.requestStop(1);
       return;
     }
-    if (event.method === "account/updated" || event.method === "account/login/completed") {
+    if (
+      event.method === "account/updated" ||
+      event.method === "account/login/completed" ||
+      event.method === "account/rateLimits/updated"
+    ) {
       try {
-        this.accountState = await this.codex.account();
+        await this.refreshCodexLimits();
       } catch {
-        // The next /status or run refreshes account state.
+        // The periodic refresh or the next /limits request retries.
       }
       return;
     }

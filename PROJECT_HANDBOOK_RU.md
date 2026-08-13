@@ -1,6 +1,6 @@
-# Summate 8.4: архитектура, эксплуатация и разработка
+# Summate 8.7: архитектура, эксплуатация и разработка
 
-> Версия: **8.6.0**
+> Версия: **8.7.0**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
 > Последняя сверка с кодом: **12 августа 2026 года**.
 
@@ -442,6 +442,7 @@ Summate использует один execution substrate: официальны�
 | `initialize` | Согласовать клиент и сервер. |
 | `account/read` | Проверить авторизацию и plan. |
 | `account/login/start` | Начать ChatGPT device-code login. |
+| `account/rateLimits/read` | Получить quota windows VPS-аккаунта. |
 | `thread/start` | Создать постоянный контекст Conversation. |
 | `thread/resume` | Возобновить сохранённый thread. |
 | `turn/start` | Запустить Run; для ambient потребовать структурированное решение через `outputSchema`. |
@@ -452,6 +453,7 @@ Summate использует один execution substrate: официальны�
 | `error` | Сохранить ошибку активного Run. |
 | `turn/completed` | Закрыть Run и сохранить результат. |
 | `account/updated`, `account/login/completed` | Обновить локальный account status. |
+| `account/rateLimits/updated` | Немедленно перечитать snapshot лимитов. |
 
 ChatGPT OAuth-токены хранит и обновляет сам Codex в выделенном
 `$CODEX_HOME`. API key Summate не требует.
@@ -467,6 +469,15 @@ ambient Run завершается без сообщения в группу.
 device code в группе. Команда доступна только администратору. После подтверждения
 проверьте `/status`. Все Project owners используют этот общий account и не
 выполняют отдельный login.
+
+После авторизации runtime раз в `codex_usage.refresh_interval_sec` и по событию
+App Server читает `account/rateLimits/read`. Поле `usedPercent` переводится в
+остаток, недельным считается фактически возвращённое окно длительностью не менее
+шести суток. `/limits` показывает все окна основного `codex` bucket, а
+`setMyShortDescription` публикует недельный остаток и время сброса в профиле
+Telegram-бота. Это состояние `CODEX_HOME` на VPS; локальный Codex на ноутбуке в
+расчёте не участвует. Если недельного окна нет, runtime явно показывает, что
+данные недоступны, и не подменяет их коротким окном.
 
 Официальные источники:
 
@@ -637,6 +648,7 @@ worktree. `run` требует чистый committed `HEAD`. Периодиче
 |---|---|
 | `/start`, `/help` | Подробная Markdown-справка с назначением команд и примерами; администратор также видит свой блок команд. |
 | `/login` | Device-code login; только администратор в личном чате. |
+| `/limits` | 5-часовой и недельный остаток VPS-аккаунта; только администратор в личном чате. |
 | `/project_create <project> <owner_id> <repo>` | Создать пустой управляемый Git Project; только администратор в личном чате. |
 | `/project_clone <project> <owner_id> <repo> <git_url>` | Клонировать управляемый Git Project; только администратор в личном чате. |
 | `/topics` | Список обнаруженных Telegram chats/topics и их bindings; только администратор в личном чате. |
@@ -739,6 +751,9 @@ Telegram-проекты находятся в SQLite и не записываю�
 | `agent.participant_rate_limit_messages` | Сообщений одного участника на окно. | 12 |
 | `agent.participant_rate_limit_window_sec` | Длина rate-limit окна. | 60 |
 | `agent.network_access` | Сеть внутри Codex sandbox. | true |
+| `codex_usage.profile_enabled` | Обновлять short description Telegram-бота. | true |
+| `codex_usage.refresh_interval_sec` | Интервал перечитывания App Server limits. | 900 |
+| `codex_usage.timezone` | IANA timezone для времени сброса. | `Europe/Moscow` |
 | `transcription.provider` | `openai` или опциональный `groq`. | `openai` |
 | `transcription.model` | Модель выбранного provider. | `gpt-transcribe` |
 | `transcription.max_file_bytes` | Лимит Telegram download. | 20000000 |
@@ -758,7 +773,8 @@ Project и один Workspace в нём. Пути проверяются на а
 существование каталога проверяется только при подготовке конкретного Run.
 Допустимые диапазоны: parallel conversations — 1–32, stream interval — 0.5–10
 секунд, participant batch — 5–120 секунд, participant messages — 1–100,
-rate-limit window — 10–3600 секунд, health port — 1–65535.
+rate-limit window — 10–3600 секунд, Codex usage refresh — 60–86400 секунд,
+health port — 1–65535. `codex_usage.timezone` проверяется через `Intl` при старте.
 
 ### 12.2. Environment
 
@@ -1038,10 +1054,15 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "8.6.0",
+  "version": "8.7.0",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",
+  "codex_limits": {
+    "weekly_remaining_percent": 68,
+    "weekly_resets_at": 1787260800,
+    "updated_at": 1786650000
+  },
   "transcription": {
     "provider": "openai",
     "configured": true,

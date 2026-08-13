@@ -12,6 +12,12 @@ participant_rate_limit_window_sec = 60
 # Required for git fetch/push and dependency downloads inside a Codex turn.
 network_access = true
 
+[codex_usage]
+# Publish the VPS account's weekly remaining usage in the bot profile.
+profile_enabled = true
+refresh_interval_sec = 900
+timezone = "Europe/Moscow"
+
 [transcription]
 # OpenAI is the default; set provider = "groq" and a Groq Whisper model to switch.
 provider = "openai"

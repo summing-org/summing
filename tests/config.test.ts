@@ -20,6 +20,11 @@ participant_batch_sec = 25
 participant_rate_limit_messages = 8
 participant_rate_limit_window_sec = 90
 
+[codex_usage]
+profile_enabled = false
+refresh_interval_sec = 600
+timezone = "UTC"
+
 [transcription]
 provider = "openai"
 model = "gpt-transcribe"
@@ -56,6 +61,9 @@ test("loads the explicit project model", () => {
     assert.equal(config.participantBatchSeconds, 25);
     assert.equal(config.participantMessagesPerWindow, 8);
     assert.equal(config.participantRateLimitWindowSeconds, 90);
+    assert.equal(config.codexLimitsProfileEnabled, false);
+    assert.equal(config.codexLimitsRefreshIntervalSeconds, 600);
+    assert.equal(config.codexLimitsTimeZone, "UTC");
     assert.equal(config.transcriptionProvider, "openai");
     assert.equal(config.openaiApiKey, "openai-test-key");
     assert.equal(config.transcriptionModel, "gpt-transcribe");

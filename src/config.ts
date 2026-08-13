@@ -70,6 +70,9 @@ export class RuntimeConfig {
     readonly runnerSocket = "/run/summate-runner/runner.sock",
     readonly deploymentRequestPath = "",
     readonly deploymentStatePath = "",
+    readonly codexLimitsProfileEnabled = true,
+    readonly codexLimitsRefreshIntervalSeconds = 900,
+    readonly codexLimitsTimeZone = "Europe/Moscow",
   ) {}
 
   project(projectId: string): ProjectConfig {
@@ -131,6 +134,16 @@ function expandPath(value: unknown, field: string): string {
   if (raw === "~" || raw.startsWith("~/")) raw = homedir() + raw.slice(1);
   if (!isAbsolute(raw)) throw new ConfigError(`${field} must be an absolute path`);
   return resolve(raw);
+}
+
+function timeZone(value: unknown, field: string): string {
+  const name = String(value ?? "").trim();
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: name }).format(0);
+  } catch {
+    throw new ConfigError(`${field} must be a valid IANA time zone`);
+  }
+  return name;
 }
 
 function loadProjects(value: unknown): ReadonlyMap<string, ProjectConfig> {
@@ -212,6 +225,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig 
   const ownerId = telegramUserId(env.TELEGRAM_OWNER_ID, "TELEGRAM_OWNER_ID");
   const agent = table(raw.agent) ?? {};
   const transcription = table(raw.transcription) ?? {};
+  const codexUsage = table(raw.codex_usage) ?? {};
   const health = table(raw.health) ?? {};
   const viewer = table(raw.viewer) ?? {};
   const codexHome = expandPath(env.CODEX_HOME || `${dataDir}/codex`, "CODEX_HOME");
@@ -326,5 +340,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig 
     env.SUMMATE_DEPLOY_STATE
       ? expandPath(env.SUMMATE_DEPLOY_STATE, "SUMMATE_DEPLOY_STATE")
       : "",
+    Boolean(codexUsage.profile_enabled ?? true),
+    boundedNumber(
+      codexUsage.refresh_interval_sec ?? 900,
+      "codex_usage.refresh_interval_sec",
+      60,
+      86_400,
+      true,
+    ),
+    timeZone(codexUsage.timezone ?? "Europe/Moscow", "codex_usage.timezone"),
   );
 }
