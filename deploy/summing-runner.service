@@ -27,7 +27,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/var/lib/summing-runner /run/summing-runner
+ReadWritePaths=/var/lib/summing-runner /var/lib/summing-runs /run/summing-runner
 LockPersonality=true
 RestrictSUIDSGID=true
 

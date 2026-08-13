@@ -35,6 +35,11 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
   assert.match(activation, /systemctl start summing-deploy\.path summing-deploy\.timer/);
   assert.match(activation, /runner_uid=\$\(id -u summing-runner\)/);
   assert.match(activation, /sed "s\/RUNNER_UID\/\$\{runner_uid\}\/g"/);
+  assert.match(
+    asset("deploy/summing-runner.service"),
+    /ReadWritePaths=.*\/var\/lib\/summing-runs(?:\s|$)/,
+    "the hardened runner must be able to create persistent dry-run artifacts",
+  );
 });
 
 test("Project Viewer installer supports an HTTPS domain transition", () => {
