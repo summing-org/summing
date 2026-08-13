@@ -9,4 +9,8 @@ test("Project Viewer bounds Telegram authorization and network waits", () => {
   assert.match(VIEWER_JS, /new AbortController\(\)/);
   assert.match(VIEWER_JS, /Telegram не передал данные авторизации/);
   assert.match(VIEWER_JS, /Повторить/);
+  assert.match(VIEWER_HTML, /data-tab="settings"/);
+  assert.match(VIEWER_HTML, /Обновиться сейчас/);
+  assert.match(VIEWER_JS, /\/api\/viewer\/deployment/);
+  assert.match(VIEWER_JS, /state\.session\.administrator&&state\.session\.deploymentAvailable/);
 });

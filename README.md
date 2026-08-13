@@ -1,4 +1,4 @@
-# Summate 8.5
+# Summate 8.6
 
 Summate — один постоянно живущий агент с одним администратором и назначаемыми
 владельцами проектов. Он работает на Linux VPS, принимает команды из Telegram
@@ -106,11 +106,25 @@ nano /etc/summate/summate.env
 ```
 
 `activate.sh` создаёт production-конфиг, выполняет `npm ci`, lint, тесты и
-сборку, оставляет только production dependencies, устанавливает systemd unit и
-проверяет локальный health endpoint. Затем отправьте боту `/login` и завершите
-ChatGPT device-code flow. Не помещайте Telegram token, API credentials или
-приватный deploy key в cloud-init: user-data сохраняется в metadata провайдера и
-самого VPS.
+сборку, оставляет только production dependencies, устанавливает systemd units,
+атомарный release symlink и проверяет локальный health endpoint. Затем отправьте
+боту `/login` и завершите ChatGPT device-code flow. Не помещайте Telegram token,
+API credentials или приватный deploy key в cloud-init: user-data сохраняется в
+metadata провайдера и самого VPS.
+
+Для автоматических обновлений настройте пользователю `summate` read-only SSH
+deploy key к приватному репозиторию и убедитесь, что следующая команда работает
+без prompt:
+
+```bash
+sudo -u summate env HOME=/var/lib/summate GIT_TERMINAL_PROMPT=0 \
+  git -C /opt/summate fetch origin master
+```
+
+Ожидаемый URL `origin` закреплён в root-only `/etc/summate/deploy.env`. По
+умолчанию это `git@summing.github.com:summing-org/summate.git`; измените
+`SUMMATE_DEPLOY_EXPECTED_REMOTE`, если VPS использует другой эквивалентный SSH
+URL.
 
 ## Ручная установка
 
@@ -269,6 +283,27 @@ cache 8 ГБ, HTTPS proxy, project config/data и timer unit. Пользоват
 `summate` не получает Docker socket. Перед включением live timer замените
 placeholders в `/etc/summate-runner/projects/ash-seo.env` и проверьте
 `ash-seo.config.json`, затем запустите Validate и Dry run из Viewer.
+
+## Автоматическое обновление Summate
+
+`summate-deploy.timer` каждые 10 минут делает `fetch` закреплённого
+`origin/master`. Ту же проверку администратор может немедленно запросить во
+вкладке **Настройки** Project Viewer. Владельцы назначенных проектов эту вкладку
+не видят и deploy API для них возвращает `403`.
+
+Worker никогда не делает `pull`, `reset` или checkout рабочего `/opt/summate`.
+Он экспортирует точный remote commit в `/opt/summate-releases/<sha>`, собирает и
+тестирует snapshot от отдельного пользователя `summate-builder`, ждёт завершения
+активных Codex runs, атомарно переключает `/opt/summate-current` и проверяет
+Summate и runner. При неуспешном health check symlink и сервисы автоматически
+возвращаются на предыдущий release. Non-fast-forward обновления отклоняются.
+
+```bash
+systemctl list-timers summate-deploy.timer
+systemctl status summate-deploy.service
+journalctl -u summate-deploy --since today
+sudo systemctl start summate-deploy.service
+```
 
 ## Тесты
 

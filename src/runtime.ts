@@ -334,7 +334,7 @@ export class SummateRuntime {
     const account = record(this.accountState.account);
     return {
       ok: this.codex.running && !this.stopping,
-      version: "8.5.0",
+      version: "8.6.0",
       codex_running: this.codex.running,
       auth: account?.type ?? null,
       plan: account?.planType ?? null,

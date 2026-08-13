@@ -1,0 +1,327 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+umask 0027
+
+if [ "${EUID}" -ne 0 ]; then
+  printf '%s\n' 'summate-deploy must run as root.' >&2
+  exit 2
+fi
+
+repo_dir=${SUMMATE_DEPLOY_REPO:-/opt/summate}
+releases_dir=${SUMMATE_DEPLOY_RELEASES:-/opt/summate-releases}
+current_link=${SUMMATE_DEPLOY_CURRENT:-/opt/summate-current}
+state_dir=${SUMMATE_DEPLOY_STATE_DIR:-/var/lib/summate/deploy}
+state_file=${SUMMATE_DEPLOY_STATE_FILE:-${state_dir}/state.json}
+remote=${SUMMATE_DEPLOY_REMOTE:-origin}
+branch=${SUMMATE_DEPLOY_BRANCH:-master}
+expected_remote=${SUMMATE_DEPLOY_EXPECTED_REMOTE:-git@summing.github.com:summing-org/summate.git}
+keep_releases=${SUMMATE_DEPLOY_KEEP_RELEASES:-5}
+drain_timeout=${SUMMATE_DEPLOY_DRAIN_TIMEOUT_SEC:-1800}
+lock_file=${SUMMATE_DEPLOY_LOCK_FILE:-/run/lock/summate-deploy.lock}
+
+case "${remote}" in
+  ''|*[!A-Za-z0-9._-]*)
+    printf '%s\n' 'SUMMATE_DEPLOY_REMOTE is invalid.' >&2
+    exit 2
+    ;;
+esac
+case "${branch}" in
+  ''|*[!A-Za-z0-9._/-]*|*..*|/*|*/)
+    printf '%s\n' 'SUMMATE_DEPLOY_BRANCH is invalid.' >&2
+    exit 2
+    ;;
+esac
+case "${keep_releases}" in
+  ''|*[!0-9]*)
+    printf '%s\n' 'SUMMATE_DEPLOY_KEEP_RELEASES must be an integer.' >&2
+    exit 2
+    ;;
+esac
+case "${drain_timeout}" in
+  ''|*[!0-9]*)
+    printf '%s\n' 'SUMMATE_DEPLOY_DRAIN_TIMEOUT_SEC must be an integer.' >&2
+    exit 2
+    ;;
+esac
+if [ "${keep_releases}" -lt 2 ]; then
+  printf '%s\n' 'SUMMATE_DEPLOY_KEEP_RELEASES must be at least 2.' >&2
+  exit 2
+fi
+if [ ! -d "${repo_dir}" ] || [ ! -e "${repo_dir}/.git" ]; then
+  printf 'Summate repository is missing from %s.\n' "${repo_dir}" >&2
+  exit 2
+fi
+if ! id summate >/dev/null 2>&1; then
+  printf '%s\n' 'The summate user is missing.' >&2
+  exit 2
+fi
+if ! id summate-builder >/dev/null 2>&1; then
+  printf '%s\n' 'The summate-builder user is missing; run deploy/activate.sh.' >&2
+  exit 2
+fi
+if id -nG summate-builder | tr ' ' '\n' | grep -qx summate; then
+  printf '%s\n' 'summate-builder must not belong to the secret-bearing summate group.' >&2
+  exit 2
+fi
+
+install -d -o root -g root -m 0711 "${releases_dir}"
+install -d -o summate -g summate -m 0700 "${state_dir}"
+install -d -o root -g root -m 0755 "$(dirname "${lock_file}")"
+exec 9>"${lock_file}"
+if ! flock -n 9; then
+  printf '%s\n' 'Another Summate deployment is already running.'
+  exit 0
+fi
+
+now() {
+  date -u +%Y-%m-%dT%H:%M:%S.%3NZ
+}
+
+started_at=$(now)
+target_sha=
+previous_sha=
+previous_target=
+switched=0
+prior_status=
+prior_remote_sha=
+prior_finished_at=
+manual_requested_at=
+manual_retry=0
+
+valid_sha() {
+  printf '%s' "${1:-}" | grep -Eq '^[0-9a-f]{40}$'
+}
+
+git_as_summate() {
+  runuser -u summate -- env -i \
+    HOME=/var/lib/summate \
+    USER=summate \
+    LOGNAME=summate \
+    PATH=/usr/local/bin:/usr/bin:/bin \
+    GIT_TERMINAL_PROMPT=0 \
+    git "$@"
+}
+
+write_state() {
+  local status=$1
+  local message=$2
+  local current_sha=${3:-}
+  local remote_sha=${4:-}
+  local finished_at=${5:-}
+  local temporary
+  temporary="${state_file}.$$.tmp"
+  jq -n \
+    --arg status "${status}" \
+    --arg message "${message}" \
+    --arg currentSha "${current_sha}" \
+    --arg remoteSha "${remote_sha}" \
+    --arg startedAt "${started_at}" \
+    --arg finishedAt "${finished_at}" \
+    '{
+      status: $status,
+      message: $message,
+      currentSha: (if $currentSha == "" then null else $currentSha end),
+      remoteSha: (if $remoteSha == "" then null else $remoteSha end),
+      startedAt: $startedAt,
+      finishedAt: (if $finishedAt == "" then null else $finishedAt end)
+    }' > "${temporary}"
+  chown root:summate "${temporary}"
+  chmod 0640 "${temporary}"
+  mv -f "${temporary}" "${state_file}"
+}
+
+deployed_sha() {
+  local metadata=${current_link}/.summate-release.json
+  local candidate=
+  if [ -f "${metadata}" ]; then
+    candidate=$(jq -r '.sha // empty' "${metadata}" 2>/dev/null || true)
+  elif [ -e "${current_link}/.git" ]; then
+    candidate=$(git_as_summate -C "${current_link}" rev-parse HEAD 2>/dev/null || true)
+  fi
+  if valid_sha "${candidate}"; then printf '%s\n' "${candidate}"; fi
+}
+
+switch_current() {
+  local target=$1
+  local next_link=/opt/.summate-current.$$.new
+  rm -f "${next_link}"
+  ln -s "${target}" "${next_link}"
+  mv -Tf "${next_link}" "${current_link}"
+}
+
+restart_services() {
+  if systemctl is-enabled --quiet summate-runner.service 2>/dev/null; then
+    systemctl restart summate-runner.service
+  fi
+  systemctl restart summate.service
+}
+
+wait_for_health() {
+  local runner_required=0
+  if systemctl is-enabled --quiet summate-runner.service 2>/dev/null; then
+    runner_required=1
+  fi
+  for _ in $(seq 1 60); do
+    if curl --fail --silent http://127.0.0.1:8765/health >/dev/null 2>&1; then
+      if [ "${runner_required}" = 0 ] || \
+        curl --fail --silent --unix-socket /run/summate-runner/runner.sock \
+          http://localhost/health >/dev/null 2>&1; then
+        return 0
+      fi
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+wait_for_idle_runtime() {
+  local deadline=$((SECONDS + drain_timeout))
+  local payload=
+  local active=0
+  while payload=$(curl --fail --silent http://127.0.0.1:8765/health 2>/dev/null); do
+    active=$(printf '%s' "${payload}" | jq -r '.active // 0' 2>/dev/null || printf '0')
+    if [ "${active}" = 0 ]; then return 0; fi
+    if [ "${SECONDS}" -ge "${deadline}" ]; then
+      printf 'Timed out waiting for %s active run(s) to finish.\n' "${active}" >&2
+      return 1
+    fi
+    write_state \
+      waiting \
+      "Ждём завершения активных runs: ${active}" \
+      "${previous_sha}" \
+      "${target_sha}"
+    sleep 5
+  done
+}
+
+on_error() {
+  local line=$1
+  local code=$2
+  local message="Обновление завершилось ошибкой на строке ${line} (exit ${code})"
+  trap - ERR
+  set +e
+  if [ "${switched}" = 1 ] && [ -n "${previous_target}" ]; then
+    write_state rolling_back "${message}; возвращаем предыдущий release" "${target_sha}" "${target_sha}"
+    switch_current "${previous_target}"
+    restart_services
+    wait_for_health
+    switched=0
+  fi
+  write_state failed "${message}" "${previous_sha}" "${target_sha}" "$(now)"
+  printf '%s\n' "${message}" >&2
+  exit "${code}"
+}
+trap 'error_code=$?; on_error ${LINENO} "${error_code}"' ERR
+
+previous_target=$(readlink -f "${current_link}" 2>/dev/null || true)
+previous_sha=$(deployed_sha || true)
+if [ -z "${previous_target}" ] || [ ! -d "${previous_target}" ]; then
+  printf '%s\n' 'Current release symlink is missing; run deploy/activate.sh first.' >&2
+  exit 2
+fi
+if [ -f "${state_file}" ]; then
+  prior_status=$(jq -r '.status // empty' "${state_file}" 2>/dev/null || true)
+  prior_remote_sha=$(jq -r '.remoteSha // empty' "${state_file}" 2>/dev/null || true)
+  prior_finished_at=$(jq -r '.finishedAt // empty' "${state_file}" 2>/dev/null || true)
+fi
+if [ -f "${state_dir}/request.json" ]; then
+  manual_requested_at=$(jq -r '.requestedAt // empty' \
+    "${state_dir}/request.json" 2>/dev/null || true)
+fi
+if [ -n "${manual_requested_at}" ] && \
+  { [ -z "${prior_finished_at}" ] || [[ "${manual_requested_at}" > "${prior_finished_at}" ]]; }; then
+  manual_retry=1
+fi
+write_state checking "Проверяем ${remote}/${branch}" "${previous_sha}" ""
+
+actual_remote=$(git_as_summate -C "${repo_dir}" remote get-url "${remote}")
+if [ -n "${expected_remote}" ] && [ "${actual_remote}" != "${expected_remote}" ]; then
+  printf 'Refusing unexpected %s URL: %s\n' "${remote}" "${actual_remote}" >&2
+  exit 1
+fi
+git_as_summate -C "${repo_dir}" fetch --prune "${remote}" \
+  "+refs/heads/${branch}:refs/remotes/${remote}/${branch}"
+
+target_sha=$(git_as_summate -C "${repo_dir}" rev-parse \
+  "refs/remotes/${remote}/${branch}^{commit}")
+if ! valid_sha "${target_sha}"; then
+  printf '%s\n' 'Remote branch did not resolve to a full commit SHA.' >&2
+  exit 1
+fi
+if [ "${previous_sha}" = "${target_sha}" ]; then
+  write_state idle "Установлена актуальная версия" "${previous_sha}" "${target_sha}" \
+    "$(now)"
+  exit 0
+fi
+if [ "${prior_status}" = failed ] && \
+  [ "${prior_remote_sha}" = "${target_sha}" ] && \
+  [ "${manual_retry}" = 0 ]; then
+  write_state failed \
+    "Предыдущая попытка не удалась; ждём новый commit или ручной повтор" \
+    "${previous_sha}" \
+    "${target_sha}" \
+    "$(now)"
+  exit 0
+fi
+if valid_sha "${previous_sha}" && \
+  git_as_summate -C "${repo_dir}" cat-file -e "${previous_sha}^{commit}" 2>/dev/null && \
+  ! git_as_summate -C "${repo_dir}" merge-base --is-ancestor \
+    "${previous_sha}" "${target_sha}"; then
+  printf 'Refusing non-fast-forward deploy from %s to %s.\n' \
+    "${previous_sha}" "${target_sha}" >&2
+  exit 1
+fi
+
+release_dir=${releases_dir}/${target_sha}
+if [ ! -f "${release_dir}/.summate-release.json" ]; then
+  staging_dir=${releases_dir}/.${target_sha}.tmp.$$
+  install -d -o summate-builder -g summate-builder -m 0700 "${staging_dir}"
+  trap 'error_code=$?; rm -rf -- "${staging_dir}"; on_error ${LINENO} "${error_code}"' ERR
+  git_as_summate -C "${repo_dir}" archive "${target_sha}" | \
+    runuser -u summate-builder -- tar -x -C "${staging_dir}"
+  write_state building "Собираем и тестируем ${target_sha:0:12}" "${previous_sha}" "${target_sha}"
+  runuser -u summate-builder -- env -i \
+    HOME=/var/lib/summate-builder \
+    USER=summate-builder \
+    LOGNAME=summate-builder \
+    PATH=/usr/local/bin:/usr/bin:/bin \
+    CI=1 \
+    bash -c \
+    'cd "$1" && npm ci --no-audit --no-fund && npm run lint && npm test && npm prune --omit=dev --no-audit --no-fund' \
+    _ "${staging_dir}"
+  jq -n \
+    --arg sha "${target_sha}" \
+    --arg createdAt "$(now)" \
+    '{sha: $sha, createdAt: $createdAt}' > "${staging_dir}/.summate-release.json"
+  chown -R root:summate "${staging_dir}"
+  chmod -R u=rwX,g=rX,o= "${staging_dir}"
+  chmod 0644 "${staging_dir}/.summate-release.json"
+  mv "${staging_dir}" "${release_dir}"
+  trap 'error_code=$?; on_error ${LINENO} "${error_code}"' ERR
+fi
+
+wait_for_idle_runtime
+write_state deploying "Перезапускаем сервисы на ${target_sha:0:12}" "${previous_sha}" "${target_sha}"
+switch_current "${release_dir}"
+switched=1
+restart_services
+wait_for_health
+switched=0
+
+write_state succeeded "Обновление установлено" "${target_sha}" "${target_sha}" \
+  "$(now)"
+
+current_target=$(readlink -f "${current_link}")
+if ! find "${releases_dir}" -mindepth 1 -maxdepth 1 -type d \
+  -name '[0-9a-f][0-9a-f]*' -printf '%T@ %p\n' | \
+  sort -rn | tail -n "+$((keep_releases + 1))" | cut -d' ' -f2- | \
+  while IFS= read -r old_release; do
+    if [ -n "${old_release}" ] && [ "${old_release}" != "${current_target}" ]; then
+      rm -rf -- "${old_release}"
+    fi
+  done; then
+  printf '%s\n' 'Deployment succeeded, but pruning old releases failed.' >&2
+fi
+
+printf 'Summate deployed at %s.\n' "${target_sha}"

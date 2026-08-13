@@ -9,7 +9,7 @@ User=summate
 Group=summate
 Environment=HOME=/var/lib/summate
 Environment=SUMMATE_RUNNER_SOCKET=/run/summate-runner/runner.sock
-ExecStart=/usr/local/bin/node --enable-source-maps /opt/summate/dist/src/project-runner-cli.js /etc/summate-runner/schedules/ash-seo.json
+ExecStart=/usr/local/bin/node --enable-source-maps /opt/summate-current/dist/src/project-runner-cli.js /etc/summate-runner/schedules/ash-seo.json
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true

@@ -68,6 +68,8 @@ export class RuntimeConfig {
     readonly viewerAuthMaxAgeSeconds = 900,
     readonly viewerLocalToken = "",
     readonly runnerSocket = "/run/summate-runner/runner.sock",
+    readonly deploymentRequestPath = "",
+    readonly deploymentStatePath = "",
   ) {}
 
   project(projectId: string): ProjectConfig {
@@ -318,5 +320,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig 
       env.SUMMATE_RUNNER_SOCKET || viewer.runner_socket || "/run/summate-runner/runner.sock",
       "viewer.runner_socket",
     ),
+    env.SUMMATE_DEPLOY_REQUEST
+      ? expandPath(env.SUMMATE_DEPLOY_REQUEST, "SUMMATE_DEPLOY_REQUEST")
+      : "",
+    env.SUMMATE_DEPLOY_STATE
+      ? expandPath(env.SUMMATE_DEPLOY_STATE, "SUMMATE_DEPLOY_STATE")
+      : "",
   );
 }

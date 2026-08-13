@@ -48,6 +48,8 @@ test("loads the explicit project model", () => {
       TELEGRAM_BOT_TOKEN: "test-token",
       TELEGRAM_OWNER_ID: "42",
       OPENAI_API_KEY: "openai-test-key",
+      SUMMATE_DEPLOY_REQUEST: join(root, "deploy", "request.json"),
+      SUMMATE_DEPLOY_STATE: join(root, "deploy", "state.json"),
     });
     assert.equal(config.telegramOwnerId, 42);
     assert.equal(config.maxParallelConversations, 3);
@@ -58,7 +60,35 @@ test("loads the explicit project model", () => {
     assert.equal(config.openaiApiKey, "openai-test-key");
     assert.equal(config.transcriptionModel, "gpt-transcribe");
     assert.equal(config.maximumAttachmentBytes, 123_456);
+    assert.equal(config.deploymentRequestPath, join(root, "deploy", "request.json"));
+    assert.equal(config.deploymentStatePath, join(root, "deploy", "state.json"));
     assert.equal(config.project("demo").workspace().path, workspace);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("deployment control stays disabled unless both absolute paths are configured", () => {
+  const { root, configPath } = fixture();
+  try {
+    const disabled = loadConfig({
+      SUMMATE_DATA_DIR: join(root, "data"),
+      SUMMATE_CONFIG: configPath,
+      TELEGRAM_BOT_TOKEN: "test-token",
+      TELEGRAM_OWNER_ID: "42",
+    });
+    assert.equal(disabled.deploymentRequestPath, "");
+    assert.equal(disabled.deploymentStatePath, "");
+    assert.throws(
+      () => loadConfig({
+        SUMMATE_DATA_DIR: join(root, "data"),
+        SUMMATE_CONFIG: configPath,
+        TELEGRAM_BOT_TOKEN: "test-token",
+        TELEGRAM_OWNER_ID: "42",
+        SUMMATE_DEPLOY_REQUEST: "relative/request.json",
+      }),
+      (error) => error instanceof ConfigError && error.message.includes("SUMMATE_DEPLOY_REQUEST"),
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -19,7 +19,7 @@ Environment=SUMMATE_RUNNER_SOCKET=/run/summate-runner/runner.sock
 Environment=SUMMATE_RUNNER_DATA=/var/lib/summate-runner/jobs
 Environment=SUMMATE_RUNNER_CONFIG=/etc/summate-runner/projects
 ExecStartPre=/usr/bin/test -S /run/user/RUNNER_UID/docker.sock
-ExecStart=/usr/local/bin/node --enable-source-maps /opt/summate/dist/src/project-runner-main.js
+ExecStart=/usr/local/bin/node --enable-source-maps /opt/summate-current/dist/src/project-runner-main.js
 Restart=on-failure
 RestartSec=5
 UMask=0077

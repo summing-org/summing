@@ -1,6 +1,6 @@
 # Summate 8.4: архитектура, эксплуатация и разработка
 
-> Версия: **8.5.0**
+> Версия: **8.6.0**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
 > Последняя сверка с кодом: **12 августа 2026 года**.
 
@@ -881,9 +881,10 @@ nano /etc/summate/summate.env
 
 [deploy/activate.sh](deploy/activate.sh) создаёт production config при его
 отсутствии, проверяет credentials, выполняет `npm ci`, lint, тесты, production
-build и `npm prune --omit=dev`, устанавливает unit, включает сервис и ждёт
-успешный loopback health check. Существующие `config.toml` и environment file он
-не перезаписывает, поэтому сценарий можно безопасно повторить после обновления
+build и `npm prune --omit=dev`, устанавливает units, создаёт первоначальный
+`/opt/summate-current` и ждёт успешный loopback health check. Существующие
+`config.toml`, application environment и deploy environment он не
+перезаписывает, поэтому сценарий можно безопасно повторить после обновления
 кода.
 
 После запуска отправьте боту `/login`, завершите ChatGPT device-code flow, затем
@@ -965,6 +966,58 @@ curl --fail http://127.0.0.1:8765/health
 ChatGPT device-code flow, создайте Project через `/project_create` или
 `/project_clone`, затем создайте forum group/topics и выполните `/bind`.
 
+### 13.7. Атомарные обновления из origin
+
+Production не запускается непосредственно из изменяемого Git checkout.
+`summate.service`, runner и scheduled runner CLI используют symlink
+`/opt/summate-current`. Первоначально он указывает на `/opt/summate`; после
+первого обновления — на неизменяемый каталог
+`/opt/summate-releases/<full-commit-sha>`.
+
+Один `summate-deploy.service` обслуживает два источника запроса:
+
+- `summate-deploy.timer` проверяет `origin/master` каждые 10 минут;
+- администраторская кнопка **Настройки → Обновиться сейчас** атомарно обновляет
+  `/var/lib/summate/deploy/request.json`, который наблюдает
+  `summate-deploy.path`.
+
+Request-файл не содержит команды или revision и не интерпретируется worker:
+каждый запуск самостоятельно получает и проверяет текущий remote ref. Deploy
+API требует Telegram Mini App signature и точный `TELEGRAM_OWNER_ID`; project
+owner получает `403`. Локальный SSH-tunnel bearer token считается
+администраторским доступом, как и для остальных Viewer diagnostics.
+
+Порядок deployment:
+
+1. под process-wide `flock` получить закреплённый `origin/master` от имени
+   `summate`, не меняя index, branch или working tree `/opt/summate`;
+2. отклонить неожиданный remote URL и non-fast-forward переход;
+3. экспортировать точный commit через `git archive` во временный release;
+4. от имени отдельного `summate-builder`, не имеющего доступа к application
+   secrets и data dir, выполнить `npm ci`, lint, тесты и production prune;
+5. дождаться `active = 0`, атомарно заменить symlink и перезапустить runner и
+   основной сервис;
+6. проверить оба loopback health endpoints; при ошибке вернуть прежний symlink
+   и повторно запустить старый release;
+7. сохранить JSON-состояние для Mini App и оставить последние пять releases.
+
+Root-only настройки находятся в `/etc/summate/deploy.env`. В частности,
+`SUMMATE_DEPLOY_EXPECTED_REMOTE` должен точно совпадать с `git remote get-url
+origin`; значение по умолчанию —
+`git@summing.github.com:summing-org/summate.git`. У пользователя `summate`
+должен быть read-only deploy key и заранее проверенный SSH host key. Application
+secrets из `/etc/summate/summate.env` worker не загружает.
+
+Диагностика и ручной запуск того же безопасного контура:
+
+```bash
+systemctl list-timers summate-deploy.timer
+systemctl status summate-deploy.path summate-deploy.timer summate-deploy.service
+journalctl -u summate-deploy --since today
+sudo systemctl start summate-deploy.service
+cat /var/lib/summate/deploy/state.json
+```
+
 ## 14. Операционное управление
 
 В проекте нет собственного CLI. Операционные команды стандартные:
@@ -985,7 +1038,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "8.5.0",
+  "version": "8.6.0",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",

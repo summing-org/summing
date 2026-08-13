@@ -1,5 +1,10 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { RuntimeConfig } from "./config.js";
+import {
+  DeploymentController,
+  DeploymentControllerError,
+  type DeploymentControl,
+} from "./deployment-controller.js";
 import { GitInspector, GitInspectorError } from "./git-inspector.js";
 import type { ProjectCatalog } from "./project-catalog.js";
 import {
@@ -78,11 +83,13 @@ export class ProjectViewerServer {
   readonly auth: ViewerAuthenticator;
   readonly artifacts: RunArtifactStore;
   readonly runner: ProjectRunnerClient;
+  readonly deployment: DeploymentControl;
 
   constructor(
     readonly config: RuntimeConfig,
     readonly state: StateStore,
     readonly projects: ProjectCatalog,
+    deployment?: DeploymentControl,
   ) {
     this.auth = new ViewerAuthenticator(
       config.telegramToken,
@@ -91,6 +98,10 @@ export class ProjectViewerServer {
     );
     this.artifacts = new RunArtifactStore(config.dataDir);
     this.runner = new ProjectRunnerClient(config.runnerSocket);
+    this.deployment = deployment ?? new DeploymentController(
+      config.deploymentRequestPath,
+      config.deploymentStatePath,
+    );
   }
 
   async start(): Promise<void> {
@@ -147,6 +158,8 @@ export class ProjectViewerServer {
         project: scope.project,
         repository: await scope.inspector.summary(),
         runnerAvailable: await this.runner.available(),
+        administrator: this.isAdministrator(telegramUser),
+        deploymentAvailable: this.isAdministrator(telegramUser) && this.deployment.available,
       });
       return;
     }
@@ -205,6 +218,24 @@ export class ProjectViewerServer {
       json(response, 200, { log: await this.runner.log(scope.project.id, jobId) });
       return;
     }
+    if (request.method === "GET" && url.pathname === "/api/viewer/deployment") {
+      await this.scope(conversationId, telegramUser);
+      this.requireAdministrator(telegramUser);
+      json(response, 200, await this.deployment.status());
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/viewer/deployment") {
+      const body = await requestBody(request) as Record<string, unknown> | null;
+      const requestedConversation = String(body?.conversation ?? "");
+      await this.scope(requestedConversation, telegramUser);
+      this.requireAdministrator(telegramUser);
+      const requestResult = await this.deployment.requestUpdate();
+      json(response, 202, {
+        request: requestResult,
+        deployment: await this.deployment.status(),
+      });
+      return;
+    }
     if (request.method === "POST" && url.pathname === "/api/viewer/jobs") {
       const body = await requestBody(request) as Record<string, unknown> | null;
       const requestedConversation = String(body?.conversation ?? "");
@@ -228,6 +259,19 @@ export class ProjectViewerServer {
       return;
     }
     throw new ViewerHttpError(404, "not found");
+  }
+
+  private isAdministrator(telegramUser: number): boolean {
+    return telegramUser === 0 || telegramUser === this.config.telegramOwnerId;
+  }
+
+  private requireAdministrator(telegramUser: number): void {
+    if (!this.isAdministrator(telegramUser)) {
+      throw new ViewerHttpError(403, "deployment settings are available only to the administrator");
+    }
+    if (!this.deployment.available) {
+      throw new ViewerHttpError(503, "automatic deployment is not configured");
+    }
   }
 
   private async scope(conversationId: string, telegramUser: number): Promise<ViewerScope> {
@@ -272,6 +316,10 @@ export class ProjectViewerServer {
       return;
     }
     if (error instanceof ProjectRunnerClientError) {
+      json(response, 503, { error: error.message });
+      return;
+    }
+    if (error instanceof DeploymentControllerError) {
       json(response, 503, { error: error.message });
       return;
     }

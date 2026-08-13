@@ -159,6 +159,8 @@ write_files:
       SUMMATE_DATA_DIR=/var/lib/summate/data
       SUMMATE_CONFIG=/var/lib/summate/data/config.toml
       SUMMATE_WORKTREE_ROOT=/var/lib/summate/data/worktrees
+      SUMMATE_DEPLOY_REQUEST=/var/lib/summate/deploy/request.json
+      SUMMATE_DEPLOY_STATE=/var/lib/summate/deploy/state.json
       CODEX_HOME=/var/lib/summate/data/codex
       CODEX_BIN=/usr/local/bin/codex
       TELEGRAM_BOT_TOKEN=
