@@ -1,0 +1,19 @@
+{
+  "providers": {
+    "resend": {
+      "apiBaseUrl": "https://api.resend.com",
+      "allowedMethods": ["POST"],
+      "allowedPathPrefixes": ["/emails"],
+      "gatewayCapabilities": {
+        "email.send": {
+          "allowedMethods": ["POST"],
+          "allowedPathPrefixes": ["/emails"]
+        }
+      },
+      "authentication": {
+        "type": "bearer",
+        "credential": "api_key"
+      }
+    }
+  }
+}

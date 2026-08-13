@@ -77,6 +77,17 @@ export interface TelegramTopicRecord {
   updatedAt: number;
 }
 
+export interface SecurityEvent {
+  eventType: string;
+  chatId: number;
+  topicId: number;
+  messageId: number;
+  senderId: number;
+  projectId: string;
+  detectors: string[];
+  createdAt?: number;
+}
+
 type Row = Record<string, string | number | bigint | null>;
 
 function storedAttachments(value: unknown): StoredAttachment[] {
@@ -232,6 +243,19 @@ export class StateStore {
           ON telegram_chats(updated_at DESC, chat_id);
         CREATE INDEX IF NOT EXISTS telegram_topics_updated
           ON telegram_topics(chat_id, updated_at DESC, topic_id);
+        CREATE TABLE IF NOT EXISTS security_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          event_type TEXT NOT NULL,
+          chat_id INTEGER NOT NULL,
+          topic_id INTEGER NOT NULL,
+          message_id INTEGER NOT NULL,
+          sender_id INTEGER NOT NULL,
+          project_id TEXT NOT NULL DEFAULT '',
+          detectors_json TEXT NOT NULL,
+          created_at REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS security_events_created
+          ON security_events(created_at DESC, id DESC);
       `);
       const conversationColumns = this.db.prepare("PRAGMA table_info(conversations)").all() as Row[];
       if (!conversationColumns.some((column) => column.name === "readonly_codex_thread_id")) {
@@ -538,6 +562,31 @@ export class StateStore {
         "UPDATE pending_inputs SET mode = 'followup' WHERE mode = 'steer' AND state = 'pending'",
       );
     });
+  }
+
+  recordSecurityEvent(event: SecurityEvent): void {
+    this.transaction(() => {
+      this.db.prepare(`
+        INSERT INTO security_events
+          (event_type, chat_id, topic_id, message_id, sender_id, project_id,
+           detectors_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        event.eventType,
+        event.chatId,
+        event.topicId,
+        event.messageId,
+        event.senderId,
+        event.projectId,
+        JSON.stringify(event.detectors),
+        event.createdAt ?? Date.now() / 1_000,
+      );
+    });
+  }
+
+  securityEventCount(): number {
+    const row = this.db.prepare("SELECT COUNT(*) AS count FROM security_events").get() as Row;
+    return Number(row.count);
   }
 
   static conversationId(chatId: number, topicId: number): string {

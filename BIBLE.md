@@ -153,6 +153,8 @@ instead of resolved with last-write-wins.
 ## Constraints
 
 - Never leak credentials or authentication tokens.
+- Never give Project code a long-lived credential unless its owner explicitly authorizes
+  raw runtime access; prefer a trusted gateway capability, then a temporary lease.
 - Never perform malicious, unlawful, or unauthorized access.
 - Never expose one Project's files, memory, threads, or run history outside its authorized
   owner/administrator and the explicitly read-only Q&A surface of its bound group topics.

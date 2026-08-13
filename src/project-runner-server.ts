@@ -13,13 +13,20 @@ import {
 } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { basename, isAbsolute, resolve } from "node:path";
+import {
+  integrationRuntimePrefix,
+  loadIntegrationManifest,
+  type IntegrationMode,
+} from "./integration-manifest.js";
 import type { RunnerAction, RunnerJob } from "./project-runner-client.js";
+import { SecretBrokerRuntimeClient } from "./secret-broker-client.js";
 
 const PROJECT_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const JOB_ID = /^[0-9a-f-]{36}$/;
 const REVISION = /^[0-9a-f]{40}$/;
 const MAX_ARCHIVE_BYTES = 50_000_000;
 const MAX_ARTIFACT_BYTES = 8_000_000;
+const MAX_STATIC_ENVIRONMENT_BYTES = 1_000_000;
 const DRY_RUN_RETENTION = 30;
 const RUNNER_ACTIONS = new Set<RunnerAction>(["build", "validate", "dry-run", "run"]);
 const ARTIFACTS = new Map([
@@ -30,6 +37,7 @@ const ARTIFACTS = new Map([
   ["errors.json", "application/json"],
   ["report.html", "text/html"],
 ]);
+const CREDENTIAL_ENVIRONMENT_NAME = /(?:^|_)(?:API_?KEY|ACCESS_?KEY|AUTH|CREDENTIALS?|PASSWORD|PRIVATE_?KEY|SECRET|TOKEN)(?:_|$)/i;
 
 interface RunnerProjectConfig {
   configPath: string;
@@ -40,6 +48,14 @@ interface RunnerProjectConfig {
 interface CommandResult {
   code: number;
   output: string;
+}
+
+interface RuntimeAccess {
+  leaseId: string | null;
+  envPath: string | null;
+  gateway: boolean;
+  modes: IntegrationMode[];
+  redactions: string[];
 }
 
 class RunnerHttpError extends Error {
@@ -65,10 +81,44 @@ function safeAbsolutePath(value: unknown, name: string): string {
   return resolve(path);
 }
 
+function validateStaticEnvironment(path: string): void {
+  const metadata = lstatSync(path);
+  if (
+    !metadata.isFile() ||
+    metadata.isSymbolicLink() ||
+    metadata.nlink !== 1 ||
+    metadata.size > MAX_STATIC_ENVIRONMENT_BYTES ||
+    (metadata.mode & 0o007) !== 0
+  ) {
+    throw new Error("static project environment must be a non-public regular file under 1 MB");
+  }
+  const content = readFileSync(path, "utf8");
+  for (const [index, rawLine] of content.split(/\r?\n/).entries()) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const separator = line.indexOf("=");
+    const name = separator < 0 ? line : line.slice(0, separator).trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(name) || separator < 0) {
+      throw new Error(`static project environment line ${index + 1} is invalid`);
+    }
+    if (CREDENTIAL_ENVIRONMENT_NAME.test(name)) {
+      throw new Error(
+        `static project environment contains credential-like variable '${name}'; use Connections`,
+      );
+    }
+  }
+}
+
 function run(
   executable: string,
   args: string[],
-  options: { cwd: string; env?: NodeJS.ProcessEnv; logPath?: string; timeoutMs?: number },
+  options: {
+    cwd: string;
+    env?: NodeJS.ProcessEnv;
+    logPath?: string;
+    timeoutMs?: number;
+    redactions?: string[];
+  },
 ): Promise<CommandResult> {
   return new Promise((resolveRun, reject) => {
     const child = spawn(executable, args, {
@@ -81,11 +131,37 @@ function run(
     const log = options.logPath
       ? createWriteStream(options.logPath, { flags: "a", mode: 0o600 })
       : null;
-    const record = (chunk: Buffer): void => {
-      log?.write(chunk);
+    const secrets = (options.redactions ?? []).filter(Boolean).sort((left, right) => right.length - left.length);
+    let pendingLog = "";
+    const redact = (value: string): string => {
+      let result = value;
+      for (const secret of secrets) result = result.replaceAll(secret, "[REDACTED]");
+      return result;
+    };
+    const emit = (value: string): void => {
+      const safe = redact(value);
+      log?.write(safe);
       if (bytes < 1_000_000) {
-        bytes += chunk.length;
-        output.push(chunk.toString("utf8"));
+        bytes += Buffer.byteLength(safe);
+        output.push(safe);
+      }
+    };
+    const record = (chunk: Buffer): void => {
+      pendingLog += chunk.toString("utf8");
+      const newline = pendingLog.lastIndexOf("\n");
+      if (newline >= 0) {
+        emit(pendingLog.slice(0, newline + 1));
+        pendingLog = pendingLog.slice(newline + 1);
+      }
+      if (pendingLog.length > 1_000_000) {
+        pendingLog = redact(pendingLog);
+        const overlap = Math.min(
+          Math.max(0, ...secrets.map((secret) => secret.length - 1)),
+          262_143,
+        );
+        const split = Math.max(1, pendingLog.length - overlap);
+        emit(pendingLog.slice(0, split));
+        pendingLog = pendingLog.slice(split);
       }
     };
     child.stdout.on("data", record);
@@ -96,11 +172,13 @@ function run(
     );
     child.once("error", (error) => {
       clearTimeout(timer);
+      if (pendingLog) emit(pendingLog);
       log?.end();
       reject(error);
     });
     child.once("close", (code) => {
       clearTimeout(timer);
+      if (pendingLog) emit(pendingLog);
       log?.end();
       resolveRun({ code: code ?? 1, output: output.join("") });
     });
@@ -111,17 +189,30 @@ export class ProjectRunnerServer {
   private server: Server | null = null;
   private readonly queue: RunnerJob[] = [];
   private processing = false;
+  private readonly secrets: SecretBrokerRuntimeClient;
+  private readonly runtimeAccessRoot: string;
 
   constructor(
     readonly socketPath: string,
     readonly dataRoot: string,
     readonly configRoot: string,
     readonly dockerBinary = "/usr/bin/docker",
+    readonly secretBrokerRuntimeSocket = "/run/summing-secrets/runtime.sock",
+    readonly secretBrokerGatewaySocket = "/run/summing-secrets/gateway.sock",
   ) {
     if (!isAbsolute(socketPath) || basename(socketPath) !== "runner.sock") {
       throw new Error("runner socket must be an absolute runner.sock path");
     }
     mkdirSync(dataRoot, { recursive: true, mode: 0o700 });
+    this.secrets = new SecretBrokerRuntimeClient(secretBrokerRuntimeSocket);
+    this.runtimeAccessRoot = resolve(socketPath, "..", "leases");
+    mkdirSync(this.runtimeAccessRoot, { recursive: true, mode: 0o700 });
+    for (const entry of readdirSync(this.runtimeAccessRoot)) {
+      if (!/^[0-9a-f-]{36}\.env$/.test(entry)) continue;
+      const path = resolve(this.runtimeAccessRoot, entry);
+      const metadata = lstatSync(path);
+      if (metadata.isFile() && !metadata.isSymbolicLink()) rmSync(path);
+    }
   }
 
   async start(): Promise<void> {
@@ -383,7 +474,7 @@ export class ProjectRunnerServer {
       await this.ensureImage(job, source, logPath);
       const result = job.action === "build"
         ? { code: 0 }
-        : await this.runImage(job, this.projectConfig(job.projectId), logPath);
+        : await this.runImage(job, this.projectConfig(job.projectId), source, logPath);
       job.exitCode = result.code;
       if (result.code !== 0) throw new Error(`${job.action} exited with code ${result.code}`);
       job.status = "completed";
@@ -433,10 +524,12 @@ export class ProjectRunnerServer {
   private async runImage(
     job: RunnerJob,
     project: RunnerProjectConfig,
+    source: string,
     logPath: string,
   ): Promise<{ code: number }> {
     if (!existsSync(project.configPath)) throw new Error(`project config is missing: ${project.configPath}`);
     if (!existsSync(project.envPath)) throw new Error(`project environment is missing: ${project.envPath}`);
+    validateStaticEnvironment(project.envPath);
     mkdirSync(project.dataPath, { recursive: true, mode: 0o700 });
     if (job.action === "dry-run") {
       const root = resolve(project.dataPath, "dry-runs");
@@ -449,7 +542,9 @@ export class ProjectRunnerServer {
       }
       mkdirSync(directory, { recursive: true, mode: 0o700 });
     }
-    const args = [
+    const access = await this.runtimeAccess(job, source, logPath);
+    try {
+      const args = [
       "run", "--rm", "--init",
       "--name", `summing-${job.projectId}-${job.id.slice(0, 8)}`,
       "--read-only",
@@ -466,25 +561,192 @@ export class ProjectRunnerServer {
       "--volume", `${project.configPath}:/run/config.json:ro`,
       "--volume", `${project.dataPath}:/app/data`,
     ];
-    if (job.action === "validate") args.push("--network", "none");
-    if (job.action === "dry-run") {
-      args.push(
-        "--env", "DRY_RUN=true",
-        "--env", "PUBLISH_IMMEDIATELY=true",
-        "--env", `SUMMING_JOB_ID=${job.id}`,
-        "--env", `SUMMING_REVISION=${job.revision}`,
-        "--env", `DRY_RUN_ARTIFACT_DIR=/app/data/dry-runs/${job.id}`,
-      );
+      if (access.envPath) args.push("--env-file", access.envPath);
+      if (access.gateway) {
+        if (!existsSync(this.secretBrokerGatewaySocket) || !lstatSync(this.secretBrokerGatewaySocket).isSocket()) {
+          throw new Error("secret broker gateway socket is unavailable");
+        }
+        args.push(
+          "--volume",
+          `${this.secretBrokerGatewaySocket}:/run/summing-secrets/gateway.sock:rw`,
+        );
+      }
+      if (
+        job.action === "validate" ||
+        (access.modes.length > 0 && access.modes.every((mode) => mode === "gateway"))
+      ) {
+        args.push("--network", "none");
+      }
+      if (job.action === "dry-run") {
+        args.push(
+          "--env", "DRY_RUN=true",
+          "--env", "PUBLISH_IMMEDIATELY=true",
+          "--env", `SUMMING_JOB_ID=${job.id}`,
+          "--env", `SUMMING_REVISION=${job.revision}`,
+          "--env", `DRY_RUN_ARTIFACT_DIR=/app/data/dry-runs/${job.id}`,
+        );
+      }
+      if (job.action === "run") args.push("--env", "DRY_RUN=false");
+      args.push(this.image(job));
+      if (job.action === "validate") args.push("node", "dist/src/main.js", "--validate");
+      const result = await run(this.dockerBinary, args, {
+        cwd: this.dataRoot,
+        logPath,
+        timeoutMs: job.action === "run" ? 14_400_000 : 900_000,
+        redactions: access.redactions,
+      });
+      return { code: result.code };
+    } finally {
+      let releaseError: unknown = null;
+      if (access.leaseId) {
+        try {
+          await this.releaseRuntimeLease(job, access.leaseId, logPath);
+        } catch (error) {
+          releaseError = error;
+        }
+      }
+      try {
+        this.redactArtifacts(job, project, access.redactions);
+      } finally {
+        if (access.envPath) rmSync(access.envPath, { force: true });
+        access.redactions.fill("");
+      }
+      if (releaseError) throw releaseError;
     }
-    if (job.action === "run") args.push("--env", "DRY_RUN=false");
-    args.push(this.image(job));
-    if (job.action === "validate") args.push("node", "dist/src/main.js", "--validate");
-    const result = await run(this.dockerBinary, args, {
-      cwd: this.dataRoot,
-      logPath,
-      timeoutMs: job.action === "run" ? 14_400_000 : 900_000,
+  }
+
+  private async runtimeAccess(
+    job: RunnerJob,
+    source: string,
+    logPath: string,
+  ): Promise<RuntimeAccess> {
+    if (!(job.action === "dry-run" || job.action === "run")) {
+      return { leaseId: null, envPath: null, gateway: false, modes: [], redactions: [] };
+    }
+    const integrations = loadIntegrationManifest(source).integrations.filter((integration) =>
+      integration.actions.includes(job.action as "dry-run" | "run"),
+    );
+    if (integrations.length === 0) {
+      return { leaseId: null, envPath: null, gateway: false, modes: [], redactions: [] };
+    }
+    const lease = await this.secrets.lease({
+      projectId: job.projectId,
+      action: job.action as "dry-run" | "run",
+      jobId: job.id,
+      integrations,
     });
-    return { code: result.code };
+    if (
+      !/^[0-9a-f-]{36}$/.test(lease.id) ||
+      lease.projectId !== job.projectId ||
+      lease.jobId !== job.id ||
+      lease.expiresAt <= Date.now() / 1_000
+    ) {
+      throw new Error("secret broker returned an invalid or expired runtime lease");
+    }
+    let handedOff = false;
+    try {
+      const environment: Record<string, string> = { ...lease.environment };
+      const expectedEnvironment = new Set(
+      integrations.flatMap((integration) => integration.runtime.map((entry) => entry.env)),
+    );
+      const expectedGatewayTokens = new Set(
+      integrations
+        .filter((integration) => integration.mode === "gateway")
+        .map((integration) => `${integration.id}@${integration.environment}`),
+    );
+      if (
+      Object.keys(lease.environment).some((name) => !expectedEnvironment.has(name)) ||
+      [...expectedEnvironment].some((name) => !(name in lease.environment)) ||
+      Object.keys(lease.gatewayTokens).some((name) => !expectedGatewayTokens.has(name)) ||
+      [...expectedGatewayTokens].some((name) => !(name in lease.gatewayTokens))
+      ) {
+        for (const name of Object.keys(environment)) environment[name] = "";
+        for (const name of Object.keys(lease.environment)) lease.environment[name] = "";
+        for (const name of Object.keys(lease.gatewayTokens)) lease.gatewayTokens[name] = "";
+        throw new Error("secret broker returned credentials outside the integration manifest");
+      }
+      const redactions = [
+      ...Object.values(lease.environment),
+      ...Object.values(lease.gatewayTokens),
+    ].filter(Boolean);
+      const envPath = resolve(this.runtimeAccessRoot, `${job.id}.env`);
+      let ready = false;
+      try {
+      for (const integration of integrations) {
+        const key = `${integration.id}@${integration.environment}`;
+        const token = lease.gatewayTokens[key];
+        if (integration.mode !== "gateway") continue;
+        if (!token) throw new Error(`secret broker omitted gateway capability ${key}`);
+        const prefix = integrationRuntimePrefix(integration);
+        environment[`${prefix}_GATEWAY_TOKEN`] = token;
+        environment[`${prefix}_GATEWAY_SOCKET`] = "/run/summing-secrets/gateway.sock";
+        environment[`${prefix}_GATEWAY_PATH`] = `/v1/proxy/${encodeURIComponent(key)}`;
+      }
+      const lines = Object.entries(environment).map(([name, value]) => {
+        if (!/^[A-Z][A-Z0-9_]{0,127}$/.test(name) || /[\r\n\0]/.test(value)) {
+          throw new Error("secret broker returned an unsafe runtime environment value");
+        }
+        return `${name}=${value}`;
+      });
+      if (Buffer.byteLength(lines.join("\n")) > 1_000_000) {
+        throw new Error("secret broker runtime environment exceeds 1 MB");
+      }
+      writeFileSync(envPath, `${lines.join("\n")}\n`, { flag: "wx", mode: 0o600 });
+      writeFileSync(
+        logPath,
+        `[${new Date().toISOString()}] runtime access: ${integrations.map((item) => `${item.id}@${item.environment}:${item.mode}`).join(", ")}\n`,
+        { flag: "a", mode: 0o600 },
+      );
+        ready = true;
+        handedOff = true;
+        return {
+        leaseId: lease.id,
+        envPath,
+        gateway: integrations.some((integration) => integration.mode === "gateway"),
+        modes: integrations.map((integration) => integration.mode),
+        redactions,
+        };
+      } finally {
+        for (const name of Object.keys(environment)) environment[name] = "";
+        for (const name of Object.keys(lease.environment)) lease.environment[name] = "";
+        for (const name of Object.keys(lease.gatewayTokens)) lease.gatewayTokens[name] = "";
+        if (!ready) {
+          rmSync(envPath, { force: true });
+          redactions.fill("");
+        }
+      }
+    } finally {
+      if (!handedOff) await this.releaseRuntimeLease(job, lease.id, logPath);
+    }
+  }
+
+  private async releaseRuntimeLease(job: RunnerJob, leaseId: string, logPath: string): Promise<void> {
+    await this.secrets.release({ id: leaseId, projectId: job.projectId, jobId: job.id });
+    writeFileSync(
+      logPath,
+      `[${new Date().toISOString()}] runtime access released\n`,
+      { flag: "a", mode: 0o600 },
+    );
+  }
+
+  private redactArtifacts(job: RunnerJob, project: RunnerProjectConfig, secrets: string[]): void {
+    if (job.action !== "dry-run" || secrets.length === 0) return;
+    const directory = this.safeArtifactDirectory(project, job.id);
+    if (!directory) return;
+    for (const name of ARTIFACTS.keys()) {
+      const path = resolve(directory, name);
+      if (!existsSync(path)) continue;
+      const metadata = lstatSync(path);
+      if (!metadata.isFile() || metadata.size > MAX_ARTIFACT_BYTES) continue;
+      let content = readFileSync(path, "utf8");
+      let changed = false;
+      for (const secret of secrets) {
+        if (!secret || !content.includes(secret)) continue;
+        content = content.replaceAll(secret, "[REDACTED]");
+        changed = true;
+      }
+      if (changed) writeFileSync(path, content, { mode: 0o600 });
+    }
   }
 
   private pruneDryRunArtifacts(projectId: string, project: RunnerProjectConfig): void {

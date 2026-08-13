@@ -1,7 +1,7 @@
 [Unit]
 Description=SUMMING Telegram agent
-After=network-online.target
-Wants=network-online.target
+After=network-online.target summing-secrets.service
+Wants=network-online.target summing-secrets.service
 
 [Service]
 Type=simple

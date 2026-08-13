@@ -29,6 +29,7 @@ import { helpMessage } from "./help-message.js";
 import { ProjectCatalog, ProjectCatalogError } from "./project-catalog.js";
 import { GitInspector } from "./git-inspector.js";
 import { ProjectViewerServer } from "./project-viewer.js";
+import { detectSecretFile, detectSecretText, type SecretDetection } from "./secret-ingress.js";
 import {
   StateStore,
   type Conversation,
@@ -586,6 +587,18 @@ export class SummingRuntime {
     const attachmentCandidate = telegramAttachment(message);
     if (!text && !attachmentCandidate) return;
     const messageId = Number(message.message_id ?? 0);
+    const textDetections = detectSecretText(text);
+    if (textDetections.length > 0) {
+      await this.interceptSecretMessage(
+        chatId,
+        topicId,
+        messageId,
+        senderId,
+        conversation?.projectId ?? "",
+        textDetections,
+      );
+      return;
+    }
     const access: RunAccess =
       conversation &&
       senderId !== this.config.telegramOwnerId &&
@@ -645,8 +658,41 @@ export class SummingRuntime {
       try {
         attachment = await this.attachments.download(message, conversation.id);
         if (!attachment) throw new AttachmentError("Telegram-вложение не удалось распознать.");
+        const fileDetections = detectSecretFile(
+          attachment.filePath,
+          attachment.fileName,
+          attachment.mimeType,
+          this.config.maximumAttachmentBytes,
+        );
+        if (fileDetections.length > 0) {
+          this.attachments.remove([attachment]);
+          attachment = null;
+          await this.interceptSecretMessage(
+            chatId,
+            topicId,
+            messageId,
+            senderId,
+            conversation.projectId,
+            fileDetections,
+          );
+          return;
+        }
         if (attachment.kind === "audio") {
           const transcript = await this.transcriber.transcribe(attachment);
+          const transcriptDetections = detectSecretText(transcript);
+          if (transcriptDetections.length > 0) {
+            this.attachments.remove([attachment]);
+            attachment = null;
+            await this.interceptSecretMessage(
+              chatId,
+              topicId,
+              messageId,
+              senderId,
+              conversation.projectId,
+              transcriptDetections,
+            );
+            return;
+          }
           text = [
             text,
             `Транскрипция аудио «${attachment.fileName}»:\n${transcript}`,
@@ -729,6 +775,44 @@ export class SummingRuntime {
       inputAttachments,
     );
     this.startProcessor(conversation);
+  }
+
+  private async interceptSecretMessage(
+    chatId: number,
+    topicId: number,
+    messageId: number,
+    senderId: number,
+    projectId: string,
+    detections: SecretDetection[],
+  ): Promise<void> {
+    this.state.recordSecurityEvent({
+      eventType: "telegram-secret-intercepted",
+      chatId,
+      topicId,
+      messageId,
+      senderId,
+      projectId,
+      detectors: detections.map((item) => item.kind),
+    });
+    let deleted = false;
+    try {
+      await this.telegram.deleteMessage(chatId, messageId);
+      deleted = true;
+    } catch (error) {
+      console.warn(
+        "could not delete intercepted Telegram secret",
+        error instanceof Error ? error.name : "unknown error",
+      );
+    }
+    await this.telegram.sendMessage(
+      chatId,
+      deleted
+        ? "Сообщение было похоже на credential и удалено до сохранения или передачи в Codex. " +
+          "Откройте Connections и подключите provider через защищённую форму."
+        : "Сообщение похоже на credential и не было передано в Codex, но Telegram не разрешил " +
+          "боту удалить его. Удалите сообщение вручную и используйте Connections.",
+      { topicId },
+    );
   }
 
   private participantResponseMode(message: TelegramObject, text: string): ResponseMode {
@@ -858,6 +942,26 @@ export class SummingRuntime {
         return;
       }
       await this.sendViewerButton(chatId, messageId, target);
+      return;
+    }
+    if (command === "/start" && argument.startsWith("connections_")) {
+      if (chatType !== "private") {
+        await this.reply(chatId, topicId, messageId, "Connections открывается через личный чат с ботом.");
+        return;
+      }
+      const targetId = argument.slice("connections_".length);
+      let target: Conversation;
+      try {
+        target = this.state.get(targetId);
+      } catch {
+        await this.reply(chatId, topicId, messageId, "Conversation для Connections не найден.");
+        return;
+      }
+      if (!this.projects.canAccess(senderId, target.projectId)) {
+        await this.reply(chatId, topicId, messageId, "Нет доступа к Connections этого проекта.");
+        return;
+      }
+      await this.sendViewerButton(chatId, messageId, target, "connections");
       return;
     }
     if (command === "/start" || command === "/help") {
@@ -1174,6 +1278,32 @@ export class SummingRuntime {
       );
       return;
     }
+    if (command === "/connections") {
+      if (!conversation) {
+        await this.reply(chatId, topicId, messageId, "Сначала привяжите topic к проекту командой /bind.");
+        return;
+      }
+      if (!this.config.connectionsEnabled || !this.config.viewerPublicUrl) {
+        await this.reply(chatId, topicId, messageId, "Connections ещё не настроен на этом сервере.");
+        return;
+      }
+      if (chatType === "private") {
+        await this.sendViewerButton(chatId, messageId, conversation, "connections");
+        return;
+      }
+      if (!this.telegramUsername) {
+        await this.reply(chatId, topicId, messageId, "Telegram username бота ещё не определён.");
+        return;
+      }
+      const deepLink = `https://t.me/${this.telegramUsername}?start=connections_${conversation.id}`;
+      await this.reply(
+        chatId,
+        topicId,
+        messageId,
+        `Откройте Connections через личный чат с ботом:\n${deepLink}`,
+      );
+      return;
+    }
     if (command === "/status") {
       this.accountState = await this.codex.account();
       const state = this.status();
@@ -1332,6 +1462,7 @@ export class SummingRuntime {
     chatId: number,
     replyTo: number,
     conversation: Conversation,
+    tab: "connections" | "files" = "files",
   ): Promise<void> {
     if (!this.config.viewerPublicUrl) {
       await this.telegram.sendMessage(
@@ -1341,11 +1472,13 @@ export class SummingRuntime {
       );
       return;
     }
-    const url = `${this.config.viewerPublicUrl}/?conversation=${encodeURIComponent(conversation.id)}`;
-    await this.telegram.sendMessage(chatId, `Project Viewer: ${conversation.projectId}`, {
+    const url = `${this.config.viewerPublicUrl}/?conversation=${encodeURIComponent(conversation.id)}` +
+      (tab === "connections" ? "&tab=connections" : "");
+    const title = tab === "connections" ? "Connections" : "Project Viewer";
+    await this.telegram.sendMessage(chatId, `${title}: ${conversation.projectId}`, {
       replyTo,
       replyMarkup: {
-        inline_keyboard: [[{ text: "Открыть Project Viewer", web_app: { url } }]],
+        inline_keyboard: [[{ text: `Открыть ${title}`, web_app: { url } }]],
       },
     });
   }

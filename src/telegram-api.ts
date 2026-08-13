@@ -157,6 +157,13 @@ export class TelegramAPI {
     await this.call("sendChatAction", payload);
   }
 
+  async deleteMessage(chatId: number, messageId: number): Promise<void> {
+    if (!Number.isSafeInteger(messageId) || messageId <= 0) {
+      throw new TelegramError("deleteMessage requires a positive message id");
+    }
+    await this.call("deleteMessage", { chat_id: chatId, message_id: messageId });
+  }
+
   async editMessage(chatId: number, messageId: number, text: string): Promise<void> {
     try {
       await this.call("editMessageText", {

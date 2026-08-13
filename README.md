@@ -268,6 +268,7 @@ $SUMMING_DATA_DIR/
 
 Полная архитектура и VPS runbook: [PROJECT_HANDBOOK_RU.md](PROJECT_HANDBOOK_RU.md).
 Конституционные принципы: [BIBLE.md](BIBLE.md).
+Безопасные API keys, OAuth и runtime access: [CONNECTIONS_RU.md](CONNECTIONS_RU.md).
 
 ## Project Viewer и runner
 
@@ -285,7 +286,8 @@ sudo /opt/summing/deploy/install-project-operations.sh
 ```
 
 Installer создаёт отдельного `summing-runner`, rootless Docker с лимитом build
-cache 8 ГБ, HTTPS proxy, project config/data и timer unit. Пользователь
+cache 8 ГБ, отдельный encrypted `summing-secrets`, HTTPS proxy, project
+config/data и timer unit. Пользователь
 `summing` не получает Docker socket. Перед включением live timer замените
 placeholders в `/etc/summing-runner/projects/ash-seo.env` и проверьте
 `ash-seo.config.json`, затем запустите Validate и Dry run из Viewer.

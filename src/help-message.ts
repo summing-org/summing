@@ -9,6 +9,7 @@ export function helpMessage(isAdministrator: boolean): string {
     "Пример: `/bind shop backend`",
     "`/status` — показать версию SUMMING, состояние Codex, привязку и очередь",
     "`/files` — открыть дерево файлов, diff и project runner",
+    "`/connections` — безопасно подключить API key или OAuth provider",
     "",
     "*Работа*",
     "Отправьте задачу обычным сообщением",

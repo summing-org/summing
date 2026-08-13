@@ -1,7 +1,7 @@
 [Unit]
 Description=SUMMING isolated project runner
-After=network-online.target
-Wants=network-online.target
+After=network-online.target summing-secrets.service
+Wants=network-online.target summing-secrets.service
 
 [Service]
 Type=simple
@@ -18,6 +18,8 @@ Environment=DOCKER_HOST=unix:///run/user/RUNNER_UID/docker.sock
 Environment=SUMMING_RUNNER_SOCKET=/run/summing-runner/runner.sock
 Environment=SUMMING_RUNNER_DATA=/var/lib/summing-runner/jobs
 Environment=SUMMING_RUNNER_CONFIG=/etc/summing-runner/projects
+Environment=SUMMING_SECRETS_RUNTIME_SOCKET=/run/summing-secrets/runtime.sock
+Environment=SUMMING_SECRETS_GATEWAY_SOCKET=/run/summing-secrets/gateway.sock
 ExecStartPre=/usr/bin/test -S /run/user/RUNNER_UID/docker.sock
 ExecStart=/usr/local/bin/node --enable-source-maps /opt/summing-current/dist/src/project-runner-main.js
 Restart=on-failure
@@ -28,6 +30,7 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/var/lib/summing-runner /var/lib/summing-runs /run/summing-runner
+ReadOnlyPaths=-/run/summing-secrets
 LockPersonality=true
 RestrictSUIDSGID=true
 

@@ -6,6 +6,10 @@ import {
   VIEWER_JS,
   VIEWER_LOGO_SVG,
 } from "../src/viewer-assets.js";
+import {
+  SECRET_BROKER_HTML,
+  SECRET_BROKER_JS,
+} from "../src/secret-broker-assets.js";
 
 test("Project Viewer bounds Telegram authorization and network waits", () => {
   assert.doesNotThrow(() => new Function(VIEWER_JS));
@@ -15,6 +19,8 @@ test("Project Viewer bounds Telegram authorization and network waits", () => {
   assert.match(VIEWER_JS, /Telegram не передал данные авторизации/);
   assert.match(VIEWER_JS, /Повторить/);
   assert.match(VIEWER_HTML, /data-tab="settings"/);
+  assert.match(VIEWER_HTML, /data-tab="connections"/);
+  assert.match(VIEWER_HTML, /Подключения проекта/);
   assert.match(VIEWER_HTML, /Обновиться сейчас/);
   assert.match(VIEWER_JS, /\/api\/viewer\/deployment/);
   assert.match(VIEWER_JS, /state\.session\.administrator&&state\.session\.deploymentAvailable/);
@@ -28,4 +34,15 @@ test("Project Viewer bounds Telegram authorization and network waits", () => {
   assert.match(VIEWER_JS, /\/api\/viewer\/job-artifacts/);
   assert.match(VIEWER_JS, /data-download/);
   assert.match(VIEWER_JS, /renderEditorialPlan/);
+  assert.match(VIEWER_JS, /\/api\/viewer\/connections/);
+  assert.match(VIEWER_JS, /\/api\/viewer\/connection-ticket/);
+});
+
+test("Connections keeps its ticket out of the URL and never renders a stored secret", () => {
+  assert.doesNotThrow(() => new Function(SECRET_BROKER_JS));
+  assert.match(SECRET_BROKER_JS, /location\.hash/);
+  assert.match(SECRET_BROKER_JS, /history\.replaceState/);
+  assert.match(SECRET_BROKER_JS, /type='password'/);
+  assert.match(SECRET_BROKER_HTML, /не передаётся в Telegram или Codex/);
+  assert.doesNotMatch(SECRET_BROKER_JS, /localStorage/);
 });

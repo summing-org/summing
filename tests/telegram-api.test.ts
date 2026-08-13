@@ -94,6 +94,23 @@ test("setMyShortDescription updates the bot profile within Telegram limits", asy
   }
 });
 
+test("deleteMessage removes intercepted incoming credentials", async () => {
+  const api = new TelegramAPI("token");
+  let payload: Record<string, unknown> = {};
+  api.call = async (method, input) => {
+    assert.equal(method, "deleteMessage");
+    payload = input;
+    return true;
+  };
+  try {
+    await api.deleteMessage(42, 17);
+    assert.deepEqual(payload, { chat_id: 42, message_id: 17 });
+    await assert.rejects(api.deleteMessage(42, 0), /positive message id/);
+  } finally {
+    await api.close();
+  }
+});
+
 test("downloadFile resolves Telegram file path and enforces byte limit", async () => {
   const api = new TelegramAPI("secret-token");
   api.call = async (method, input) => {
