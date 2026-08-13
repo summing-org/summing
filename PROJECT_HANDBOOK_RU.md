@@ -1047,7 +1047,8 @@ variables, runtime socket, release paths, systemd units и GitHub repository.
 1. опубликованный `master` с версией 9.0.0;
 2. repository `git@summing.github.com:summing-org/summing.git`, доступный тому же
    read-only deploy key;
-3. проверенный полный snapshot VPS;
+3. предпочтительно — проверенный полный snapshot VPS; при явном отказе оператор
+   принимает риск ручного восстановления только из локального recovery bundle;
 4. ноль активных Codex runs и чистый mutable checkout.
 
 Обновите checkout и отдельно выполните preflight. Разделённая строка ниже
@@ -1065,16 +1066,24 @@ sudo "${legacy_repo}/deploy/migrate-host-to-summing" --check
 `--check` ничего не меняет. Он валидирует source/target users и paths, чистоту
 checkout, отсутствие deployment worker и active runs, доступность нового remote,
 конфликты conversation branches/runtime directories и collision self-project IDs
-в SQLite. Apply требует явного подтверждения внешнего snapshot:
+в SQLite. Apply требует либо подтверждения внешнего snapshot, либо отдельного
+явного waiver; эти режимы взаимоисключающие:
 
 ```bash
+# Рекомендуемый режим
 sudo env SUMMING_BACKUP_CONFIRMED=1 \
+  "${legacy_repo}/deploy/migrate-host-to-summing" --apply
+
+# Если оператор осознанно отказался от VPS snapshot
+sudo env SUMMING_SNAPSHOT_WAIVED=1 \
   "${legacy_repo}/deploy/migrate-host-to-summing" --apply
 ```
 
 Apply сначала останавливает polling, deploy timers и runner, затем создаёт
 `/var/backups/summing-host-migration-<UTC>` с manifest, configuration copy,
-consistent SQLite backup, прежними units/current symlink/releases. После этого
+consistent SQLite backup, прежними units/current symlink/releases. Manifest
+фиксирует `backup_mode=snapshot-confirmed` или `backup_mode=snapshot-waived`.
+После этого
 он сохраняет UID/GID при переименовании Unix accounts, переносит durable/config
 paths, переписывает только operational paths и `SUMMING_*` keys, обновляет
 SQLite references, linked-worktree metadata, runtime directory, excludes и
@@ -1083,9 +1092,11 @@ conversation branch. Незакоммиченные workspace files не коп�
 
 Финальный этап использует обычный `deploy/activate.sh`, запускает rootless Docker
 под сохранённым runner UID, устанавливает новые units и проверяет application и
-runner health. При ошибке после начала apply не пытайтесь смешивать namespaces:
-остановите units и восстановите проверенный VPS snapshot; recovery bundle служит
-дополнительным материалом для диагностики, а не заменяет snapshot.
+runner health. При ошибке после начала apply не пытайтесь смешивать namespaces.
+В confirmed-режиме остановите units и восстановите VPS snapshot. В waiver-режиме
+snapshot отсутствует: остановите SUMMING units и восстанавливайте host вручную
+из root-only recovery bundle; этот путь рискованнее и не гарантирует такой же
+атомарности, как полный snapshot.
 
 ## 14. Операционное управление
 

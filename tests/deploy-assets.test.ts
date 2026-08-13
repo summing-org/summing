@@ -56,6 +56,9 @@ test("host identity migration is guarded, recoverable, and preserves worktrees",
   assert.notEqual(statSync(path).mode & 0o111, 0, "migration must be executable");
   assert.match(migration, /retired_name="sum""mate"/);
   assert.match(migration, /SUMMING_BACKUP_CONFIRMED/);
+  assert.match(migration, /SUMMING_SNAPSHOT_WAIVED/);
+  assert.match(migration, /backup_mode=\$\{backup_mode\}/);
+  assert.match(migration, /set only one of SUMMING_BACKUP_CONFIRMED or SUMMING_SNAPSHOT_WAIVED/);
   assert.match(migration, /trap 'on_error \$\? \$\{LINENO\}' ERR/);
   assert.match(migration, /\.active \/\/ 0/);
   assert.match(migration, /git ls-remote --exit-code/);

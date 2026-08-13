@@ -37,13 +37,26 @@ product_runner_config=/etc/${product_name}-runner
 
 expected_remote=${SUMMING_MIGRATION_EXPECTED_REMOTE:-git@summing.github.com:summing-org/summing.git}
 mode=${1:---check}
+backup_confirmed=${SUMMING_BACKUP_CONFIRMED:-0}
+snapshot_waived=${SUMMING_SNAPSHOT_WAIVED:-0}
 migration_started=0
 recovery_dir=
+
+recovery_instruction() {
+  if [ "${backup_confirmed}" = 1 ]; then
+    printf '%s\n' 'Restore the verified VPS snapshot before retrying.'
+  else
+    printf '%s\n' \
+      'No VPS snapshot exists because the operator explicitly waived it.' \
+      'Stop SUMMING units and recover manually from the server-local bundle before retrying.'
+  fi
+}
 
 fail() {
   printf 'ERROR: %s\n' "$*" >&2
   if [ "${migration_started}" = 1 ]; then
-    printf 'Migration already changed host state. Restore the verified VPS snapshot.\n' >&2
+    printf 'Migration already changed host state.\n' >&2
+    recovery_instruction >&2
     printf 'Recovery bundle: %s\n' "${recovery_dir}" >&2
   fi
   exit 2
@@ -55,7 +68,7 @@ on_error() {
   trap - ERR
   printf 'ERROR: host migration failed at line %s (exit %s).\n' "${line}" "${code}" >&2
   if [ "${migration_started}" = 1 ]; then
-    printf 'Restore the verified VPS snapshot before retrying.\n' >&2
+    recovery_instruction >&2
     printf 'Recovery bundle: %s\n' "${recovery_dir}" >&2
   fi
   exit "${code}"
@@ -288,6 +301,12 @@ case "${mode}" in
   *) fail "usage: $0 [--check|--apply]" ;;
 esac
 
+case "${backup_confirmed}" in 0|1) ;; *) fail "SUMMING_BACKUP_CONFIRMED must be 0 or 1" ;; esac
+case "${snapshot_waived}" in 0|1) ;; *) fail "SUMMING_SNAPSHOT_WAIVED must be 0 or 1" ;; esac
+if [ "${backup_confirmed}" = 1 ] && [ "${snapshot_waived}" = 1 ]; then
+  fail "set only one of SUMMING_BACKUP_CONFIRMED or SUMMING_SNAPSHOT_WAIVED"
+fi
+
 if [ "${EUID}" -ne 0 ]; then
   fail "run this migration as root"
 fi
@@ -373,12 +392,16 @@ note "Durable state: ${retired_home} -> ${product_home}"
 note "Expected remote: ${expected_remote}"
 
 if [ "${mode}" = --check ]; then
-  note "No changes made. Re-run with SUMMING_BACKUP_CONFIRMED=1 and --apply after a VPS snapshot."
+  note "No changes made. Apply requires either a verified VPS snapshot or an explicit snapshot waiver."
   exit 0
 fi
 
-[ "${SUMMING_BACKUP_CONFIRMED:-}" = 1 ] || \
-  fail "set SUMMING_BACKUP_CONFIRMED=1 only after creating and verifying a VPS snapshot"
+if [ "${backup_confirmed}" = 0 ] && [ "${snapshot_waived}" = 0 ]; then
+  fail "set SUMMING_BACKUP_CONFIRMED=1 after a verified snapshot, or explicitly accept the risk with SUMMING_SNAPSHOT_WAIVED=1"
+fi
+
+backup_mode=snapshot-confirmed
+if [ "${snapshot_waived}" = 1 ]; then backup_mode=snapshot-waived; fi
 
 timestamp=$(date -u +%Y%m%dT%H%M%SZ)
 recovery_dir=/var/backups/summing-host-migration-${timestamp}
@@ -410,6 +433,7 @@ printf '%s\n' \
     git -C "${retired_repo}" rev-parse HEAD)" \
   "source_remote=$(runuser -u "${retired_app_user}" -- \
     git -C "${retired_repo}" remote get-url origin)" \
+  "backup_mode=${backup_mode}" \
   > "${recovery_dir}/manifest"
 cp -a "${retired_config}" "${recovery_dir}/config"
 if [ -d "${retired_runner_config}" ]; then

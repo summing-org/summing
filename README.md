@@ -290,10 +290,12 @@ placeholders в `/etc/summing-runner/projects/ash-seo.env` и проверьте
 
 ## Переход существующего 8.x VPS на SUMMING 9.0
 
-Переименование GitHub repository в `summing-org/summing` и проверенный VPS
-snapshot должны быть завершены **до** миграции. Обычный automatic deploy не
-может пересечь 9.0 boundary: users, paths, environment variables и units уже
-имеют новые имена.
+Переименование GitHub repository в `summing-org/summing` должно быть завершено
+**до** миграции. Полный VPS snapshot настоятельно рекомендуется, но оператор
+может явно отказаться от него и принять более сложное ручное восстановление
+только из server-local recovery bundle. Обычный automatic deploy не может
+пересечь 9.0 boundary: users, paths, environment variables и units уже имеют
+новые имена.
 
 Сначала обновите только чистый mutable checkout до опубликованного `master`, не
 трогая активный release, затем запустите read-only preflight:
@@ -306,19 +308,27 @@ sudo -u "${legacy_name}" git -C "${legacy_repo}" merge --ff-only origin/master
 sudo "${legacy_repo}/deploy/migrate-host-to-summing" --check
 ```
 
-Только после успешного preflight и проверки snapshot выполните одноразовый
-переход:
+После успешного preflight выполните одноразовый переход одним из двух способов:
 
 ```bash
+# Рекомендуемый вариант после проверки VPS snapshot:
 sudo env SUMMING_BACKUP_CONFIRMED=1 \
   "${legacy_repo}/deploy/migrate-host-to-summing" --apply
+
+# Осознанный отказ от snapshot с принятием риска:
+sudo env SUMMING_SNAPSHOT_WAIVED=1 \
+  "${legacy_repo}/deploy/migrate-host-to-summing" --apply
 ```
+
+Нельзя задавать оба флага одновременно. Выбранный режим записывается в manifest
+recovery bundle для последующего аудита.
 
 Migration отказывается работать при активных Codex runs, deployment worker,
 конфликтующих users/paths/project IDs или недоступном новом remote. Перед
 изменениями она останавливает services и сохраняет root-only recovery bundle в
 `/var/backups/summing-host-migration-<UTC>`, включая конфигурацию, SQLite backup,
-старые units и releases. Затем переносит Unix identities и durable paths,
+старые units и releases. Этот bundle создаётся в обоих режимах. Затем migration
+переносит Unix identities и durable paths,
 обновляет SQLite/Git worktree metadata и conversation branches без удаления
 незакоммиченных файлов, запускает штатный `activate.sh` и проверяет health.
 
