@@ -7,7 +7,7 @@ export function helpMessage(isAdministrator: boolean): string {
     "`/projects` — показать доступные проекты и Workspace",
     "`/bind <project> [workspace]` — привязать текущий topic",
     "Пример: `/bind shop backend`",
-    "`/status` — показать состояние Codex, привязку и очередь",
+    "`/status` — показать версию SUMMING, состояние Codex, привязку и очередь",
     "`/files` — открыть дерево файлов, diff и project runner",
     "",
     "*Работа*",

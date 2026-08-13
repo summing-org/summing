@@ -1,4 +1,4 @@
-# SUMMING 9.0
+# SUMMING 9.1
 
 SUMMING — один постоянно живущий агент с одним администратором и назначаемыми
 владельцами проектов. Он работает на Linux VPS, принимает команды из Telegram
@@ -33,7 +33,8 @@ Project
 - один участник по умолчанию может передать в анализ до 12 сообщений за 60
   секунд; лишний фоновый шум отбрасывается без ответа;
 - `/limits` показывает 5-часовой и недельный остаток именно VPS-аккаунта Codex,
-  а short description профиля бота обновляется тем же недельным показателем;
+  а short description профиля бота обновляется тем же недельным показателем и
+  текущей версией SUMMING;
 - ответы участникам идут через отдельный persistent read-only thread без записи,
   сети, web search, plugins/connectors и доступа к runtime memory или файлам
   секретов;
@@ -239,7 +240,7 @@ Runtime сохраняет событие `my_chat_member`, поэтому до�
 | `/bind_topic <chat_id> <topic_id> <project> [workspace]` | Привязать обнаруженный топик из личного чата администратора. |
 | `/projects` | Показать доступные отправителю проекты. |
 | `/bind` | Связать текущий topic с Project/Workspace. |
-| `/status` | Проверить Codex, account, binding и runs. |
+| `/status` | Проверить версию SUMMING, Codex, account, binding и runs. |
 | `/files` | Открыть Project Viewer, diff, runner jobs и логи. |
 | `/steer` | Добавить указание в активный turn. |
 | Reply на stream | То же, без команды. |

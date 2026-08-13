@@ -1,3 +1,5 @@
+import { summingProfileDescription } from "./version.js";
+
 export interface CodexRateLimitWindow {
   kind: "primary" | "secondary";
   usedPercent: number;
@@ -116,11 +118,13 @@ export function codexLimitsProfileText(
   timeZone: string,
 ): string {
   const weekly = snapshot.weekly;
-  if (!weekly) return "⚪ Codex: недельный лимит недоступен";
-  return (
+  if (!weekly) {
+    return summingProfileDescription("⚪ Codex: недельный лимит недоступен");
+  }
+  return summingProfileDescription(
     `${statusEmoji(weekly.remainingPercent)} Codex: неделя ${weekly.remainingPercent}% · ` +
-    `сброс ${resetText(weekly.resetsAt, timeZone)}`
-  ).slice(0, 120);
+      `сброс ${resetText(weekly.resetsAt, timeZone)}`,
+  );
 }
 
 export function codexLimitsMessage(

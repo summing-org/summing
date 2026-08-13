@@ -94,6 +94,8 @@ test("host identity migration is guarded, recoverable, and preserves worktrees",
   assert.match(migration, /systemctl disable \\\n+  "\$\{retired_name\}-runner\.service"/);
   assert.match(migration, /systemctl reset-failed/);
   assert.match(migration, /pre-9-releases/);
+  assert.match(migration, /source_version=.*VERSION/);
+  assert.match(migration, /9\.\*\)/);
   assert.match(migration, /"\$\{product_repo\}\/deploy\/activate\.sh"/);
   assert.match(migration, /\/run\/summing-runner\/runner\.sock/);
   assert.doesNotMatch(migration, /rm\s+-rf/);

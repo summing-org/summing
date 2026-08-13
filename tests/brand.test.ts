@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { join, relative } from "node:path";
 import test from "node:test";
+import {
+  SUMMING_VERSION,
+  summingProfileDescription,
+} from "../src/version.js";
 
 const root = process.cwd();
 const excludedRoots = new Set([".agents", ".git", "dist", "node_modules"]);
@@ -30,7 +34,14 @@ test("SUMMING is the only product identity in repository assets", () => {
     version: string;
   };
   assert.equal(packageJson.name, "summing");
-  assert.equal(packageJson.version, "9.0.0");
-  assert.equal(readFileSync(join(root, "VERSION"), "utf8").trim(), "9.0.0");
-  assert.match(readFileSync(join(root, "README.md"), "utf8"), /^# SUMMING 9\.0$/m);
+  assert.equal(packageJson.version, SUMMING_VERSION);
+  assert.equal(readFileSync(join(root, "VERSION"), "utf8").trim(), SUMMING_VERSION);
+  assert.match(readFileSync(join(root, "README.md"), "utf8"), /^# SUMMING 9\.1$/m);
+});
+
+test("the bot profile always preserves the complete SUMMING version", () => {
+  const description = summingProfileDescription("x".repeat(200));
+
+  assert.equal(description.length, 120);
+  assert.match(description, / · SUMMING 9\.1\.0$/);
 });

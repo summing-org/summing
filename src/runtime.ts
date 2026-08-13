@@ -48,6 +48,10 @@ import {
   type MaterializedAttachment,
   type PreparedWorkspace,
 } from "./workspace-manager.js";
+import {
+  SUMMING_VERSION,
+  summingProfileDescription,
+} from "./version.js";
 
 function record(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -353,7 +357,7 @@ export class SummingRuntime {
     const weekly = this.codexLimitsState?.weekly ?? null;
     return {
       ok: this.codex.running && !this.stopping,
-      version: "9.0.0",
+      version: SUMMING_VERSION,
       codex_running: this.codex.running,
       auth: account?.type ?? null,
       plan: account?.planType ?? null,
@@ -384,7 +388,9 @@ export class SummingRuntime {
       this.accountState = await this.codex.account();
       if (!record(this.accountState.account)) {
         this.codexLimitsState = null;
-        await this.updateCodexLimitsProfile("⚪ Codex: требуется /login");
+        await this.updateCodexLimitsProfile(
+          summingProfileDescription("⚪ Codex: требуется /login"),
+        );
         return null;
       }
       const snapshot = parseCodexRateLimits(await this.codex.rateLimits());
@@ -1187,6 +1193,7 @@ export class SummingRuntime {
         topicId,
         messageId,
         [
+          `SUMMING: ${SUMMING_VERSION}`,
           `Codex: ${state.codex_running ? "работает" : "остановлен"}`,
           `Auth: ${String(state.auth || "не выполнен")}`,
           `Plan: ${String(state.plan || "—")}`,

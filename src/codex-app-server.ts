@@ -4,6 +4,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { delimiter, dirname, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { parse } from "smol-toml";
+import { SUMMING_VERSION } from "./version.js";
 
 export type JsonRecord = Record<string, unknown>;
 
@@ -105,7 +106,7 @@ export class CodexAppServer extends EventEmitter {
         clientInfo: {
           name: "summing_telegram",
           title: "SUMMING Telegram",
-          version: "9.0.0",
+          version: SUMMING_VERSION,
         },
         capabilities: {
           experimentalApi: true,

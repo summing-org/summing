@@ -341,8 +341,11 @@ done
 
 require_source "${retired_repo}/package.json"
 require_source "${retired_repo}/VERSION"
-[ "$(tr -d '[:space:]' < "${retired_repo}/VERSION")" = 9.0.0 ] || \
-  fail "the source checkout must already contain SUMMING 9.0.0"
+source_version=$(tr -d '[:space:]' < "${retired_repo}/VERSION")
+case "${source_version}" in
+  9.*) ;;
+  *) fail "the source checkout must already contain SUMMING 9.x" ;;
+esac
 require_source "${retired_home}/data"
 require_source "${retired_config}/${retired_name}.env"
 id "${retired_app_user}" >/dev/null 2>&1 || fail "source application user is missing"

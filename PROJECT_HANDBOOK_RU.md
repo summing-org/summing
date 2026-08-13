@@ -1,6 +1,6 @@
-# SUMMING 9.0: архитектура, эксплуатация и разработка
+# SUMMING 9.1: архитектура, эксплуатация и разработка
 
-> Версия: **9.0.0**
+> Версия: **9.1.0**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
 > Последняя сверка с кодом: **12 августа 2026 года**.
 
@@ -474,10 +474,11 @@ device code в группе. Команда доступна только адм
 App Server читает `account/rateLimits/read`. Поле `usedPercent` переводится в
 остаток, недельным считается фактически возвращённое окно длительностью не менее
 шести суток. `/limits` показывает все окна основного `codex` bucket, а
-`setMyShortDescription` публикует недельный остаток и время сброса в профиле
-Telegram-бота. Это состояние `CODEX_HOME` на VPS; локальный Codex на ноутбуке в
-расчёте не участвует. Если недельного окна нет, runtime явно показывает, что
-данные недоступны, и не подменяет их коротким окном.
+`setMyShortDescription` публикует недельный остаток, время сброса и текущую
+версию SUMMING в профиле Telegram-бота. Это состояние `CODEX_HOME` на VPS;
+локальный Codex на ноутбуке в расчёте не участвует. Если недельного окна нет,
+runtime явно показывает, что данные недоступны, и не подменяет их коротким
+окном.
 
 Официальные источники:
 
@@ -663,7 +664,7 @@ worktree. `run` требует чистый committed `HEAD`. Периодиче
 | `/bind_topic <chat_id> <topic_id> <project> [workspace]` | Удалённо привязать обнаруженный topic; только администратор в личном чате. |
 | `/projects` | Список доступных отправителю Project и Workspace. |
 | `/bind <project> [workspace]` | Привязать текущий topic. |
-| `/status` | Account, plan, binding, active/pending. |
+| `/status` | Версия SUMMING, account, plan, binding, active/pending. |
 | `/files` | Deep link в личный чат и Telegram Mini App Project Viewer. |
 | `/steer <текст>` | Направить текст в текущий Codex turn. |
 | `/cancel` | Прервать активный turn topic. |
@@ -1052,7 +1053,7 @@ variables, runtime socket, release paths, systemd units и GitHub repository.
 
 До начала должны существовать:
 
-1. опубликованный `master` с версией 9.0.0;
+1. опубликованный `master` актуальной версии SUMMING 9.x;
 2. repository `git@summing.github.com:summing-org/summing.git`, доступный тому же
    read-only deploy key;
 3. предпочтительно — проверенный полный snapshot VPS; при явном отказе оператор
@@ -1126,7 +1127,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "9.0.0",
+  "version": "9.1.0",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",
