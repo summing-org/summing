@@ -19,7 +19,17 @@ const PROJECT_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const JOB_ID = /^[0-9a-f-]{36}$/;
 const REVISION = /^[0-9a-f]{40}$/;
 const MAX_ARCHIVE_BYTES = 50_000_000;
+const MAX_ARTIFACT_BYTES = 8_000_000;
+const DRY_RUN_RETENTION = 30;
 const RUNNER_ACTIONS = new Set<RunnerAction>(["build", "validate", "dry-run", "run"]);
+const ARTIFACTS = new Map([
+  ["manifest.json", "application/json"],
+  ["sources.jsonl", "application/x-ndjson"],
+  ["candidates.json", "application/json"],
+  ["editorial-plan.json", "application/json"],
+  ["errors.json", "application/json"],
+  ["report.html", "text/html"],
+]);
 
 interface RunnerProjectConfig {
   configPath: string;
@@ -199,6 +209,30 @@ export class ProjectRunnerServer {
       json(response, 200, { log: content.subarray(Math.max(0, content.length - 1_000_000)).toString("utf8") });
       return;
     }
+    if (request.method === "GET" && url.pathname === "/artifacts") {
+      const { jobId, project } = this.artifactScope(url);
+      json(response, 200, { artifacts: this.listArtifacts(jobId, project) });
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/artifact") {
+      const { projectId, jobId, project } = this.artifactScope(url);
+      const name = url.searchParams.get("name") ?? "";
+      const contentType = ARTIFACTS.get(name);
+      if (!contentType) throw new RunnerHttpError(400, "invalid artifact name");
+      const directory = this.safeArtifactDirectory(project, jobId);
+      if (!directory) throw new RunnerHttpError(404, "artifact not found");
+      const path = resolve(directory, name);
+      if (!existsSync(path)) throw new RunnerHttpError(404, "artifact not found");
+      const metadata = lstatSync(path);
+      if (!metadata.isFile()) throw new RunnerHttpError(404, "artifact not found");
+      if (metadata.size > MAX_ARTIFACT_BYTES) {
+        throw new RunnerHttpError(413, "artifact exceeds 8 MB");
+      }
+      json(response, 200, {
+        artifact: { name, bytes: metadata.size, contentType, content: readFileSync(path, "utf8") },
+      });
+      return;
+    }
     throw new RunnerHttpError(404, "not found");
   }
 
@@ -264,6 +298,49 @@ export class ProjectRunnerServer {
       .slice(0, 50);
   }
 
+  private artifactScope(url: URL): {
+    projectId: string;
+    jobId: string;
+    project: RunnerProjectConfig;
+  } {
+    const projectId = url.searchParams.get("project") ?? "";
+    const jobId = url.searchParams.get("job") ?? "";
+    if (!PROJECT_ID.test(projectId) || !JOB_ID.test(jobId)) {
+      throw new RunnerHttpError(400, "invalid artifact identifier");
+    }
+    const project = this.projectConfig(projectId);
+    const metadataPath = resolve(this.jobDirectory(projectId, jobId), "job.json");
+    if (!existsSync(metadataPath)) throw new RunnerHttpError(404, "runner job not found");
+    const job = JSON.parse(readFileSync(metadataPath, "utf8")) as RunnerJob;
+    if (job.projectId !== projectId || job.id !== jobId || job.action !== "dry-run") {
+      throw new RunnerHttpError(404, "dry-run artifacts are not available for this job");
+    }
+    return { projectId, jobId, project };
+  }
+
+  private listArtifacts(jobId: string, project: RunnerProjectConfig): Array<{
+    name: string;
+    bytes: number;
+    contentType: string;
+  }> {
+    const directory = this.safeArtifactDirectory(project, jobId);
+    if (!directory) return [];
+    return [...ARTIFACTS.entries()].flatMap(([name, contentType]) => {
+      const path = resolve(directory, name);
+      if (!existsSync(path)) return [];
+      const metadata = lstatSync(path);
+      return metadata.isFile() ? [{ name, bytes: metadata.size, contentType }] : [];
+    });
+  }
+
+  private safeArtifactDirectory(project: RunnerProjectConfig, jobId: string): string | null {
+    const root = resolve(project.dataPath, "dry-runs");
+    if (!existsSync(root) || !lstatSync(root).isDirectory()) return null;
+    const directory = resolve(root, jobId);
+    if (!existsSync(directory) || !lstatSync(directory).isDirectory()) return null;
+    return directory;
+  }
+
   private async processQueue(): Promise<void> {
     if (this.processing) return;
     this.processing = true;
@@ -315,6 +392,11 @@ export class ProjectRunnerServer {
       job.error = error instanceof Error ? error.message : String(error);
       writeFileSync(logPath, `[${new Date().toISOString()}] ERROR ${job.error}\n`, { flag: "a" });
     } finally {
+      if (job.action === "dry-run") {
+        const project = this.projectConfig(job.projectId);
+        job.artifactCount = this.listArtifacts(job.id, project).length;
+        this.pruneDryRunArtifacts(job.projectId, project);
+      }
       job.completedAt = new Date().toISOString();
       this.saveJob(job);
       rmSync(resolve(directory, "source"), { recursive: true, force: true });
@@ -356,6 +438,17 @@ export class ProjectRunnerServer {
     if (!existsSync(project.configPath)) throw new Error(`project config is missing: ${project.configPath}`);
     if (!existsSync(project.envPath)) throw new Error(`project environment is missing: ${project.envPath}`);
     mkdirSync(project.dataPath, { recursive: true, mode: 0o700 });
+    if (job.action === "dry-run") {
+      const root = resolve(project.dataPath, "dry-runs");
+      if (existsSync(root) && !lstatSync(root).isDirectory()) {
+        throw new Error("dry-run artifact root is not a directory");
+      }
+      const directory = resolve(root, job.id);
+      if (existsSync(directory) && !lstatSync(directory).isDirectory()) {
+        throw new Error("dry-run artifact job path is not a directory");
+      }
+      mkdirSync(directory, { recursive: true, mode: 0o700 });
+    }
     const args = [
       "run", "--rm", "--init",
       "--name", `summing-${job.projectId}-${job.id.slice(0, 8)}`,
@@ -375,7 +468,13 @@ export class ProjectRunnerServer {
     ];
     if (job.action === "validate") args.push("--network", "none");
     if (job.action === "dry-run") {
-      args.push("--env", "DRY_RUN=true", "--env", "PUBLISH_IMMEDIATELY=true");
+      args.push(
+        "--env", "DRY_RUN=true",
+        "--env", "PUBLISH_IMMEDIATELY=true",
+        "--env", `SUMMING_JOB_ID=${job.id}`,
+        "--env", `SUMMING_REVISION=${job.revision}`,
+        "--env", `DRY_RUN_ARTIFACT_DIR=/app/data/dry-runs/${job.id}`,
+      );
     }
     if (job.action === "run") args.push("--env", "DRY_RUN=false");
     args.push(this.image(job));
@@ -386,6 +485,22 @@ export class ProjectRunnerServer {
       timeoutMs: job.action === "run" ? 14_400_000 : 900_000,
     });
     return { code: result.code };
+  }
+
+  private pruneDryRunArtifacts(projectId: string, project: RunnerProjectConfig): void {
+    const root = resolve(project.dataPath, "dry-runs");
+    if (!existsSync(root) || !lstatSync(root).isDirectory()) return;
+    const keep = new Set(
+      this.listJobs(projectId)
+        .filter((job) => job.action === "dry-run")
+        .slice(0, DRY_RUN_RETENTION)
+        .map((job) => job.id),
+    );
+    for (const entry of readdirSync(root)) {
+      if (JOB_ID.test(entry) && !keep.has(entry)) {
+        rmSync(resolve(root, entry), { recursive: true, force: true });
+      }
+    }
   }
 
   private report(response: ServerResponse, error: unknown): void {

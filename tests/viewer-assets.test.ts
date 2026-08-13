@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { VIEWER_HTML, VIEWER_JS } from "../src/viewer-assets.js";
+import {
+  VIEWER_CSS,
+  VIEWER_HTML,
+  VIEWER_JS,
+  VIEWER_LOGO_SVG,
+} from "../src/viewer-assets.js";
 
 test("Project Viewer bounds Telegram authorization and network waits", () => {
   assert.doesNotThrow(() => new Function(VIEWER_JS));
@@ -13,4 +18,14 @@ test("Project Viewer bounds Telegram authorization and network waits", () => {
   assert.match(VIEWER_HTML, /Обновиться сейчас/);
   assert.match(VIEWER_JS, /\/api\/viewer\/deployment/);
   assert.match(VIEWER_JS, /state\.session\.administrator&&state\.session\.deploymentAvailable/);
+  assert.match(VIEWER_HTML, /id="artifactPanel"/);
+  assert.match(VIEWER_HTML, /id="artifactReport"[^>]+sandbox/);
+  assert.match(VIEWER_HTML, /href="\/logo\.svg"/);
+  assert.match(VIEWER_LOGO_SVG, /fill="#FF3366"/);
+  assert.match(VIEWER_CSS, /--accent:#ff2e6b/);
+  assert.match(VIEWER_CSS, /--primary:#7c9bb7/);
+  assert.match(VIEWER_CSS, /data-theme="light"/);
+  assert.match(VIEWER_JS, /\/api\/viewer\/job-artifacts/);
+  assert.match(VIEWER_JS, /data-download/);
+  assert.match(VIEWER_JS, /renderEditorialPlan/);
 });

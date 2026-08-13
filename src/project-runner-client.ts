@@ -14,6 +14,17 @@ export interface RunnerJob {
   completedAt?: string;
   exitCode?: number;
   error?: string;
+  artifactCount?: number;
+}
+
+export interface RunnerArtifact {
+  name: string;
+  bytes: number;
+  contentType: string;
+}
+
+export interface RunnerArtifactContent extends RunnerArtifact {
+  content: string;
 }
 
 export class ProjectRunnerClientError extends Error {}
@@ -41,11 +52,17 @@ export class ProjectRunnerClient {
         (response) => {
           const chunks: Buffer[] = [];
           let bytes = 0;
+          let tooLarge = false;
           response.on("data", (chunk: Buffer) => {
             bytes += chunk.length;
-            if (bytes <= 4_000_000) chunks.push(chunk);
+            if (bytes <= 12_000_000) chunks.push(chunk);
+            else tooLarge = true;
           });
           response.on("end", () => {
+            if (tooLarge) {
+              reject(new ProjectRunnerClientError("runner response exceeds 12 MB"));
+              return;
+            }
             const raw = Buffer.concat(chunks).toString("utf8");
             let value: unknown;
             try {
@@ -110,5 +127,23 @@ export class ProjectRunnerClient {
     const query = new URLSearchParams({ project: projectId, job: jobId });
     const result = await this.call<{ log: string }>("GET", `/logs?${query.toString()}`);
     return result.log;
+  }
+
+  async artifacts(projectId: string, jobId: string): Promise<RunnerArtifact[]> {
+    const query = new URLSearchParams({ project: projectId, job: jobId });
+    const result = await this.call<{ artifacts: RunnerArtifact[] }>(
+      "GET",
+      `/artifacts?${query.toString()}`,
+    );
+    return result.artifacts;
+  }
+
+  async artifact(projectId: string, jobId: string, name: string): Promise<RunnerArtifactContent> {
+    const query = new URLSearchParams({ project: projectId, job: jobId, name });
+    const result = await this.call<{ artifact: RunnerArtifactContent }>(
+      "GET",
+      `/artifact?${query.toString()}`,
+    );
+    return result.artifact;
   }
 }

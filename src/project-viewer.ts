@@ -15,7 +15,7 @@ import {
 import { RunArtifactStore } from "./run-artifacts.js";
 import type { Conversation, StateStore } from "./state-store.js";
 import { ViewerAuthenticator, ViewerAuthError } from "./viewer-auth.js";
-import { VIEWER_CSS, VIEWER_HTML, VIEWER_JS } from "./viewer-assets.js";
+import { VIEWER_CSS, VIEWER_HTML, VIEWER_JS, VIEWER_LOGO_SVG } from "./viewer-assets.js";
 
 interface ViewerScope {
   conversation: Conversation;
@@ -31,8 +31,9 @@ class ViewerHttpError extends Error {
 
 const SECURITY_HEADERS = {
   "content-security-policy":
-    "default-src 'none'; script-src 'self' https://telegram.org; style-src 'self'; " +
-    "connect-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; frame-ancestors 'self' https://*.telegram.org",
+    "default-src 'none'; script-src 'self' https://telegram.org; style-src 'self' 'unsafe-inline'; " +
+    "connect-src 'self'; img-src 'self' data:; font-src 'self'; frame-src blob:; " +
+    "base-uri 'none'; frame-ancestors 'self' https://*.telegram.org",
   "referrer-policy": "no-referrer",
   "x-content-type-options": "nosniff",
 };
@@ -141,6 +142,10 @@ export class ProjectViewerServer {
       asset(response, "text/javascript; charset=utf-8", VIEWER_JS);
       return;
     }
+    if (request.method === "GET" && url.pathname === "/logo.svg") {
+      asset(response, "image/svg+xml; charset=utf-8", VIEWER_LOGO_SVG);
+      return;
+    }
     if (!url.pathname.startsWith("/api/viewer/")) throw new ViewerHttpError(404, "not found");
 
     const telegramUser = this.auth.authenticate(
@@ -216,6 +221,23 @@ export class ProjectViewerServer {
       const jobId = queryValue(url, "job");
       if (!/^[0-9a-f-]{36}$/.test(jobId)) throw new ViewerHttpError(400, "invalid job id");
       json(response, 200, { log: await this.runner.log(scope.project.id, jobId) });
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/api/viewer/job-artifacts") {
+      const scope = await this.scope(conversationId, telegramUser);
+      const jobId = queryValue(url, "job");
+      if (!/^[0-9a-f-]{36}$/.test(jobId)) throw new ViewerHttpError(400, "invalid job id");
+      json(response, 200, { artifacts: await this.runner.artifacts(scope.project.id, jobId) });
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/api/viewer/job-artifact") {
+      const scope = await this.scope(conversationId, telegramUser);
+      const jobId = queryValue(url, "job");
+      const name = queryValue(url, "name");
+      if (!/^[0-9a-f-]{36}$/.test(jobId)) throw new ViewerHttpError(400, "invalid job id");
+      json(response, 200, {
+        artifact: await this.runner.artifact(scope.project.id, jobId, name),
+      });
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/viewer/deployment") {
