@@ -29,13 +29,6 @@ public_url = ""
 auth_max_age_sec = 900
 runner_socket = "/run/summing-runner/runner.sock"
 
-[connections]
-# install-project-operations.sh supplies URL and signing-key path through the
-# root-owned service environment file.
-public_url = ""
-ticket_private_key = ""
-control_socket = "/run/summing-secrets/control.sock"
-
 # Static projects belong to TELEGRAM_OWNER_ID. Managed client projects are
 # created from the administrator's private Telegram chat.
 [projects.summing]

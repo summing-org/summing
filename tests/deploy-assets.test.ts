@@ -35,7 +35,7 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
   assert.match(activation, /systemctl start summing-deploy\.path summing-deploy\.timer/);
   assert.match(activation, /runner_uid=\$\(id -u summing-runner\)/);
   assert.match(activation, /sed "s\/RUNNER_UID\/\$\{runner_uid\}\/g"/);
-  assert.match(activation, /systemctl restart summing-secrets\.service/);
+  assert.doesNotMatch(activation, /systemctl restart summing-secrets\.service/);
   assert.match(
     asset("deploy/summing-runner.service"),
     /ReadWritePaths=.*\/var\/lib\/summing-runs(?:\s|$)/,
@@ -59,7 +59,6 @@ test("Project Viewer installer supports an HTTPS domain transition", () => {
 test("all production processes execute through the current release symlink", () => {
   for (const path of [
     "deploy/summing.service",
-    "deploy/summing-secrets.service",
     "deploy/summing-runner.service",
     "deploy/summing-ash-seo.service",
   ]) {
@@ -67,25 +66,22 @@ test("all production processes execute through the current release symlink", () 
   }
 });
 
-test("connection broker deployment keeps key material outside the app and routes one HTTPS origin", () => {
+test("runner environment deployment keeps its encryption key private and one HTTPS origin", () => {
   const installerPath = join(root, "deploy/install-project-operations.sh");
   const installer = asset("deploy/install-project-operations.sh");
-  const service = asset("deploy/summing-secrets.service");
+  const service = asset("deploy/summing-runner.service");
   const caddy = asset("deploy/Caddyfile.viewer");
   const syntax = spawnSync("bash", ["-n", installerPath], { encoding: "utf8" });
 
   assert.equal(syntax.status, 0, syntax.stderr);
-  assert.match(installer, /openssl genpkey -algorithm ED25519/);
-  assert.match(installer, /install -o "\$\{secrets_user\}" -g "\$\{secrets_user\}" -m 0400/);
-  assert.match(installer, /SUMMING_RUNNER_GID=/);
-  assert.match(installer, /SUMMING_CONNECTION_TICKET_PRIVATE_KEY=/);
-  assert.match(service, /User=summing-secrets/);
-  assert.match(service, /SupplementaryGroups=summing summing-runner/);
-  assert.match(service, /InaccessiblePaths=\/etc\/summing \/etc\/summing-runner/);
+  assert.match(installer, /openssl rand -hex 32/);
+  assert.match(installer, /install -o "\$\{runner_user\}" -g "\$\{runner_user\}" -m 0400/);
+  assert.match(service, /SUMMING_RUNNER_ENV_KEY=\/etc\/summing-runner\/environment\.key/);
+  assert.match(service, /User=summing-runner/);
   assert.match(service, /ProtectSystem=strict/);
-  assert.doesNotMatch(service, /EnvironmentFile=.*summing\.env/);
-  assert.match(caddy, /handle \/connections\*/);
-  assert.match(caddy, /reverse_proxy 127\.0\.0\.1:8767/);
+  assert.doesNotMatch(service, /SUMMING_SECRETS/);
+  assert.doesNotMatch(caddy, /connections|8767/);
+  assert.match(caddy, /reverse_proxy 127\.0\.0\.1:8766/);
 });
 
 test("host identity migration is guarded, recoverable, and preserves worktrees", () => {

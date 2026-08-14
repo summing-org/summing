@@ -1,4 +1,5 @@
 import { request } from "node:http";
+import type { ProjectEnvironmentDocument } from "./project-environment.js";
 
 export type RunnerAction = "build" | "validate" | "dry-run" | "run";
 export type RunnerJobStatus = "queued" | "running" | "completed" | "failed";
@@ -6,6 +7,7 @@ export type RunnerJobStatus = "queued" | "running" | "completed" | "failed";
 export interface RunnerJob {
   id: string;
   projectId: string;
+  workspaceId: string;
   action: RunnerAction;
   revision: string;
   status: RunnerJobStatus;
@@ -15,6 +17,7 @@ export interface RunnerJob {
   exitCode?: number;
   error?: string;
   artifactCount?: number;
+  environmentRevision?: number;
 }
 
 export interface RunnerArtifact {
@@ -27,7 +30,11 @@ export interface RunnerArtifactContent extends RunnerArtifact {
   content: string;
 }
 
-export class ProjectRunnerClientError extends Error {}
+export class ProjectRunnerClientError extends Error {
+  constructor(message: string, readonly status = 503) {
+    super(message);
+  }
+}
 
 export class ProjectRunnerClient {
   constructor(readonly socketPath: string) {}
@@ -76,7 +83,7 @@ export class ProjectRunnerClient {
                 typeof (value as Record<string, unknown>).error === "string"
                   ? String((value as Record<string, unknown>).error)
                   : `runner returned HTTP ${response.statusCode ?? 500}`;
-              reject(new ProjectRunnerClientError(message));
+              reject(new ProjectRunnerClientError(message, response.statusCode ?? 500));
               return;
             }
             resolveCall(value as T);
@@ -101,11 +108,12 @@ export class ProjectRunnerClient {
 
   async submit(
     projectId: string,
+    workspaceId: string,
     action: RunnerAction,
     revision: string,
     archive: Buffer,
   ): Promise<RunnerJob> {
-    const query = new URLSearchParams({ project: projectId, action, revision });
+    const query = new URLSearchParams({ project: projectId, workspace: workspaceId, action, revision });
     const result = await this.call<{ job: RunnerJob }>(
       "POST",
       `/jobs?${query.toString()}`,
@@ -115,10 +123,11 @@ export class ProjectRunnerClient {
     return result.job;
   }
 
-  async jobs(projectId: string): Promise<RunnerJob[]> {
+  async jobs(projectId: string, workspaceId: string): Promise<RunnerJob[]> {
+    const query = new URLSearchParams({ project: projectId, workspace: workspaceId });
     const result = await this.call<{ jobs: RunnerJob[] }>(
       "GET",
-      `/jobs?project=${encodeURIComponent(projectId)}`,
+      `/jobs?${query.toString()}`,
     );
     return result.jobs;
   }
@@ -145,5 +154,30 @@ export class ProjectRunnerClient {
       `/artifact?${query.toString()}`,
     );
     return result.artifact;
+  }
+
+  async environment(projectId: string, workspaceId: string): Promise<ProjectEnvironmentDocument> {
+    const query = new URLSearchParams({ project: projectId, workspace: workspaceId });
+    const result = await this.call<{ environment: ProjectEnvironmentDocument }>(
+      "GET",
+      `/environment?${query.toString()}`,
+    );
+    return result.environment;
+  }
+
+  async saveEnvironment(
+    projectId: string,
+    workspaceId: string,
+    text: string,
+    expectedRevision: number,
+  ): Promise<ProjectEnvironmentDocument> {
+    const query = new URLSearchParams({ project: projectId, workspace: workspaceId });
+    const body = Buffer.from(JSON.stringify({ text, expectedRevision }), "utf8");
+    const result = await this.call<{ environment: ProjectEnvironmentDocument }>(
+      "PUT",
+      `/environment?${query.toString()}`,
+      body,
+    );
+    return result.environment;
   }
 }

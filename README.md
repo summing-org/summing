@@ -1,4 +1,4 @@
-# SUMMING 9.2
+# SUMMING 9.3
 
 SUMMING — один постоянно живущий агент с одним администратором и назначаемыми
 владельцами проектов. Он работает на Linux VPS, принимает команды из Telegram
@@ -49,7 +49,7 @@ Project
   Groq Whisper доступен как опция, в Codex передаётся только текст, а локальный
   аудиофайл удаляется;
 - Project Viewer открывается как Telegram Mini App: показывает дерево, безопасный
-  текст файлов, working/commit/run diff, runner jobs и логи;
+  текст файлов, working/commit/run diff, runner jobs, логи и простой dotenv-editor;
 - отдельный rootless Docker runner собирает неизменяемые Git snapshots и
   выполняет только фиксированные действия `build`, `validate`, `dry-run`, `run`;
 - per-project systemd timer может запускать закреплённый commit SHA; merge/push,
@@ -295,7 +295,7 @@ $SUMMING_DATA_DIR/
 
 Полная архитектура и VPS runbook: [PROJECT_HANDBOOK_RU.md](PROJECT_HANDBOOK_RU.md).
 Конституционные принципы: [BIBLE.md](BIBLE.md).
-Безопасные API keys, OAuth и runtime access: [CONNECTIONS_RU.md](CONNECTIONS_RU.md).
+Project `.env`, шифрование и runtime injection: [ENVIRONMENTS_RU.md](ENVIRONMENTS_RU.md).
 
 ## Project Viewer и runner
 
@@ -313,10 +313,10 @@ sudo /opt/summing/deploy/install-project-operations.sh
 ```
 
 Installer создаёт отдельного `summing-runner`, rootless Docker с лимитом build
-cache 8 ГБ, отдельный encrypted `summing-secrets`, HTTPS proxy, project
-config/data и timer unit. Пользователь
-`summing` не получает Docker socket. Перед включением live timer замените
-placeholders в `/etc/summing-runner/projects/ash-seo.env` и проверьте
+cache 8 ГБ, приватный AES-ключ для project env, HTTPS proxy, project config/data
+и timer unit. Пользователь `summing` не получает Docker socket. При первом
+переходе существующий `/etc/summing-runner/projects/ash-seo.env` импортируется в
+encrypted store; после этого редактируйте значения во вкладке **Энвы**. Проверьте
 `ash-seo.config.json`, затем запустите Validate и Dry run из Viewer.
 Основной production URL Mini App — `https://assist.summing.org`; прежний
 `https://ash.summing.org` остаётся только постоянным HTTPS-редиректом с

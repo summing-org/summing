@@ -14,19 +14,22 @@ import {
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { basename, isAbsolute, resolve } from "node:path";
 import {
-  integrationRuntimePrefix,
-  loadIntegrationManifest,
-  type IntegrationMode,
-} from "./integration-manifest.js";
+  environmentRedactions,
+  ProjectEnvironmentConflictError,
+  ProjectEnvironmentError,
+  ProjectEnvironmentStore,
+  runtimeEnvironmentText,
+  type ParsedEnvironment,
+} from "./project-environment.js";
 import type { RunnerAction, RunnerJob } from "./project-runner-client.js";
-import { SecretBrokerRuntimeClient } from "./secret-broker-client.js";
 
 const PROJECT_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+const WORKSPACE_ID = PROJECT_ID;
 const JOB_ID = /^[0-9a-f-]{36}$/;
 const REVISION = /^[0-9a-f]{40}$/;
 const MAX_ARCHIVE_BYTES = 50_000_000;
 const MAX_ARTIFACT_BYTES = 8_000_000;
-const MAX_STATIC_ENVIRONMENT_BYTES = 1_000_000;
+const MAX_JSON_BYTES = 1_100_000;
 const DRY_RUN_RETENTION = 30;
 const RUNNER_ACTIONS = new Set<RunnerAction>(["build", "validate", "dry-run", "run"]);
 const ARTIFACTS = new Map([
@@ -37,12 +40,12 @@ const ARTIFACTS = new Map([
   ["errors.json", "application/json"],
   ["report.html", "text/html"],
 ]);
-const CREDENTIAL_ENVIRONMENT_NAME = /(?:^|_)(?:API_?KEY|ACCESS_?KEY|AUTH|CREDENTIALS?|PASSWORD|PRIVATE_?KEY|SECRET|TOKEN)(?:_|$)/i;
 
 interface RunnerProjectConfig {
   configPath: string;
-  envPath: string;
   dataPath: string;
+  environmentBootstrap: ReadonlyMap<string, string>;
+  network: boolean;
 }
 
 interface CommandResult {
@@ -51,10 +54,7 @@ interface CommandResult {
 }
 
 interface RuntimeAccess {
-  leaseId: string | null;
   envPath: string | null;
-  gateway: boolean;
-  modes: IntegrationMode[];
   redactions: string[];
 }
 
@@ -81,31 +81,28 @@ function safeAbsolutePath(value: unknown, name: string): string {
   return resolve(path);
 }
 
-function validateStaticEnvironment(path: string): void {
-  const metadata = lstatSync(path);
-  if (
-    !metadata.isFile() ||
-    metadata.isSymbolicLink() ||
-    metadata.nlink !== 1 ||
-    metadata.size > MAX_STATIC_ENVIRONMENT_BYTES ||
-    (metadata.mode & 0o007) !== 0
-  ) {
-    throw new Error("static project environment must be a non-public regular file under 1 MB");
+async function jsonBody(request: IncomingMessage): Promise<Record<string, unknown>> {
+  const announced = Number(request.headers["content-length"] ?? 0);
+  if (!Number.isSafeInteger(announced) || announced <= 0 || announced > MAX_JSON_BYTES) {
+    throw new RunnerHttpError(413, "invalid JSON body size");
   }
-  const content = readFileSync(path, "utf8");
-  for (const [index, rawLine] of content.split(/\r?\n/).entries()) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith("#")) continue;
-    const separator = line.indexOf("=");
-    const name = separator < 0 ? line : line.slice(0, separator).trim();
-    if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(name) || separator < 0) {
-      throw new Error(`static project environment line ${index + 1} is invalid`);
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  for await (const chunk of request) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    bytes += buffer.length;
+    if (bytes > MAX_JSON_BYTES) throw new RunnerHttpError(413, "JSON body is too large");
+    chunks.push(buffer);
+  }
+  if (bytes !== announced) throw new RunnerHttpError(400, "JSON body is incomplete");
+  try {
+    const value = JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error("not an object");
     }
-    if (CREDENTIAL_ENVIRONMENT_NAME.test(name)) {
-      throw new Error(
-        `static project environment contains credential-like variable '${name}'; use Connections`,
-      );
-    }
+    return value as Record<string, unknown>;
+  } catch {
+    throw new RunnerHttpError(400, "request body must be a JSON object");
   }
 }
 
@@ -189,27 +186,26 @@ export class ProjectRunnerServer {
   private server: Server | null = null;
   private readonly queue: RunnerJob[] = [];
   private processing = false;
-  private readonly secrets: SecretBrokerRuntimeClient;
-  private readonly runtimeAccessRoot: string;
+  private readonly environments: ProjectEnvironmentStore;
+  private readonly runtimeEnvironmentRoot: string;
 
   constructor(
     readonly socketPath: string,
     readonly dataRoot: string,
     readonly configRoot: string,
-    readonly dockerBinary = "/usr/bin/docker",
-    readonly secretBrokerRuntimeSocket = "/run/summing-secrets/runtime.sock",
-    readonly secretBrokerGatewaySocket = "/run/summing-secrets/gateway.sock",
+    readonly dockerBinary: string,
+    environmentKey: Buffer,
   ) {
     if (!isAbsolute(socketPath) || basename(socketPath) !== "runner.sock") {
       throw new Error("runner socket must be an absolute runner.sock path");
     }
     mkdirSync(dataRoot, { recursive: true, mode: 0o700 });
-    this.secrets = new SecretBrokerRuntimeClient(secretBrokerRuntimeSocket);
-    this.runtimeAccessRoot = resolve(socketPath, "..", "leases");
-    mkdirSync(this.runtimeAccessRoot, { recursive: true, mode: 0o700 });
-    for (const entry of readdirSync(this.runtimeAccessRoot)) {
+    this.environments = new ProjectEnvironmentStore(resolve(dataRoot, "environments"), environmentKey);
+    this.runtimeEnvironmentRoot = resolve(socketPath, "..", "environments");
+    mkdirSync(this.runtimeEnvironmentRoot, { recursive: true, mode: 0o700 });
+    for (const entry of readdirSync(this.runtimeEnvironmentRoot)) {
       if (!/^[0-9a-f-]{36}\.env$/.test(entry)) continue;
-      const path = resolve(this.runtimeAccessRoot, entry);
+      const path = resolve(this.runtimeEnvironmentRoot, entry);
       const metadata = lstatSync(path);
       if (metadata.isFile() && !metadata.isSymbolicLink()) rmSync(path);
     }
@@ -254,19 +250,51 @@ export class ProjectRunnerServer {
       json(response, 200, { ok: true, queued: this.queue.length, running: this.processing });
       return;
     }
+    if (url.pathname === "/environment" && (request.method === "GET" || request.method === "PUT")) {
+      const projectId = url.searchParams.get("project") ?? "";
+      const workspaceId = url.searchParams.get("workspace") ?? "";
+      if (!PROJECT_ID.test(projectId) || !WORKSPACE_ID.test(workspaceId)) {
+        throw new RunnerHttpError(400, "invalid environment scope");
+      }
+      const project = this.projectConfig(projectId);
+      if (request.method === "GET") {
+        json(response, 200, {
+          environment: this.environments.ensure(
+            projectId,
+            workspaceId,
+            project.environmentBootstrap.get(workspaceId),
+          ),
+        });
+        return;
+      }
+      const body = await jsonBody(request);
+      const text = body.text;
+      const expectedRevision = body.expectedRevision;
+      if (typeof text !== "string" || typeof expectedRevision !== "number") {
+        throw new RunnerHttpError(400, "text and expectedRevision are required");
+      }
+      json(response, 200, {
+        environment: this.environments.save(projectId, workspaceId, text, expectedRevision),
+      });
+      return;
+    }
     if (request.method === "POST" && url.pathname === "/jobs") {
       const projectId = url.searchParams.get("project") ?? "";
+      const workspaceId = url.searchParams.get("workspace") ?? "";
       const action = url.searchParams.get("action") as RunnerAction;
       const revision = url.searchParams.get("revision") ?? "";
-      if (!PROJECT_ID.test(projectId)) throw new RunnerHttpError(400, "invalid project id");
+      if (!PROJECT_ID.test(projectId) || !WORKSPACE_ID.test(workspaceId)) {
+        throw new RunnerHttpError(400, "invalid project or workspace id");
+      }
       if (!RUNNER_ACTIONS.has(action)) {
         throw new RunnerHttpError(400, "invalid runner action");
       }
       if (!REVISION.test(revision)) throw new RunnerHttpError(400, "invalid revision");
-      this.projectConfig(projectId);
+      const project = this.projectConfig(projectId);
       const job: RunnerJob = {
         id: randomUUID(),
         projectId,
+        workspaceId,
         action,
         revision,
         status: "queued",
@@ -274,18 +302,35 @@ export class ProjectRunnerServer {
       };
       const directory = this.jobDirectory(projectId, job.id);
       mkdirSync(directory, { recursive: true, mode: 0o700 });
-      await this.receiveArchive(request, resolve(directory, "source.tar"));
-      this.saveJob(job);
-      this.queue.push(job);
-      void this.processQueue();
-      json(response, 202, { job });
+      try {
+        await this.receiveArchive(request, resolve(directory, "source.tar"));
+        if (action !== "build") {
+          job.environmentRevision = this.environments.writeJobSnapshot(
+            projectId,
+            workspaceId,
+            job.id,
+            resolve(directory, "environment.json"),
+            project.environmentBootstrap.get(workspaceId),
+          );
+        }
+        this.saveJob(job);
+        this.queue.push(job);
+        void this.processQueue();
+        json(response, 202, { job });
+      } catch (error) {
+        rmSync(directory, { recursive: true, force: true });
+        throw error;
+      }
       return;
     }
     if (request.method === "GET" && url.pathname === "/jobs") {
       const projectId = url.searchParams.get("project") ?? "";
-      if (!PROJECT_ID.test(projectId)) throw new RunnerHttpError(400, "invalid project id");
+      const workspaceId = url.searchParams.get("workspace") ?? "";
+      if (!PROJECT_ID.test(projectId) || !WORKSPACE_ID.test(workspaceId)) {
+        throw new RunnerHttpError(400, "invalid project or workspace id");
+      }
       this.projectConfig(projectId);
-      json(response, 200, { jobs: this.listJobs(projectId) });
+      json(response, 200, { jobs: this.listJobs(projectId, workspaceId) });
       return;
     }
     if (request.method === "GET" && url.pathname === "/logs") {
@@ -353,10 +398,27 @@ export class ProjectRunnerServer {
     const path = resolve(this.configRoot, `${projectId}.json`);
     if (!existsSync(path)) throw new RunnerHttpError(404, "runner project is not configured");
     const raw = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    const bootstrapValue = raw.environmentBootstrap;
+    const environmentBootstrap = new Map<string, string>();
+    if (bootstrapValue !== undefined) {
+      if (!bootstrapValue || typeof bootstrapValue !== "object" || Array.isArray(bootstrapValue)) {
+        throw new Error("environmentBootstrap must be an object of workspace paths");
+      }
+      for (const [workspaceId, bootstrapPath] of Object.entries(bootstrapValue)) {
+        if (!WORKSPACE_ID.test(workspaceId)) {
+          throw new Error("environmentBootstrap contains an invalid workspace id");
+        }
+        environmentBootstrap.set(
+          workspaceId,
+          safeAbsolutePath(bootstrapPath, `environmentBootstrap.${workspaceId}`),
+        );
+      }
+    }
     return {
       configPath: safeAbsolutePath(raw.configPath, "configPath"),
-      envPath: safeAbsolutePath(raw.envPath, "envPath"),
       dataPath: safeAbsolutePath(raw.dataPath, "dataPath"),
+      environmentBootstrap,
+      network: raw.network === true,
     };
   }
 
@@ -372,7 +434,7 @@ export class ProjectRunnerServer {
     writeFileSync(this.jobMetadataPath(job), `${JSON.stringify(job, null, 2)}\n`, { mode: 0o600 });
   }
 
-  private listJobs(projectId: string): RunnerJob[] {
+  private listJobs(projectId: string, workspaceId?: string): RunnerJob[] {
     const directory = resolve(this.dataRoot, "projects", projectId, "runs");
     if (!existsSync(directory)) return [];
     return readdirSync(directory)
@@ -385,6 +447,7 @@ export class ProjectRunnerServer {
         }
       })
       .filter((job): job is RunnerJob => job !== null)
+      .filter((job) => !workspaceId || (job.workspaceId ?? "repo") === workspaceId)
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
       .slice(0, 50);
   }
@@ -451,7 +514,11 @@ export class ProjectRunnerServer {
     job.status = "running";
     job.startedAt = new Date().toISOString();
     this.saveJob(job);
-    writeFileSync(logPath, `[${job.startedAt}] ${job.action} ${job.projectId}@${job.revision}\n`, { mode: 0o600 });
+    writeFileSync(
+      logPath,
+      `[${job.startedAt}] ${job.action} ${job.projectId}/${job.workspaceId}@${job.revision}\n`,
+      { mode: 0o600 },
+    );
     try {
       mkdirSync(source, { mode: 0o700 });
       const listed = await run("/usr/bin/tar", ["-tf", resolve(directory, "source.tar")], {
@@ -492,11 +559,12 @@ export class ProjectRunnerServer {
       this.saveJob(job);
       rmSync(resolve(directory, "source"), { recursive: true, force: true });
       rmSync(resolve(directory, "source.tar"), { force: true });
+      rmSync(resolve(directory, "environment.json"), { force: true });
     }
   }
 
   private image(job: RunnerJob): string {
-    return `summing/${job.projectId}:${job.revision}`;
+    return `summing/${job.projectId}-${job.workspaceId}:${job.revision}`;
   }
 
   private async ensureImage(job: RunnerJob, source: string, logPath: string): Promise<void> {
@@ -512,6 +580,7 @@ export class ProjectRunnerServer {
       [
         "build",
         "--label", `summing.project=${job.projectId}`,
+        "--label", `summing.workspace=${job.workspaceId}`,
         "--label", `summing.revision=${job.revision}`,
         "--tag", image,
         ".",
@@ -528,8 +597,6 @@ export class ProjectRunnerServer {
     logPath: string,
   ): Promise<{ code: number }> {
     if (!existsSync(project.configPath)) throw new Error(`project config is missing: ${project.configPath}`);
-    if (!existsSync(project.envPath)) throw new Error(`project environment is missing: ${project.envPath}`);
-    validateStaticEnvironment(project.envPath);
     mkdirSync(project.dataPath, { recursive: true, mode: 0o700 });
     if (job.action === "dry-run") {
       const root = resolve(project.dataPath, "dry-runs");
@@ -542,7 +609,7 @@ export class ProjectRunnerServer {
       }
       mkdirSync(directory, { recursive: true, mode: 0o700 });
     }
-    const access = await this.runtimeAccess(job, source, logPath);
+    const access = this.runtimeAccess(job, logPath);
     try {
       const args = [
       "run", "--rm", "--init",
@@ -555,28 +622,13 @@ export class ProjectRunnerServer {
       "--memory", "1536m",
       "--cpus", "1.5",
       "--tmpfs", "/tmp:rw,noexec,nosuid,size=134217728",
-      "--env-file", project.envPath,
       "--env", "CONFIG_PATH=/run/config.json",
       "--env", "HISTORY_PATH=/app/data/history.json",
       "--volume", `${project.configPath}:/run/config.json:ro`,
       "--volume", `${project.dataPath}:/app/data`,
     ];
       if (access.envPath) args.push("--env-file", access.envPath);
-      if (access.gateway) {
-        if (!existsSync(this.secretBrokerGatewaySocket) || !lstatSync(this.secretBrokerGatewaySocket).isSocket()) {
-          throw new Error("secret broker gateway socket is unavailable");
-        }
-        args.push(
-          "--volume",
-          `${this.secretBrokerGatewaySocket}:/run/summing-secrets/gateway.sock:rw`,
-        );
-      }
-      if (
-        job.action === "validate" ||
-        (access.modes.length > 0 && access.modes.every((mode) => mode === "gateway"))
-      ) {
-        args.push("--network", "none");
-      }
+      if (job.action === "validate" || !project.network) args.push("--network", "none");
       if (job.action === "dry-run") {
         args.push(
           "--env", "DRY_RUN=true",
@@ -597,136 +649,33 @@ export class ProjectRunnerServer {
       });
       return { code: result.code };
     } finally {
-      let releaseError: unknown = null;
-      if (access.leaseId) {
-        try {
-          await this.releaseRuntimeLease(job, access.leaseId, logPath);
-        } catch (error) {
-          releaseError = error;
-        }
-      }
       try {
         this.redactArtifacts(job, project, access.redactions);
       } finally {
         if (access.envPath) rmSync(access.envPath, { force: true });
         access.redactions.fill("");
       }
-      if (releaseError) throw releaseError;
     }
   }
 
-  private async runtimeAccess(
-    job: RunnerJob,
-    source: string,
-    logPath: string,
-  ): Promise<RuntimeAccess> {
-    if (!(job.action === "dry-run" || job.action === "run")) {
-      return { leaseId: null, envPath: null, gateway: false, modes: [], redactions: [] };
-    }
-    const integrations = loadIntegrationManifest(source).integrations.filter((integration) =>
-      integration.actions.includes(job.action as "dry-run" | "run"),
+  private runtimeAccess(job: RunnerJob, logPath: string): RuntimeAccess {
+    const snapshotPath = resolve(this.jobDirectory(job.projectId, job.id), "environment.json");
+    if (!existsSync(snapshotPath)) return { envPath: null, redactions: [] };
+    const parsed: ParsedEnvironment = this.environments.readJobSnapshot(
+      job.projectId,
+      job.workspaceId,
+      job.id,
+      snapshotPath,
     );
-    if (integrations.length === 0) {
-      return { leaseId: null, envPath: null, gateway: false, modes: [], redactions: [] };
-    }
-    const lease = await this.secrets.lease({
-      projectId: job.projectId,
-      action: job.action as "dry-run" | "run",
-      jobId: job.id,
-      integrations,
-    });
-    if (
-      !/^[0-9a-f-]{36}$/.test(lease.id) ||
-      lease.projectId !== job.projectId ||
-      lease.jobId !== job.id ||
-      lease.expiresAt <= Date.now() / 1_000
-    ) {
-      throw new Error("secret broker returned an invalid or expired runtime lease");
-    }
-    let handedOff = false;
-    try {
-      const environment: Record<string, string> = { ...lease.environment };
-      const expectedEnvironment = new Set(
-      integrations.flatMap((integration) => integration.runtime.map((entry) => entry.env)),
-    );
-      const expectedGatewayTokens = new Set(
-      integrations
-        .filter((integration) => integration.mode === "gateway")
-        .map((integration) => `${integration.id}@${integration.environment}`),
-    );
-      if (
-      Object.keys(lease.environment).some((name) => !expectedEnvironment.has(name)) ||
-      [...expectedEnvironment].some((name) => !(name in lease.environment)) ||
-      Object.keys(lease.gatewayTokens).some((name) => !expectedGatewayTokens.has(name)) ||
-      [...expectedGatewayTokens].some((name) => !(name in lease.gatewayTokens))
-      ) {
-        for (const name of Object.keys(environment)) environment[name] = "";
-        for (const name of Object.keys(lease.environment)) lease.environment[name] = "";
-        for (const name of Object.keys(lease.gatewayTokens)) lease.gatewayTokens[name] = "";
-        throw new Error("secret broker returned credentials outside the integration manifest");
-      }
-      const redactions = [
-      ...Object.values(lease.environment),
-      ...Object.values(lease.gatewayTokens),
-    ].filter(Boolean);
-      const envPath = resolve(this.runtimeAccessRoot, `${job.id}.env`);
-      let ready = false;
-      try {
-      for (const integration of integrations) {
-        const key = `${integration.id}@${integration.environment}`;
-        const token = lease.gatewayTokens[key];
-        if (integration.mode !== "gateway") continue;
-        if (!token) throw new Error(`secret broker omitted gateway capability ${key}`);
-        const prefix = integrationRuntimePrefix(integration);
-        environment[`${prefix}_GATEWAY_TOKEN`] = token;
-        environment[`${prefix}_GATEWAY_SOCKET`] = "/run/summing-secrets/gateway.sock";
-        environment[`${prefix}_GATEWAY_PATH`] = `/v1/proxy/${encodeURIComponent(key)}`;
-      }
-      const lines = Object.entries(environment).map(([name, value]) => {
-        if (!/^[A-Z][A-Z0-9_]{0,127}$/.test(name) || /[\r\n\0]/.test(value)) {
-          throw new Error("secret broker returned an unsafe runtime environment value");
-        }
-        return `${name}=${value}`;
-      });
-      if (Buffer.byteLength(lines.join("\n")) > 1_000_000) {
-        throw new Error("secret broker runtime environment exceeds 1 MB");
-      }
-      writeFileSync(envPath, `${lines.join("\n")}\n`, { flag: "wx", mode: 0o600 });
-      writeFileSync(
-        logPath,
-        `[${new Date().toISOString()}] runtime access: ${integrations.map((item) => `${item.id}@${item.environment}:${item.mode}`).join(", ")}\n`,
-        { flag: "a", mode: 0o600 },
-      );
-        ready = true;
-        handedOff = true;
-        return {
-        leaseId: lease.id,
-        envPath,
-        gateway: integrations.some((integration) => integration.mode === "gateway"),
-        modes: integrations.map((integration) => integration.mode),
-        redactions,
-        };
-      } finally {
-        for (const name of Object.keys(environment)) environment[name] = "";
-        for (const name of Object.keys(lease.environment)) lease.environment[name] = "";
-        for (const name of Object.keys(lease.gatewayTokens)) lease.gatewayTokens[name] = "";
-        if (!ready) {
-          rmSync(envPath, { force: true });
-          redactions.fill("");
-        }
-      }
-    } finally {
-      if (!handedOff) await this.releaseRuntimeLease(job, lease.id, logPath);
-    }
-  }
-
-  private async releaseRuntimeLease(job: RunnerJob, leaseId: string, logPath: string): Promise<void> {
-    await this.secrets.release({ id: leaseId, projectId: job.projectId, jobId: job.id });
+    const envPath = resolve(this.runtimeEnvironmentRoot, `${job.id}.env`);
+    const redactions = environmentRedactions(parsed.values);
+    writeFileSync(envPath, runtimeEnvironmentText(parsed.values), { flag: "wx", mode: 0o600 });
     writeFileSync(
       logPath,
-      `[${new Date().toISOString()}] runtime access released\n`,
+      `[${new Date().toISOString()}] environment revision ${job.environmentRevision ?? 0} loaded\n`,
       { flag: "a", mode: 0o600 },
     );
+    return { envPath, redactions };
   }
 
   private redactArtifacts(job: RunnerJob, project: RunnerProjectConfig, secrets: string[]): void {
@@ -772,6 +721,14 @@ export class ProjectRunnerServer {
     }
     if (error instanceof RunnerHttpError) {
       json(response, error.status, { error: error.message });
+      return;
+    }
+    if (error instanceof ProjectEnvironmentConflictError) {
+      json(response, 409, { error: error.message });
+      return;
+    }
+    if (error instanceof ProjectEnvironmentError) {
+      json(response, 400, { error: error.message });
       return;
     }
     console.error("project runner request failed", error);

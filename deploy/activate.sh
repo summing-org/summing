@@ -151,11 +151,6 @@ install -o root -g root -m 0644 \
 install -o root -g root -m 0644 \
   "${repo_dir}/deploy/summing-deploy.timer" \
   /etc/systemd/system/summing-deploy.timer
-if id summing-secrets >/dev/null 2>&1 && [ -f /etc/summing-secrets/summing-secrets.env ]; then
-  install -o root -g root -m 0644 \
-    "${repo_dir}/deploy/summing-secrets.service" \
-    /etc/systemd/system/summing-secrets.service
-fi
 if id summing-runner >/dev/null 2>&1 && [ -f /etc/systemd/system/summing-runner.service ]; then
   runner_uid=$(id -u summing-runner)
   temporary_runner_unit=$(mktemp /run/summing-runner.service.XXXXXX)
@@ -176,9 +171,6 @@ if id summing-runner >/dev/null 2>&1 && [ -f /etc/systemd/system/summing-runner.
     /etc/systemd/system/summing-ash-seo.timer
 fi
 systemctl daemon-reload
-if systemctl is-enabled --quiet summing-secrets.service 2>/dev/null; then
-  systemctl restart summing-secrets.service
-fi
 if systemctl is-enabled --quiet summing-runner.service 2>/dev/null; then
   systemctl restart summing-runner.service
 fi

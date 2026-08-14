@@ -36,13 +36,6 @@ public_url = ""
 auth_max_age_sec = 900
 runner_socket = "/run/summing-runner/runner.sock"
 
-[connections]
-# Keep both values empty to disable Connections. Production installs one shared
-# HTTPS origin where /connections is routed to the isolated Secret Broker.
-public_url = ""
-ticket_private_key = ""
-control_socket = "/run/summing-secrets/control.sock"
-
 # Static projects belong to TELEGRAM_OWNER_ID. The administrator can also create
 # managed projects under $SUMMING_DATA_DIR/repositories with /project_create.
 [projects.summing]

@@ -38,6 +38,7 @@ test("help describes everyday commands with examples", () => {
 
   assert.match(help, /^\*Помощь по SUMMING\*/);
   assert.match(help, /`\/status` — показать версию SUMMING/);
+  assert.match(help, /`\/env` — открыть энвы репозитория/);
   assert.match(help, /Пример: `\/bind shop backend`/);
   assert.match(help, /Пример: `\/steer Не меняй публичный API`/);
   assert.match(help, /Voice и audio транскрибируются через OpenAI gpt\\-transcribe/);

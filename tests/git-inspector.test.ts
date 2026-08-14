@@ -41,11 +41,38 @@ test("shows tracked and untracked files without exposing secrets", async () => {
 test("creates immutable snapshots without changing the worktree index", async () => {
   const root = repository();
   try {
+    writeFileSync(join(root, ".env.production"), "TRACKED_TOKEN=secret\n");
+    writeFileSync(join(root, ".env.example"), "TOKEN=replace-me\n");
+    execFileSync("git", ["-C", root, "add", ".env.production", ".env.example"]);
+    execFileSync("git", ["-C", root, "commit", "-m", "tracked private fixture"]);
+    writeFileSync(join(root, ".env"), "UNTRACKED_TOKEN=secret\n");
     const inspector = new GitInspector(root);
     const before = await inspector.snapshot("before");
     writeFileSync(join(root, "src", "main.ts"), "export const value = 3;\n");
     const after = await inspector.snapshot("after");
     assert.match(await inspector.commitDiff(before, after), /value = 3/);
+    assert.throws(() => execFileSync(
+      "git",
+      ["-C", root, "cat-file", "-e", `${before}:.env`],
+      { stdio: "ignore" },
+    ));
+    assert.throws(() => execFileSync(
+      "git",
+      ["-C", root, "cat-file", "-e", `${before}:.env.production`],
+      { stdio: "ignore" },
+    ));
+    assert.doesNotThrow(() => execFileSync(
+      "git",
+      ["-C", root, "cat-file", "-e", `${before}:.env.example`],
+      { stdio: "ignore" },
+    ));
+    const archived = execFileSync("/usr/bin/tar", ["-tf", "-"], {
+      input: await inspector.archive("HEAD"),
+      encoding: "utf8",
+    });
+    assert.doesNotMatch(archived, /\.env\.production/);
+    assert.match(archived, /\.env\.example/);
+    assert.match(archived, /src\/main\.ts/);
     assert.equal(execFileSync("git", ["-C", root, "diff", "--cached"]).toString(), "");
   } finally {
     rmSync(root, { recursive: true, force: true });

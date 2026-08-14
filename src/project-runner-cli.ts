@@ -5,6 +5,7 @@ import { ProjectRunnerClient, type RunnerAction } from "./project-runner-client.
 
 interface ScheduleConfig {
   projectId: string;
+  workspaceId?: string;
   action: RunnerAction;
   repository: string;
   revision: string;
@@ -20,10 +21,12 @@ async function main(): Promise<void> {
   }
   const value = JSON.parse(readFileSync(resolve(path), "utf8")) as Partial<ScheduleConfig>;
   const projectId = String(value.projectId ?? "");
+  const workspaceId = String(value.workspaceId ?? "repo");
   const action = String(value.action ?? "") as RunnerAction;
   const repository = String(value.repository ?? "");
   const revision = String(value.revision ?? "");
   if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(projectId)) throw new Error("invalid projectId");
+  if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(workspaceId)) throw new Error("invalid workspaceId");
   if (!ACTIONS.has(action)) {
     throw new Error("invalid action");
   }
@@ -34,7 +37,7 @@ async function main(): Promise<void> {
   const client = new ProjectRunnerClient(
     String(value.runnerSocket || process.env.SUMMING_RUNNER_SOCKET || "/run/summing-runner/runner.sock"),
   );
-  const job = await client.submit(projectId, action, resolved, archive);
+  const job = await client.submit(projectId, workspaceId, action, resolved, archive);
   process.stdout.write(`${job.id}\n`);
 }
 

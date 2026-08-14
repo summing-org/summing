@@ -13,8 +13,6 @@ enable_timer=${ENABLE_ASH_SEO_TIMER:-0}
 repo_dir=/opt/summing
 runner_home=/var/lib/summing-runner
 runner_user=summing-runner
-secrets_home=/var/lib/summing-secrets
-secrets_user=summing-secrets
 
 if [ -z "${viewer_domain}" ] || [ -z "${ash_seo_revision}" ]; then
   printf '%s\n' 'Set SUMMING_VIEWER_DOMAIN and ASH_SEO_REVISION.' >&2
@@ -65,9 +63,6 @@ systemctl disable --now docker.service docker.socket >/dev/null 2>&1 || true
 if ! id "${runner_user}" >/dev/null 2>&1; then
   useradd --system --create-home --home-dir "${runner_home}" --shell /bin/bash "${runner_user}"
 fi
-if ! id "${secrets_user}" >/dev/null 2>&1; then
-  useradd --system --create-home --home-dir "${secrets_home}" --shell /usr/sbin/nologin "${secrets_user}"
-fi
 runner_group_changed=0
 if ! id -nG "${runner_user}" | tr ' ' '\n' | grep -qx summing; then
   usermod --append --groups summing "${runner_user}"
@@ -103,6 +98,13 @@ runuser -u "${runner_user}" -- env "${runner_env[@]}" systemctl --user restart d
 install -d -o root -g summing -m 0750 /etc/summing-runner
 install -d -o root -g summing -m 0750 /etc/summing-runner/projects
 install -d -o root -g summing -m 0750 /etc/summing-runner/schedules
+if [ ! -f /etc/summing-runner/environment.key ]; then
+  temporary_environment_key=$(mktemp /run/summing-runner-environment.XXXXXX)
+  openssl rand -hex 32 > "${temporary_environment_key}"
+  install -o "${runner_user}" -g "${runner_user}" -m 0400 \
+    "${temporary_environment_key}" /etc/summing-runner/environment.key
+  rm -f "${temporary_environment_key}"
+fi
 install -d -o "${runner_user}" -g "${runner_user}" -m 0700 "${runner_home}/jobs"
 install -d -o "${runner_user}" -g "${runner_user}" -m 0700 /var/lib/summing-runs/ash-seo/data
 install -o root -g summing -m 0640 \
@@ -127,58 +129,11 @@ sed "s/replace_me/${ash_seo_revision}/" "${repo_dir}/deploy/ash-seo.schedule.jso
 chown root:summing /etc/summing-runner/schedules/ash-seo.json
 chmod 0640 /etc/summing-runner/schedules/ash-seo.json
 
-install -d -o root -g "${secrets_user}" -m 0750 /etc/summing-secrets
-install -d -o "${secrets_user}" -g "${secrets_user}" -m 0700 "${secrets_home}"
-if [ ! -f /etc/summing-secrets/master.key ]; then
-  temporary_master=$(mktemp /run/summing-secrets-master.XXXXXX)
-  openssl rand -hex 32 > "${temporary_master}"
-  install -o "${secrets_user}" -g "${secrets_user}" -m 0400 \
-    "${temporary_master}" /etc/summing-secrets/master.key
-  rm -f "${temporary_master}"
-fi
-if [ ! -f /etc/summing/connection-ticket-private.pem ]; then
-  temporary_private=$(mktemp /run/summing-connection-private.XXXXXX)
-  openssl genpkey -algorithm ED25519 -out "${temporary_private}"
-  install -o root -g summing -m 0640 \
-    "${temporary_private}" /etc/summing/connection-ticket-private.pem
-  rm -f "${temporary_private}"
-fi
-temporary_public=$(mktemp /run/summing-connection-public.XXXXXX)
-openssl pkey -in /etc/summing/connection-ticket-private.pem -pubout -out "${temporary_public}"
-install -o root -g "${secrets_user}" -m 0640 \
-  "${temporary_public}" /etc/summing-secrets/ticket-public.pem
-rm -f "${temporary_public}"
-if [ ! -f /etc/summing-secrets/providers.json ]; then
-  install -o root -g "${secrets_user}" -m 0640 \
-    "${repo_dir}/deploy/providers.example.json" /etc/summing-secrets/providers.json
-fi
-summing_group_id=$(getent group summing | cut -d: -f3)
-runner_group_id=$(getent group "${runner_user}" | cut -d: -f3)
-cat > /etc/summing-secrets/summing-secrets.env <<EOF
-SUMMING_SECRETS_DATA=${secrets_home}
-SUMMING_SECRETS_MASTER_KEY_FILE=/etc/summing-secrets/master.key
-SUMMING_CONNECTION_TICKET_PUBLIC_KEY=/etc/summing-secrets/ticket-public.pem
-SUMMING_PROVIDER_REGISTRY=/etc/summing-secrets/providers.json
-SUMMING_SECRETS_HOST=127.0.0.1
-SUMMING_SECRETS_PORT=8767
-SUMMING_CONNECTIONS_URL=https://${viewer_domain}
-SUMMING_SECRETS_CONTROL_SOCKET=/run/summing-secrets/control.sock
-SUMMING_SECRETS_RUNTIME_SOCKET=/run/summing-secrets/runtime.sock
-SUMMING_SECRETS_GATEWAY_SOCKET=/run/summing-secrets/gateway.sock
-SUMMING_CONTROL_GID=${summing_group_id}
-SUMMING_RUNNER_GID=${runner_group_id}
-EOF
-chown root:"${secrets_user}" /etc/summing-secrets/summing-secrets.env
-chmod 0640 /etc/summing-secrets/summing-secrets.env
-
 sed "s/RUNNER_UID/${runner_uid}/g" \
   "${repo_dir}/deploy/summing-runner.service" \
   > /etc/systemd/system/summing-runner.service
 chown root:root /etc/systemd/system/summing-runner.service
 chmod 0644 /etc/systemd/system/summing-runner.service
-install -o root -g root -m 0644 \
-  "${repo_dir}/deploy/summing-secrets.service" \
-  /etc/systemd/system/summing-secrets.service
 install -o root -g root -m 0644 "${repo_dir}/deploy/summing-ash-seo.service" /etc/systemd/system/summing-ash-seo.service
 install -o root -g root -m 0644 "${repo_dir}/deploy/summing-ash-seo.timer" /etc/systemd/system/summing-ash-seo.timer
 
@@ -226,25 +181,12 @@ fi
 if ! grep -q '^SUMMING_RUNNER_SOCKET=' "${env_file}"; then
   printf '%s\n' 'SUMMING_RUNNER_SOCKET=/run/summing-runner/runner.sock' >> "${env_file}"
 fi
-if ! grep -q '^SUMMING_CONNECTIONS_URL=' "${env_file}"; then
-  printf 'SUMMING_CONNECTIONS_URL=https://%s\n' "${viewer_domain}" >> "${env_file}"
-else
-  sed -i "s|^SUMMING_CONNECTIONS_URL=.*|SUMMING_CONNECTIONS_URL=https://${viewer_domain}|" "${env_file}"
-fi
-if ! grep -q '^SUMMING_CONNECTION_TICKET_PRIVATE_KEY=' "${env_file}"; then
-  printf '%s\n' 'SUMMING_CONNECTION_TICKET_PRIVATE_KEY=/etc/summing/connection-ticket-private.pem' >> "${env_file}"
-fi
-if ! grep -q '^SUMMING_SECRETS_CONTROL_SOCKET=' "${env_file}"; then
-  printf '%s\n' 'SUMMING_SECRETS_CONTROL_SOCKET=/run/summing-secrets/control.sock' >> "${env_file}"
-fi
 chown root:summing "${env_file}"
 chmod 0640 "${env_file}"
 
 ufw allow 80/tcp
 ufw allow 443/tcp
 systemctl daemon-reload
-systemctl enable summing-secrets.service
-systemctl restart summing-secrets.service
 systemctl enable summing-runner.service
 systemctl restart summing-runner.service
 systemctl enable caddy.service
@@ -268,16 +210,4 @@ if [ "${runner_healthy}" != 1 ]; then
   printf '%s\n' 'Project runner did not become healthy within 30 seconds.' >&2
   exit 1
 fi
-broker_healthy=0
-for attempt in $(seq 1 30); do
-  if curl --fail --silent http://127.0.0.1:8767/connections >/dev/null 2>&1; then
-    broker_healthy=1
-    break
-  fi
-  sleep 1
-done
-if [ "${broker_healthy}" != 1 ]; then
-  printf '%s\n' 'Secret Broker did not become healthy within 30 seconds.' >&2
-  exit 1
-fi
-printf '%s\n' 'Project Viewer, encrypted connections broker, and isolated runner are installed.'
+printf '%s\n' 'Project Viewer and isolated runner with encrypted project environments are installed.'

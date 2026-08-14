@@ -1141,9 +1141,9 @@ export class SummingRuntime {
         chatId,
         deleted
           ? "Сообщение было похоже на credential и удалено до сохранения или передачи в Codex. " +
-            "Откройте Connections и подключите provider через защищённую форму."
+            "Откройте /env и сохраните значение в защищённом редакторе."
           : "Сообщение похоже на credential и не было передано в Codex, но Telegram не разрешил " +
-            "боту удалить его. Удалите сообщение вручную и используйте Connections.",
+            "боту удалить его. Удалите сообщение вручную и используйте /env.",
         { topicId },
       );
     }
@@ -1205,7 +1205,7 @@ export class SummingRuntime {
     return { accepted: true, notify: false };
   }
 
-  private telegramConnectionsText(): string {
+  private telegramTopicsText(): string {
     const chats = this.state.listTelegramChats();
     if (chats.length === 0) {
       return [
@@ -1289,24 +1289,28 @@ export class SummingRuntime {
       await this.sendViewerButton(chatId, messageId, target);
       return;
     }
-    if (command === "/start" && argument.startsWith("connections_")) {
+    if (command === "/start" && argument.startsWith("env_")) {
       if (chatType !== "private") {
-        await this.reply(chatId, topicId, messageId, "Connections открывается через личный чат с ботом.");
+        await this.reply(chatId, topicId, messageId, "Энвы открываются через личный чат с ботом.");
         return;
       }
-      const targetId = argument.slice("connections_".length);
+      const targetId = argument.slice("env_".length);
       let target: Conversation;
       try {
         target = this.state.get(targetId);
       } catch {
-        await this.reply(chatId, topicId, messageId, "Conversation для Connections не найден.");
+        await this.reply(chatId, topicId, messageId, "Conversation для энвов не найден.");
         return;
       }
       if (!this.projects.canAccess(senderId, target.projectId)) {
-        await this.reply(chatId, topicId, messageId, "Нет доступа к Connections этого проекта.");
+        await this.reply(chatId, topicId, messageId, "Нет доступа к энвам этого проекта.");
         return;
       }
-      await this.sendViewerButton(chatId, messageId, target, "connections");
+      if (!isAdministrator) {
+        await this.reply(chatId, topicId, messageId, "Энвы доступны только администратору.");
+        return;
+      }
+      await this.sendViewerButton(chatId, messageId, target, "environment");
       return;
     }
     if (command === "/start" || command === "/help") {
@@ -1420,7 +1424,7 @@ export class SummingRuntime {
         );
         return;
       }
-      await this.replyLong(chatId, topicId, messageId, this.telegramConnectionsText());
+      await this.replyLong(chatId, topicId, messageId, this.telegramTopicsText());
       return;
     }
     if (command === "/bind_topic") {
@@ -1625,29 +1629,33 @@ export class SummingRuntime {
       );
       return;
     }
-    if (command === "/connections") {
+    if (command === "/env") {
       if (!conversation) {
         await this.reply(chatId, topicId, messageId, "Сначала привяжите topic к проекту командой /bind.");
         return;
       }
-      if (!this.config.connectionsEnabled || !this.config.viewerPublicUrl) {
-        await this.reply(chatId, topicId, messageId, "Connections ещё не настроен на этом сервере.");
+      if (!isAdministrator) {
+        await this.reply(chatId, topicId, messageId, "Энвы доступны только администратору.");
+        return;
+      }
+      if (!this.config.viewerPublicUrl) {
+        await this.reply(chatId, topicId, messageId, "Редактор энвов ещё не настроен на этом сервере.");
         return;
       }
       if (chatType === "private") {
-        await this.sendViewerButton(chatId, messageId, conversation, "connections");
+        await this.sendViewerButton(chatId, messageId, conversation, "environment");
         return;
       }
       if (!this.telegramUsername) {
         await this.reply(chatId, topicId, messageId, "Telegram username бота ещё не определён.");
         return;
       }
-      const deepLink = `https://t.me/${this.telegramUsername}?start=connections_${conversation.id}`;
+      const deepLink = `https://t.me/${this.telegramUsername}?start=env_${conversation.id}`;
       await this.reply(
         chatId,
         topicId,
         messageId,
-        `Откройте Connections через личный чат с ботом:\n${deepLink}`,
+        `Откройте энвы через личный чат с ботом:\n${deepLink}`,
       );
       return;
     }
@@ -1809,7 +1817,7 @@ export class SummingRuntime {
     chatId: number,
     replyTo: number,
     conversation: Conversation,
-    tab: "connections" | "files" = "files",
+    tab: "environment" | "files" = "files",
   ): Promise<void> {
     if (!this.config.viewerPublicUrl) {
       await this.telegram.sendMessage(
@@ -1820,8 +1828,8 @@ export class SummingRuntime {
       return;
     }
     const url = `${this.config.viewerPublicUrl}/?conversation=${encodeURIComponent(conversation.id)}` +
-      (tab === "connections" ? "&tab=connections" : "");
-    const title = tab === "connections" ? "Connections" : "Project Viewer";
+      (tab === "environment" ? "&tab=environment" : "");
+    const title = tab === "environment" ? "Энвы" : "Project Viewer";
     await this.telegram.sendMessage(chatId, `${title}: ${conversation.projectId}`, {
       replyTo,
       replyMarkup: {

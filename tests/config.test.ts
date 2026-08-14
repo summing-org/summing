@@ -102,51 +102,6 @@ test("deployment control stays disabled unless both absolute paths are configure
   }
 });
 
-test("connections require one HTTPS origin and one absolute signing-key path", () => {
-  const { root, configPath } = fixture();
-  const privateKeyPath = join(root, "connection-ticket-private.pem");
-  writeFileSync(privateKeyPath, "test-key");
-  try {
-    const config = loadConfig({
-      SUMMING_DATA_DIR: join(root, "data"),
-      SUMMING_CONFIG: configPath,
-      TELEGRAM_BOT_TOKEN: "test-token",
-      TELEGRAM_OWNER_ID: "42",
-      SUMMING_CONNECTIONS_URL: "https://connect.example.test/",
-      SUMMING_CONNECTION_TICKET_PRIVATE_KEY: privateKeyPath,
-      SUMMING_SECRETS_CONTROL_SOCKET: join(root, "control.sock"),
-    });
-    assert.equal(config.connectionsEnabled, true);
-    assert.equal(config.connectionsPublicUrl, "https://connect.example.test");
-    assert.equal(config.connectionTicketPrivateKeyPath, privateKeyPath);
-    assert.equal(config.secretBrokerControlSocket, join(root, "control.sock"));
-
-    assert.throws(
-      () => loadConfig({
-        SUMMING_DATA_DIR: join(root, "data"),
-        SUMMING_CONFIG: configPath,
-        TELEGRAM_BOT_TOKEN: "test-token",
-        TELEGRAM_OWNER_ID: "42",
-        SUMMING_CONNECTIONS_URL: "https://connect.example.test",
-      }),
-      (error) => error instanceof ConfigError && error.message.includes("configured together"),
-    );
-    assert.throws(
-      () => loadConfig({
-        SUMMING_DATA_DIR: join(root, "data"),
-        SUMMING_CONFIG: configPath,
-        TELEGRAM_BOT_TOKEN: "test-token",
-        TELEGRAM_OWNER_ID: "42",
-        SUMMING_CONNECTIONS_URL: "http://connect.example.test",
-        SUMMING_CONNECTION_TICKET_PRIVATE_KEY: privateKeyPath,
-      }),
-      (error) => error instanceof ConfigError && error.message.includes("must use HTTPS"),
-    );
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
 test("fails loudly without an owner", () => {
   const { root, configPath } = fixture();
   try {

@@ -1,5 +1,6 @@
 {
   "projectId": "ash-seo",
+  "workspaceId": "repo",
   "action": "run",
   "repository": "/var/lib/summing/data/repositories/ash-seo/ash-seo",
   "revision": "replace_me",

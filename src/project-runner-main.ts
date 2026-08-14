@@ -1,12 +1,14 @@
 import { ProjectRunnerServer } from "./project-runner-server.js";
+import { readEnvironmentKey } from "./project-environment.js";
 
 const server = new ProjectRunnerServer(
   process.env.SUMMING_RUNNER_SOCKET || "/run/summing-runner/runner.sock",
   process.env.SUMMING_RUNNER_DATA || "/var/lib/summing-runner/jobs",
   process.env.SUMMING_RUNNER_CONFIG || "/etc/summing-runner/projects",
   process.env.SUMMING_RUNNER_DOCKER || "/usr/bin/docker",
-  process.env.SUMMING_SECRETS_RUNTIME_SOCKET || "/run/summing-secrets/runtime.sock",
-  process.env.SUMMING_SECRETS_GATEWAY_SOCKET || "/run/summing-secrets/gateway.sock",
+  readEnvironmentKey(
+    process.env.SUMMING_RUNNER_ENV_KEY || "/etc/summing-runner/environment.key",
+  ),
 );
 
 const stop = (): void => {

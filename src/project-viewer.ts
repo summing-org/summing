@@ -1,6 +1,4 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { lstatSync, readFileSync } from "node:fs";
-import { issueConnectionTicket, ConnectionTicketError } from "./connection-ticket.js";
 import type { RuntimeConfig } from "./config.js";
 import {
   DeploymentController,
@@ -8,11 +6,6 @@ import {
   type DeploymentControl,
 } from "./deployment-controller.js";
 import { GitInspector, GitInspectorError } from "./git-inspector.js";
-import {
-  IntegrationManifestError,
-  loadIntegrationManifest,
-  type IntegrationDeclaration,
-} from "./integration-manifest.js";
 import type { ProjectCatalog } from "./project-catalog.js";
 import {
   ProjectRunnerClient,
@@ -20,12 +13,6 @@ import {
   type RunnerAction,
 } from "./project-runner-client.js";
 import { RunArtifactStore } from "./run-artifacts.js";
-import {
-  SecretBrokerClientError,
-  SecretBrokerControlClient,
-  type IntegrationModeOptions,
-} from "./secret-broker-client.js";
-import type { ConnectionSummary } from "./secret-vault.js";
 import type { Conversation, StateStore } from "./state-store.js";
 import { ViewerAuthenticator, ViewerAuthError } from "./viewer-auth.js";
 import { VIEWER_CSS, VIEWER_HTML, VIEWER_JS, VIEWER_LOGO_SVG } from "./viewer-assets.js";
@@ -34,28 +21,6 @@ interface ViewerScope {
   conversation: Conversation;
   inspector: GitInspector;
   project: { id: string; name: string; workspace: string };
-}
-
-function connectionReady(
-  integration: IntegrationDeclaration,
-  connection: ConnectionSummary | undefined,
-): boolean {
-  if (integration.auth === "none") return true;
-  if (!connection || connection.status !== "connected") return false;
-  return integration.mode !== "raw" || connection.rawGrant !== null;
-}
-
-function readConnectionSigningKey(path: string): Buffer {
-  const metadata = lstatSync(path);
-  if (
-    !metadata.isFile() ||
-    metadata.isSymbolicLink() ||
-    metadata.size > 64_000 ||
-    (metadata.mode & 0o007) !== 0
-  ) {
-    throw new Error("connection ticket signing key must be a non-public regular file under 64 KB");
-  }
-  return readFileSync(path);
 }
 
 class ViewerHttpError extends Error {
@@ -120,8 +85,6 @@ export class ProjectViewerServer {
   readonly artifacts: RunArtifactStore;
   readonly runner: ProjectRunnerClient;
   readonly deployment: DeploymentControl;
-  readonly secrets: SecretBrokerControlClient;
-  private readonly connectionTicketPrivateKey: Buffer | null;
 
   constructor(
     readonly config: RuntimeConfig,
@@ -136,10 +99,6 @@ export class ProjectViewerServer {
     );
     this.artifacts = new RunArtifactStore(config.dataDir);
     this.runner = new ProjectRunnerClient(config.runnerSocket);
-    this.secrets = new SecretBrokerControlClient(config.secretBrokerControlSocket);
-    this.connectionTicketPrivateKey = config.connectionsEnabled
-      ? readConnectionSigningKey(config.connectionTicketPrivateKeyPath)
-      : null;
     this.deployment = deployment ?? new DeploymentController(
       config.deploymentRequestPath,
       config.deploymentStatePath,
@@ -204,17 +163,36 @@ export class ProjectViewerServer {
         project: scope.project,
         repository: await scope.inspector.summary(),
         runnerAvailable: await this.runner.available(),
-        connectionsAvailable:
-          this.config.connectionsEnabled && await this.secrets.available(),
         administrator: this.isAdministrator(telegramUser),
         deploymentAvailable: this.isAdministrator(telegramUser) && this.deployment.available,
       });
       return;
     }
-    if (request.method === "GET" && url.pathname === "/api/viewer/connections") {
+    if (request.method === "GET" && url.pathname === "/api/viewer/environment") {
       const scope = await this.scope(conversationId, telegramUser);
-      const state = await this.connectionState(scope);
-      json(response, 200, state);
+      this.requireEnvironmentAdministrator(telegramUser);
+      json(response, 200, {
+        environment: await this.runner.environment(scope.project.id, scope.project.workspace),
+      });
+      return;
+    }
+    if (request.method === "PUT" && url.pathname === "/api/viewer/environment") {
+      const scope = await this.scope(conversationId, telegramUser);
+      this.requireEnvironmentAdministrator(telegramUser);
+      const body = await requestBody(request, 1_100_000) as Record<string, unknown> | null;
+      const text = body?.text;
+      const expectedRevision = body?.expectedRevision;
+      if (typeof text !== "string" || typeof expectedRevision !== "number") {
+        throw new ViewerHttpError(400, "text and expectedRevision are required");
+      }
+      json(response, 200, {
+        environment: await this.runner.saveEnvironment(
+          scope.project.id,
+          scope.project.workspace,
+          text,
+          expectedRevision,
+        ),
+      });
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/viewer/tree") {
@@ -261,7 +239,7 @@ export class ProjectViewerServer {
       const available = await this.runner.available();
       json(response, 200, {
         available,
-        jobs: available ? await this.runner.jobs(scope.project.id) : [],
+        jobs: available ? await this.runner.jobs(scope.project.id, scope.project.workspace) : [],
       });
       return;
     }
@@ -316,26 +294,6 @@ export class ProjectViewerServer {
       }
       const scope = await this.scope(requestedConversation, telegramUser);
       if (!(await this.runner.available())) throw new ViewerHttpError(503, "runner is unavailable");
-      if (action === "dry-run" || action === "run") {
-        const connectionState = await this.connectionState(scope);
-        const missing = connectionState.integrations.filter((integration) =>
-          integration.actions.includes(action) &&
-          integration.auth !== "none" &&
-          !connectionReady(
-            integration,
-            connectionState.connections.find((connection) =>
-              connection.integrationId === integration.id &&
-              connection.environment === integration.environment,
-            ),
-          ),
-        );
-        if (missing.length > 0) {
-          throw new ViewerHttpError(
-            409,
-            `missing connections: ${missing.map((item) => `${item.id}@${item.environment}`).join(", ")}`,
-          );
-        }
-      }
       const repository = await scope.inspector.summary();
       if (action === "run" && repository.dirty) {
         throw new ViewerHttpError(409, "live run requires a clean committed worktree");
@@ -345,69 +303,27 @@ export class ProjectViewerServer {
           ? repository.head
           : await scope.inspector.snapshot(`${action} requested from viewer`);
       const archive = await scope.inspector.archive(revision);
-      const job = await this.runner.submit(scope.project.id, action, revision, archive);
-      json(response, 202, { job });
-      return;
-    }
-    if (request.method === "POST" && url.pathname === "/api/viewer/connection-ticket") {
-      if (!this.config.connectionsEnabled || !this.connectionTicketPrivateKey) {
-        throw new ViewerHttpError(503, "connections are not configured");
-      }
-      if (!(await this.secrets.available())) throw new ViewerHttpError(503, "secret broker is unavailable");
-      const body = await requestBody(request) as Record<string, unknown> | null;
-      const requestedConversation = String(body?.conversation ?? "");
-      const integrationId = String(body?.integration ?? "");
-      const environment = String(body?.environment ?? "");
-      const scope = await this.scope(requestedConversation, telegramUser);
-      const manifest = loadIntegrationManifest(scope.inspector.root);
-      const integration = manifest.integrations.find((item) =>
-        item.id === integrationId && item.environment === environment,
-      );
-      if (!integration) throw new ViewerHttpError(404, "integration declaration not found");
-      if (integration.auth === "none") throw new ViewerHttpError(400, "integration does not require credentials");
-      const userId = telegramUser === 0 ? this.config.telegramOwnerId : telegramUser;
-      const ticket = issueConnectionTicket(
-        this.connectionTicketPrivateKey,
-        userId,
+      const job = await this.runner.submit(
         scope.project.id,
-        integration,
+        scope.project.workspace,
+        action,
+        revision,
+        archive,
       );
-      json(response, 201, {
-        url: `${this.config.connectionsPublicUrl}/connections#ticket=${encodeURIComponent(ticket)}`,
-        expiresIn: 300,
-      });
+      json(response, 202, { job });
       return;
     }
     throw new ViewerHttpError(404, "not found");
   }
 
-  private async connectionState(scope: ViewerScope): Promise<{
-    available: boolean;
-    integrations: IntegrationDeclaration[];
-    connections: ConnectionSummary[];
-    modes: IntegrationModeOptions[];
-  }> {
-    const integrations = loadIntegrationManifest(scope.inspector.root).integrations;
-    if (!this.config.connectionsEnabled) {
-      return { available: false, integrations, connections: [], modes: [] };
-    }
-    const available = await this.secrets.available();
-    const [connections, modes] = available
-      ? await Promise.all([
-        this.secrets.connections(scope.project.id),
-        this.secrets.modeOptions(integrations),
-      ])
-      : [[], []];
-    return {
-      available,
-      integrations,
-      connections,
-      modes,
-    };
-  }
-
   private isAdministrator(telegramUser: number): boolean {
     return telegramUser === 0 || telegramUser === this.config.telegramOwnerId;
+  }
+
+  private requireEnvironmentAdministrator(telegramUser: number): void {
+    if (!this.isAdministrator(telegramUser)) {
+      throw new ViewerHttpError(403, "project environments are available only to the administrator");
+    }
   }
 
   private requireAdministrator(telegramUser: number): void {
@@ -461,21 +377,12 @@ export class ProjectViewerServer {
       return;
     }
     if (error instanceof ProjectRunnerClientError) {
-      json(response, 503, { error: error.message });
+      json(response, error.status >= 400 && error.status < 500 ? error.status : 503, {
+        error: error.message,
+      });
       return;
     }
     if (error instanceof DeploymentControllerError) {
-      json(response, 503, { error: error.message });
-      return;
-    }
-    if (
-      error instanceof IntegrationManifestError ||
-      error instanceof ConnectionTicketError
-    ) {
-      json(response, 400, { error: error.message });
-      return;
-    }
-    if (error instanceof SecretBrokerClientError) {
       json(response, 503, { error: error.message });
       return;
     }

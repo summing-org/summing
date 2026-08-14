@@ -236,6 +236,18 @@ export class GitInspector {
     return text(result).trim();
   }
 
+  private async removePrivateIndexEntries(env: NodeJS.ProcessEnv): Promise<void> {
+    const indexed = text(await this.git(["ls-files", "-z"], { env }))
+      .split("\0")
+      .filter((path) => path && deniedPath(path));
+    for (let offset = 0; offset < indexed.length; offset += 100) {
+      await this.git(
+        ["update-index", "--force-remove", "--", ...indexed.slice(offset, offset + 100)],
+        { env },
+      );
+    }
+  }
+
   async snapshot(label: string): Promise<string> {
     const directory = await mkdtemp(join(tmpdir(), "summing-index-"));
     const indexPath = join(directory, "index");
@@ -243,6 +255,7 @@ export class GitInspector {
     try {
       await this.git(["read-tree", "HEAD"], { env });
       await this.git(["add", "-A", "--", "."], { env });
+      await this.removePrivateIndexEntries(env);
       const tree = text(await this.git(["write-tree"], { env })).trim();
       const head = text(await this.git(["rev-parse", "HEAD"])).trim();
       const committed = await this.git(
@@ -257,15 +270,27 @@ export class GitInspector {
 
   async archive(revision: string): Promise<Buffer> {
     const resolved = await this.resolveRevision(revision);
-    const result = await command(
-      "git",
-      ["-C", this.root, "archive", "--format=tar", resolved],
-      this.root,
-      process.env,
-      MAX_ARCHIVE_BYTES,
-    );
-    if (result.code !== 0) throw new GitInspectorError(result.stderr.trim() || "git archive failed");
-    return result.stdout;
+    const directory = await mkdtemp(join(tmpdir(), "summing-archive-index-"));
+    const indexPath = join(directory, "index");
+    const env = { ...process.env, GIT_INDEX_FILE: indexPath };
+    try {
+      await this.git(["read-tree", resolved], { env });
+      await this.removePrivateIndexEntries(env);
+      const tree = text(await this.git(["write-tree"], { env })).trim();
+      const result = await command(
+        "git",
+        ["-C", this.root, "archive", "--format=tar", tree],
+        this.root,
+        process.env,
+        MAX_ARCHIVE_BYTES,
+      );
+      if (result.code !== 0) {
+        throw new GitInspectorError(result.stderr.trim() || "git archive failed");
+      }
+      return result.stdout;
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   }
 
   static async worktreeRoot(path: string): Promise<string> {

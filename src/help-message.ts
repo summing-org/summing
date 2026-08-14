@@ -31,7 +31,7 @@ export function helpMessage(isAdministrator: boolean): string {
     example("/bind shop backend"),
     command("/status", "показать версию SUMMING, состояние Codex, привязку и очередь"),
     command("/files", "открыть дерево файлов, diff и project runner"),
-    command("/connections", "безопасно подключить API key или OAuth provider"),
+    command("/env", "открыть энвы репозитория"),
     "",
     bold("Работа"),
     text("Отправьте задачу обычным сообщением"),

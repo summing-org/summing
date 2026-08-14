@@ -73,10 +73,6 @@ export class RuntimeConfig {
     readonly codexLimitsProfileEnabled = true,
     readonly codexLimitsRefreshIntervalSeconds = 900,
     readonly codexLimitsTimeZone = "Europe/Moscow",
-    readonly connectionsEnabled = false,
-    readonly connectionsPublicUrl = "",
-    readonly connectionTicketPrivateKeyPath = "",
-    readonly secretBrokerControlSocket = "/run/summing-secrets/control.sock",
   ) {}
 
   project(projectId: string): ProjectConfig {
@@ -232,7 +228,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig 
   const codexUsage = table(raw.codex_usage) ?? {};
   const health = table(raw.health) ?? {};
   const viewer = table(raw.viewer) ?? {};
-  const connections = table(raw.connections) ?? {};
   const codexHome = expandPath(env.CODEX_HOME || `${dataDir}/codex`, "CODEX_HOME");
   const worktreeRoot = expandPath(
     env.SUMMING_WORKTREE_ROOT || `${dataDir}/worktrees`,
@@ -272,31 +267,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig 
   if (viewerPublicUrl && !viewerPublicUrl.startsWith("https://")) {
     throw new ConfigError("viewer.public_url must use HTTPS");
   }
-  const connectionsPublicUrl = String(
-    env.SUMMING_CONNECTIONS_URL || connections.public_url || "",
-  ).trim().replace(/\/$/, "");
-  if (connectionsPublicUrl && !connectionsPublicUrl.startsWith("https://")) {
-    throw new ConfigError("connections.public_url must use HTTPS");
-  }
-  const ticketPrivateKeyRaw = String(
-    env.SUMMING_CONNECTION_TICKET_PRIVATE_KEY || connections.ticket_private_key || "",
-  ).trim();
-  const connectionsEnabled = Boolean(connectionsPublicUrl || ticketPrivateKeyRaw);
-  if (connectionsEnabled && (!connectionsPublicUrl || !ticketPrivateKeyRaw)) {
-    throw new ConfigError(
-      "connections.public_url and connections.ticket_private_key must be configured together",
-    );
-  }
-  const ticketPrivateKey = ticketPrivateKeyRaw
-    ? expandPath(ticketPrivateKeyRaw, "connections.ticket_private_key")
-    : "";
-  const brokerControlSocket = expandPath(
-    env.SUMMING_SECRETS_CONTROL_SOCKET ||
-      connections.control_socket ||
-      "/run/summing-secrets/control.sock",
-    "connections.control_socket",
-  );
-
   return new RuntimeConfig(
     dataDir,
     codexHome,
@@ -378,9 +348,5 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig 
       true,
     ),
     timeZone(codexUsage.timezone ?? "Europe/Moscow", "codex_usage.timezone"),
-    connectionsEnabled,
-    connectionsPublicUrl,
-    ticketPrivateKey,
-    brokerControlSocket,
   );
 }
