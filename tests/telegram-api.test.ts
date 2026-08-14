@@ -94,6 +94,30 @@ test("setMyShortDescription updates the bot profile within Telegram limits", asy
   }
 });
 
+test("setChatMenuButton installs the administrator Mini App entry point", async () => {
+  const api = new TelegramAPI("token");
+  let payload: Record<string, unknown> = {};
+  api.call = async (method, input) => {
+    assert.equal(method, "setChatMenuButton");
+    payload = input;
+    return true;
+  };
+
+  try {
+    await api.setChatMenuButton(42, "https://summing.example/admin");
+    assert.deepEqual(payload, {
+      chat_id: 42,
+      menu_button: {
+        type: "web_app",
+        text: "Управление",
+        web_app: { url: "https://summing.example/admin" },
+      },
+    });
+  } finally {
+    await api.close();
+  }
+});
+
 test("deleteMessage removes intercepted incoming credentials", async () => {
   const api = new TelegramAPI("token");
   let payload: Record<string, unknown> = {};

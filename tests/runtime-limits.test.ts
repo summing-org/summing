@@ -72,12 +72,12 @@ test("administrator reads VPS limits and refreshes the bot profile", async () =>
     assert.match(replies.at(-1) ?? "", /Codex limits на VPS/);
     assert.match(replies.at(-1) ?? "", /Неделя: 60% осталось/);
     assert.match(profiles.at(-1) ?? "", /^🟢 Codex: неделя 60%/);
-    assert.match(profiles.at(-1) ?? "", / · SUMMING 9\.3\.3$/);
+    assert.match(profiles.at(-1) ?? "", / · SUMMING 9\.4\.0$/);
     assert.equal(
       (runtime.status().codex_limits as Record<string, unknown>).weekly_remaining_percent,
       60,
     );
-    assert.equal(runtime.status().version, "9.3.3");
+    assert.equal(runtime.status().version, "9.4.0");
 
     await handleMessage({
       message_id: 2,
@@ -85,7 +85,7 @@ test("administrator reads VPS limits and refreshes the bot profile", async () =>
       from: { id: 1 },
       chat: { id: 1, type: "private" },
     });
-    assert.match(replies.at(-1) ?? "", /^SUMMING: 9\.3\.3$/m);
+    assert.match(replies.at(-1) ?? "", /^SUMMING: 9\.4\.0$/m);
   } finally {
     runtime.requestStop();
     runtime.state.close();

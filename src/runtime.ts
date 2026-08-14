@@ -326,7 +326,16 @@ export class SummingRuntime {
         ? new GroqWhisperTranscriber(config.groqApiKey, config.transcriptionModel)
         : new OpenAITranscriber(config.openaiApiKey, config.transcriptionModel);
     this.health = new HealthServer("127.0.0.1", config.healthPort, () => this.status());
-    this.viewer = new ProjectViewerServer(config, this.state, this.projects);
+    this.viewer = new ProjectViewerServer(
+      config,
+      this.state,
+      this.projects,
+      undefined,
+      (conversation) => this.processors.has(conversation.id),
+      (chatId, topicId) => {
+        this.unboundTopicMessages.delete(this.unboundTopicKey(chatId, topicId));
+      },
+    );
     this.semaphore = new Semaphore(config.maxParallelConversations);
   }
 
@@ -355,6 +364,15 @@ export class SummingRuntime {
       this.scheduleCodexLimitsRefresh();
       await this.health.start();
       await this.viewer.start();
+      if (this.config.viewerPublicUrl) {
+        void this.telegram.setChatMenuButton(
+            this.config.telegramOwnerId,
+            this.adminViewerUrl(),
+          )
+          .catch((error) => {
+            console.warn("could not configure the administrator Mini App menu button", error);
+          });
+      }
       environmentMigrationTask = productionEnvironmentMigrationCoordinator(
         this.config.runnerSocket,
       ).run(this.shutdownController.signal).catch((error) => {
@@ -1323,6 +1341,26 @@ export class SummingRuntime {
       await this.sendViewerButton(chatId, messageId, target, "environment");
       return;
     }
+    if (
+      (command === "/start" && !argument) ||
+      command === "/admin"
+    ) {
+      if (isAdministrator && chatType === "private" && this.config.viewerPublicUrl) {
+        await this.sendAdminButton(chatId, messageId);
+        return;
+      }
+      if (command === "/admin") {
+        await this.reply(
+          chatId,
+          topicId,
+          messageId,
+          isAdministrator
+            ? "Центр управления открывается в личном чате с ботом."
+            : "Центр управления доступен только администратору.",
+        );
+        return;
+      }
+    }
     if (command === "/start" || command === "/help") {
       await this.telegram.sendMessage(chatId, helpMessage(isAdministrator), {
         topicId,
@@ -1846,6 +1884,27 @@ export class SummingRuntime {
         inline_keyboard: [[{ text: `Открыть ${title}`, web_app: { url } }]],
       },
     });
+  }
+
+  private adminViewerUrl(): string {
+    return `${this.config.viewerPublicUrl}/admin`;
+  }
+
+  private async sendAdminButton(chatId: number, replyTo: number): Promise<void> {
+    const url = this.adminViewerUrl();
+    void this.telegram.setChatMenuButton(chatId, url).catch((error) => {
+      console.warn("could not refresh the administrator Mini App menu button", error);
+    });
+    await this.telegram.sendMessage(
+      chatId,
+      "Центр управления SUMMING\nПроекты, репозитории и привязки Telegram-топиков — в одном интерфейсе.",
+      {
+        replyTo,
+        replyMarkup: {
+          inline_keyboard: [[{ text: "Открыть центр управления", web_app: { url } }]],
+        },
+      },
+    );
   }
 
   private async reply(chatId: number, topicId: number, messageId: number, text: string): Promise<void> {

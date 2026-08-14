@@ -23,6 +23,7 @@ function example(value: string): string {
 export function helpMessage(isAdministrator: boolean): string {
   const lines = [
     bold("Помощь по SUMMING"),
+    text("Для администратора основной интерфейс — Mini App «Управление» в меню личного чата."),
     `${text("Аргументы в ")}${code("<угловых скобках>")}${text(" обязательны, в ")}${code("[квадратных]")}${text(" — нет")}`,
     "",
     bold("Проекты"),
@@ -54,6 +55,8 @@ export function helpMessage(isAdministrator: boolean): string {
     lines.push(
       "",
       bold("Только для администратора"),
+      text("Команды ниже остаются резервным интерфейсом для диагностики и восстановления."),
+      command("/admin", "открыть центр управления Mini App"),
       command("/login", "войти в ChatGPT через device code в личном чате"),
       command("/limits", "показать 5-часовой и недельный Codex limits этого VPS"),
       command("/topics", "показать обнаруженные Telegram группы, топики и привязки"),

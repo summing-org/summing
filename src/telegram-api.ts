@@ -84,6 +84,17 @@ export class TelegramAPI {
     });
   }
 
+  async setChatMenuButton(chatId: number, url: string, text = "Управление"): Promise<void> {
+    await this.call("setChatMenuButton", {
+      chat_id: chatId,
+      menu_button: {
+        type: "web_app",
+        text: text.slice(0, 64),
+        web_app: { url },
+      },
+    });
+  }
+
   async downloadFile(
     fileId: string,
     maximumBytes: number,

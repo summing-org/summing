@@ -1,12 +1,13 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import type { RuntimeConfig } from "./config.js";
+import { ConfigError, type RuntimeConfig } from "./config.js";
+import { ADMIN_CSS, ADMIN_HTML, ADMIN_JS } from "./admin-assets.js";
 import {
   DeploymentController,
   DeploymentControllerError,
   type DeploymentControl,
 } from "./deployment-controller.js";
 import { GitInspector, GitInspectorError } from "./git-inspector.js";
-import type { ProjectCatalog } from "./project-catalog.js";
+import { ProjectCatalogError, type ProjectCatalog } from "./project-catalog.js";
 import {
   ProjectRunnerClient,
   ProjectRunnerClientError,
@@ -94,6 +95,7 @@ async function requestBody(request: IncomingMessage, maximumBytes = 16_384): Pro
 export class ProjectViewerServer {
   private server: Server | null = null;
   private readonly repositoryOperations = new Set<string>();
+  private readonly projectOperations = new Set<string>();
   readonly auth: ViewerAuthenticator;
   readonly artifacts: RunArtifactStore;
   readonly runner: ProjectRunnerClient;
@@ -105,6 +107,8 @@ export class ProjectViewerServer {
     readonly state: StateStore,
     readonly projects: ProjectCatalog,
     deployment?: DeploymentControl,
+    readonly bindingBusy: (conversation: Conversation) => boolean = () => false,
+    readonly afterTopicBound: (chatId: number, topicId: number) => void = () => {},
   ) {
     this.auth = new ViewerAuthenticator(
       config.telegramToken,
@@ -145,6 +149,23 @@ export class ProjectViewerServer {
 
   private async route(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const url = new URL(request.url ?? "/", "http://viewer.local");
+    if (
+      request.method === "GET" &&
+      (url.pathname === "/admin" ||
+        url.pathname === "/admin/" ||
+        url.pathname === "/admin/index.html")
+    ) {
+      asset(response, "text/html; charset=utf-8", ADMIN_HTML);
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/admin.css") {
+      asset(response, "text/css; charset=utf-8", ADMIN_CSS);
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/admin.js") {
+      asset(response, "text/javascript; charset=utf-8", ADMIN_JS);
+      return;
+    }
     if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
       asset(response, "text/html; charset=utf-8", VIEWER_HTML);
       return;
@@ -166,6 +187,91 @@ export class ProjectViewerServer {
     const telegramUser = this.auth.authenticate(
       request.headers as Record<string, string | string[] | undefined>,
     );
+    if (request.method === "GET" && url.pathname === "/api/viewer/admin") {
+      this.requireAdminAccess(telegramUser);
+      json(response, 200, this.adminOverview());
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/viewer/admin/projects") {
+      this.requireAdminAccess(telegramUser);
+      const body = await requestBody(request) as Record<string, unknown> | null;
+      const mode = String(body?.mode ?? "");
+      const projectId = String(body?.projectId ?? "").trim().toLowerCase();
+      if (mode !== "empty" && mode !== "clone") {
+        throw new ViewerHttpError(400, "выберите создание или клонирование проекта");
+      }
+      if (!projectId) throw new ViewerHttpError(400, "projectId is required");
+      if (this.projectOperations.has(projectId)) {
+        throw new ViewerHttpError(409, `проект '${projectId}' уже создаётся`);
+      }
+      this.projectOperations.add(projectId);
+      try {
+        const project = mode === "clone"
+          ? await this.projects.cloneRemote(
+            body?.projectId,
+            body?.ownerId,
+            body?.workspaceId,
+            String(body?.remoteUrl ?? ""),
+          )
+          : await this.projects.createLocal(body?.projectId, body?.ownerId, body?.workspaceId);
+        json(response, 201, {
+          project: {
+            id: project.id,
+            name: project.name,
+            defaultWorkspaceId: project.defaultWorkspace,
+            workspaces: [...project.workspaces.values()].map((workspace) => ({ id: workspace.id })),
+          },
+        });
+      } finally {
+        this.projectOperations.delete(projectId);
+      }
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/viewer/admin/bindings") {
+      this.requireAdminAccess(telegramUser);
+      const body = await requestBody(request) as Record<string, unknown> | null;
+      const chatId = Number(body?.chatId);
+      const topicId = Number(body?.topicId);
+      if (!Number.isSafeInteger(chatId) || chatId === 0) {
+        throw new ViewerHttpError(400, "некорректный chatId");
+      }
+      if (!Number.isSafeInteger(topicId) || topicId < 0) {
+        throw new ViewerHttpError(400, "некорректный topicId");
+      }
+      const chat = this.state.telegramChat(chatId);
+      const topic = this.state.telegramTopic(chatId, topicId);
+      if (!chat || !topic) {
+        throw new ViewerHttpError(404, "Telegram-топик ещё не обнаружен SUMMING");
+      }
+      if (chat.type !== "supergroup") {
+        throw new ViewerHttpError(409, "привязать можно только топик Telegram supergroup");
+      }
+      if (["left", "kicked"].includes(chat.botStatus)) {
+        throw new ViewerHttpError(409, "бот больше не состоит в выбранной группе");
+      }
+      const project = this.projects.project(body?.projectId as string);
+      const workspace = project.workspace(String(body?.workspaceId ?? ""));
+      const current = this.state.byTopic(chatId, topicId);
+      if (current?.projectId === project.id && current.workspaceId === workspace.id) {
+        json(response, 200, { conversation: current });
+        return;
+      }
+      if (
+        current &&
+        (current.activeTurnId !== null ||
+          this.state.pendingAll(current.id).length > 0 ||
+          this.bindingBusy(current))
+      ) {
+        throw new ViewerHttpError(
+          409,
+          "в выбранном топике есть активная или ожидающая задача; сначала отмените её",
+        );
+      }
+      const conversation = this.state.bind(chatId, topicId, project.id, workspace.id);
+      this.afterTopicBound(chatId, topicId);
+      json(response, 200, { conversation });
+      return;
+    }
     const conversationId =
       request.method === "POST"
         ? ""
@@ -420,6 +526,77 @@ export class ProjectViewerServer {
     return telegramUser === 0 || telegramUser === this.config.telegramOwnerId;
   }
 
+  private requireAdminAccess(telegramUser: number): void {
+    if (!this.isAdministrator(telegramUser)) {
+      throw new ViewerHttpError(403, "центр управления доступен только администратору SUMMING");
+    }
+  }
+
+  private adminOverview(): Record<string, unknown> {
+    const conversations = this.state.listConversations();
+    const bindingsByTopic = new Map(
+      conversations.map((conversation) => [
+        `${conversation.chatId}:${conversation.topicId}`,
+        conversation,
+      ]),
+    );
+    const projectBindings = new Map<string, number>();
+    for (const conversation of conversations) {
+      projectBindings.set(
+        conversation.projectId,
+        (projectBindings.get(conversation.projectId) ?? 0) + 1,
+      );
+    }
+    const projects = this.projects.all().map((entry) => ({
+      id: entry.project.id,
+      name: entry.project.name,
+      ownerId: entry.ownerId,
+      managed: entry.managed,
+      selfChange: entry.project.selfChange,
+      defaultWorkspaceId: entry.project.defaultWorkspace,
+      workspaces: [...entry.project.workspaces.values()].map((workspace) => ({ id: workspace.id })),
+      bindingCount: projectBindings.get(entry.project.id) ?? 0,
+    }));
+    let topics = 0;
+    let bindings = 0;
+    const chats = this.state.listTelegramChats().map((chat) => ({
+      chatId: chat.chatId,
+      type: chat.type,
+      title: chat.title,
+      username: chat.username,
+      isForum: chat.isForum,
+      botStatus: chat.botStatus,
+      updatedAt: chat.updatedAt,
+      topics: this.state.listTelegramTopics(chat.chatId).map((topic) => {
+        topics += 1;
+        const conversation = bindingsByTopic.get(`${topic.chatId}:${topic.topicId}`);
+        if (conversation) bindings += 1;
+        return {
+          topicId: topic.topicId,
+          name: topic.name,
+          updatedAt: topic.updatedAt,
+          binding: conversation
+            ? {
+                conversationId: conversation.id,
+                projectId: conversation.projectId,
+                workspaceId: conversation.workspaceId,
+                busy:
+                  conversation.activeTurnId !== null ||
+                  this.state.pendingAll(conversation.id).length > 0 ||
+                  this.bindingBusy(conversation),
+              }
+            : null,
+        };
+      }),
+    }));
+    return {
+      administratorId: this.config.telegramOwnerId,
+      counts: { projects: projects.length, topics, bindings },
+      projects,
+      chats,
+    };
+  }
+
   private requireEnvironmentAdministrator(telegramUser: number): void {
     if (!this.isAdministrator(telegramUser)) {
       throw new ViewerHttpError(403, "project environments are available only to the administrator");
@@ -522,6 +699,14 @@ export class ProjectViewerServer {
     }
     if (error instanceof GitInspectorError) {
       json(response, 400, { error: error.message });
+      return;
+    }
+    if (error instanceof ConfigError) {
+      json(response, 400, { error: error.message });
+      return;
+    }
+    if (error instanceof ProjectCatalogError) {
+      json(response, 409, { error: error.message });
       return;
     }
     if (error instanceof ProjectRunnerClientError) {

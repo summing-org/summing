@@ -1,6 +1,6 @@
-# SUMMING 9.3: архитектура, эксплуатация и разработка
+# SUMMING 9.4: архитектура, эксплуатация и разработка
 
-> Версия: **9.3.3**
+> Версия: **9.4.0**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
 > Последняя сверка с кодом: **14 августа 2026 года**.
 
@@ -658,6 +658,15 @@ mobile-first интерфейс и JSON API показывают:
   текущей ветки относительно remote и явные Pull/Push;
 - очередь, статусы и журналы project runner.
 
+Тот же server публикует отдельный администраторский Mini App на `/admin`, которому
+не нужна заранее созданная Conversation. Он показывает каталог статических и
+управляемых Project, обнаруженные Telegram supergroup/topics, их текущее binding и
+busy-состояние. Администратор может создать пустой managed Git Project или
+клонировать remote, выбрать Project/Workspace для топика и выполнить bind/rebind.
+Перепривязка отклоняется, пока у Conversation есть active turn, processor или
+pending input; успешная смена использует тот же `StateStore.bind`, сбрасывает оба
+Codex thread и worktree path и очищает непостоянный unbound-контекст топика.
+
 HTTPS-запрос Mini App должен содержать Telegram `initData`. Backend заново
 проверяет HMAC, `auth_date`, Telegram user id и Project owner ACL; данные из
 `initDataUnsafe` не являются authority. Локальный bearer token предназначен
@@ -712,8 +721,11 @@ Production Mini App работает на `https://assist.summing.org`. Installe
 `SUMMING_VIEWER_REDIRECT_DOMAIN=ash.summing.org`: Caddy сначала валидирует
 временный конфиг, затем атомарно устанавливает основной reverse proxy и
 постоянный redirect старого адреса с сохранением URI. Runtime получает основной
-URL через `SUMMING_VIEWER_URL`; persistent Telegram menu button не требуется,
-поскольку `/files` формирует актуальную `web_app` button при каждом ответе.
+URL через `SUMMING_VIEWER_URL`. Runtime устанавливает для личного чата точного
+`TELEGRAM_OWNER_ID` постоянную кнопку меню **Управление**, ведущую на `/admin`;
+первый `/start` также обновляет menu button и возвращает inline `web_app` button.
+Project owner по-прежнему открывает конкретный viewer через `/files`, поэтому не
+получает администраторскую точку входа или список чужих проектов.
 
 До editor Codex turn host создаёт временный Git commit через отдельный index,
 не меняя branch или настоящий index worktree. После turn создаётся второй
@@ -737,7 +749,8 @@ worktree. `run` требует чистый committed `HEAD`. Периодиче
 
 | Команда | Поведение |
 |---|---|
-| `/start`, `/help` | Подробная Markdown-справка с назначением команд и примерами; администратор также видит свой блок команд. |
+| `/start`, `/help` | `/start` в личном чате администратора открывает центр управления и устанавливает menu button; `/help` сохраняет подробную резервную справку. |
+| `/admin` | Повторно показать кнопку администраторского Mini App; только администратор в личном чате. |
 | `/login` | Device-code login; только администратор в личном чате. |
 | `/limits` | 5-часовой и недельный остаток VPS-аккаунта; только администратор в личном чате. |
 | `/project_create <project> <owner_id> <repo>` | Создать пустой управляемый Git Project; только администратор в личном чате. |
@@ -1069,9 +1082,11 @@ journalctl -u summing -f
 curl --fail http://127.0.0.1:8765/health
 ```
 
-После первого запуска откройте личный чат с ботом, отправьте `/login`, завершите
-ChatGPT device-code flow, создайте Project через `/project_create` или
-`/project_clone`, затем создайте forum group/topics и выполните `/bind`.
+После первого запуска откройте личный чат с ботом, отправьте `/start` и откройте
+**Управление**. Завершите ChatGPT device-code flow через резервную команду
+`/login`, создайте Project в Mini App, затем создайте forum group/topics,
+отправьте в них по сообщению и выберите binding в интерфейсе. `/project_create`,
+`/project_clone` и `/bind_topic` остаются резервным совместимым путём.
 
 ### 13.7. Атомарные обновления из origin
 
@@ -1209,7 +1224,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "9.3.3",
+  "version": "9.4.0",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",
