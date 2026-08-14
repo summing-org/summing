@@ -187,8 +187,10 @@ function safeRemoteUrl(value: string): string {
   try {
     const parsed = new URL(value);
     if (!["http:", "https:", "ssh:"].includes(parsed.protocol)) return value;
-    parsed.username = "";
-    parsed.password = "";
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+      parsed.username = "";
+      parsed.password = "";
+    }
     parsed.search = "";
     parsed.hash = "";
     return parsed.toString();

@@ -52,6 +52,18 @@ test("shows tracked and untracked files without exposing secrets", async () => {
     const unsafeRemote = await inspector.repositoryStatus();
     assert.equal(unsafeRemote.state, "error");
     assert.match(unsafeRemote.message, /token нельзя хранить в Git URL/);
+    execFileSync("git", [
+      "-C",
+      root,
+      "remote",
+      "set-url",
+      "origin",
+      "ssh://git@example.test/owner/project.git",
+    ]);
+    assert.equal(
+      (await inspector.summary()).remote,
+      "ssh://git@example.test/owner/project.git",
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
