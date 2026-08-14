@@ -182,7 +182,9 @@ SSH/credential helper для системного пользователя `summ
 Назначенный владелец должен сначала открыть бота и отправить `/start`. После
 этого ему доступны `/projects`, `/bind` и рабочие команды его проектов. Все
 владельцы используют общий ChatGPT/Codex account администратора, но каждый
-Codex-turn получает restricted read roots своего conversation worktree.
+Codex-turn получает roots своего conversation worktree. Write-run владельца также
+получает только project-scoped общий Git directory linked worktree, поэтому может
+выполнять обычные `fetch`, commit и rebase; read-only run участника этот root не получает.
 
 После `/bind` любой другой пользователь, который пишет в этом group topic,
 получает только Q&A-доступ: бот может читать исходники и объяснять реализацию.

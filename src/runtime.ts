@@ -1025,7 +1025,9 @@ export class SummingRuntime {
         model: this.config.model,
         effort: this.config.effort,
         networkAccess: false,
+        gitMetadataRoots: [],
         readableRoots: [cwd],
+        readOnly: true,
       });
       active.turnId = turnId;
       this.activeUnboundByTurn.set(turnId, active);
@@ -2110,7 +2112,9 @@ export class SummingRuntime {
           effort: this.config.effort,
           networkAccess: access === "write" && this.config.networkAccess,
           ...(responseMode === "ambient" ? { outputSchema: AMBIENT_DECISION_SCHEMA } : {}),
+          gitMetadataRoots: prepared.gitMetadataRoots,
           readableRoots: [prepared.readableRoot],
+          readOnly: access === "read-only",
         },
       );
       active.turnId = turnId;

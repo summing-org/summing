@@ -105,7 +105,7 @@ test("thread and turn requests use official v2 shapes", async (context) => {
   const threadParams = client.calls[0]?.[1] ?? {};
   assert.equal(Object.hasOwn(threadParams, "sandbox"), false);
   assert.equal(threadParams.permissions, "summing-project");
-  assert.deepEqual(threadParams.runtimeWorkspaceRoots, ["/tmp/project"]);
+  assert.deepEqual(threadParams.runtimeWorkspaceRoots, ["/tmp/project", "/tmp/project-git"]);
   assert.equal(Object.hasOwn(threadParams, "environments"), false);
   assert.deepEqual(threadParams.dynamicTools, []);
   assert.deepEqual(threadParams.selectedCapabilityRoots, []);
@@ -166,9 +166,14 @@ test("thread and turn requests use official v2 shapes", async (context) => {
   const turnParams = client.calls[1]?.[1] ?? {};
   assert.equal(Object.hasOwn(turnParams, "sandboxPolicy"), false);
   assert.equal(Object.hasOwn(turnParams, "permissions"), false);
-  assert.deepEqual(turnParams.runtimeWorkspaceRoots, ["/tmp/project"]);
+  assert.deepEqual(turnParams.runtimeWorkspaceRoots, ["/tmp/project", "/tmp/project-git"]);
   assert.deepEqual(turnParams.outputSchema, outputSchema);
   assert.equal(Object.hasOwn(turnParams, "environments"), false);
+
+  await client.resumeThread(threadId, "/tmp/project/workspace", permissionOptions);
+  const resumeParams = client.calls[2]?.[1] ?? {};
+  assert.equal(resumeParams.permissions, "summing-project");
+  assert.deepEqual(resumeParams.runtimeWorkspaceRoots, ["/tmp/project", "/tmp/project-git"]);
 
   await client.startThread("/tmp/project/workspace", "", {
     deniedPaths: ["workspace/deep/secrets/.env"],
@@ -179,7 +184,7 @@ test("thread and turn requests use official v2 shapes", async (context) => {
     readOnly: true,
     ephemeral: true,
   });
-  const readOnlyParams = client.calls[2]?.[1] ?? {};
+  const readOnlyParams = client.calls[3]?.[1] ?? {};
   assert.equal(readOnlyParams.permissions, "summing-project-readonly");
   assert.deepEqual(readOnlyParams.environments, []);
   assert.equal(readOnlyParams.ephemeral, true);
@@ -234,11 +239,18 @@ test("thread and turn requests use official v2 shapes", async (context) => {
     web_search: "disabled",
   });
 
+  await client.startTurn(threadId, "inspect read-only", "/tmp/project/workspace", {
+    ...permissionOptions,
+    readOnly: true,
+  });
+  const readOnlyTurnParams = client.calls[4]?.[1] ?? {};
+  assert.deepEqual(readOnlyTurnParams.runtimeWorkspaceRoots, ["/tmp/project"]);
+
   await client.startThread("/tmp/empty-project", "", {
     networkAccess: false,
     readableRoots: ["/tmp/empty-project"],
   });
-  const emptyThreadParams = client.calls[3]?.[1] ?? {};
+  const emptyThreadParams = client.calls[5]?.[1] ?? {};
   const emptyConfig = emptyThreadParams.config as JsonRecord;
   const emptyProfiles = emptyConfig.permissions as JsonRecord;
   const emptyProfile = emptyProfiles["summing-project"] as JsonRecord;

@@ -60,6 +60,14 @@ interface WorkspacePermissionOptions {
   readOnly?: boolean;
 }
 
+interface TurnOptions
+  extends Pick<WorkspacePermissionOptions, "gitMetadataRoots" | "readableRoots" | "readOnly"> {
+  effort?: string;
+  model?: string;
+  networkAccess?: boolean;
+  outputSchema?: JsonRecord;
+}
+
 export class CodexAppServer extends EventEmitter {
   private process: ChildProcessWithoutNullStreams | null = null;
   private readonly pending = new Map<number, PendingRequest>();
@@ -298,7 +306,7 @@ export class CodexAppServer extends EventEmitter {
       : PROJECT_PERMISSION_PROFILE;
     const params: JsonRecord = {
       cwd,
-      runtimeWorkspaceRoots: options.readableRoots ?? [cwd],
+      runtimeWorkspaceRoots: this.runtimeWorkspaceRoots(cwd, options),
       approvalPolicy: "never",
       permissions: permissionProfile,
       config: this.permissionConfig(cwd, options),
@@ -336,7 +344,7 @@ export class CodexAppServer extends EventEmitter {
     await this.request("thread/resume", {
       threadId,
       cwd,
-      runtimeWorkspaceRoots: options.readableRoots ?? [cwd],
+      runtimeWorkspaceRoots: this.runtimeWorkspaceRoots(cwd, options),
       approvalPolicy: "never",
       permissions: permissionProfile,
       config: this.permissionConfig(cwd, options),
@@ -351,19 +359,13 @@ export class CodexAppServer extends EventEmitter {
     threadId: string,
     prompt: string,
     cwd: string,
-    options: {
-      model?: string;
-      effort?: string;
-      networkAccess?: boolean;
-      outputSchema?: JsonRecord;
-      readableRoots?: string[];
-    } = {},
+    options: TurnOptions = {},
   ): Promise<string> {
     const params: JsonRecord = {
       threadId,
       input: [{ type: "text", text: prompt }],
       cwd,
-      runtimeWorkspaceRoots: options.readableRoots ?? [cwd],
+      runtimeWorkspaceRoots: this.runtimeWorkspaceRoots(cwd, options),
       approvalPolicy: "never",
       effort: options.effort ?? "medium",
       summary: "concise",
@@ -376,6 +378,15 @@ export class CodexAppServer extends EventEmitter {
       throw new CodexProtocolError("turn/start did not return a turn id");
     }
     return turn.id;
+  }
+
+  private runtimeWorkspaceRoots(
+    cwd: string,
+    options: Pick<WorkspacePermissionOptions, "gitMetadataRoots" | "readableRoots" | "readOnly">,
+  ): string[] {
+    const roots = options.readableRoots?.length ? options.readableRoots : [cwd];
+    const writableGitRoots = options.readOnly ? [] : (options.gitMetadataRoots ?? []);
+    return [...new Set([...roots, ...writableGitRoots].map((root) => resolve(root)))];
   }
 
   private permissionConfig(cwd: string, options: WorkspacePermissionOptions): JsonRecord {

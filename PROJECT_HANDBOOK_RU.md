@@ -1,8 +1,8 @@
 # SUMMING 9.2: архитектура, эксплуатация и разработка
 
-> Версия: **9.2.1**
+> Версия: **9.2.2**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
-> Последняя сверка с кодом: **12 августа 2026 года**.
+> Последняя сверка с кодом: **14 августа 2026 года**.
 
 Это единый технический документ о проекте. Он описывает продуктовую модель,
 архитектуру, состояние на диске, протокол выполнения, авторизацию ChatGPT,
@@ -521,7 +521,9 @@ runtime явно показывает, что данные недоступны,
 `summing-project`, в который входят:
 
 - `approvalPolicy = never`;
-- `runtimeWorkspaceRoots`, ограниченный conversation worktree;
+- `runtimeWorkspaceRoots`, содержащий conversation worktree и только для write-run
+  project-scoped общий Git directory; один и тот же набор передаётся в `thread/start`,
+  `thread/resume` и `turn/start`, потому что turn override заменяет сохранённые roots;
 - `filesystem.:minimal = read` для необходимых системных путей;
 - каталог, содержащий реальный executable `CODEX_BIN` после разрешения symlink,
   доступен только на чтение: standalone Codex повторно запускает этот binary
@@ -1157,7 +1159,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "9.2.1",
+  "version": "9.2.2",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",
