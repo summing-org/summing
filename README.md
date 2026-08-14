@@ -49,12 +49,13 @@ Project
   Groq Whisper доступен как опция, в Codex передаётся только текст, а локальный
   аудиофайл удаляется;
 - Project Viewer открывается как Telegram Mini App: показывает дерево, безопасный
-  текст файлов, working/commit/run diff, runner jobs, логи и простой dotenv-editor;
+  текст файлов, working/commit/run diff, состояние `origin`, безопасные Pull/Push,
+  runner jobs, логи и простой dotenv-editor;
 - отдельный rootless Docker runner собирает неизменяемые Git snapshots и
   выполняет только фиксированные действия `build`, `validate`, `dry-run`, `run`;
-- per-project systemd timer может запускать закреплённый commit SHA; merge/push,
-  Claudexor, swarm, MCP, marketplaces, local models и автономная Evolution
-  отсутствуют.
+- per-project systemd timer может запускать закреплённый commit SHA; автоматические
+  commit/merge/push, force push, Claudexor, swarm, MCP, marketplaces, local models
+  и автономная Evolution отсутствуют.
 
 ## Требования
 
@@ -268,7 +269,7 @@ Runtime сохраняет событие `my_chat_member`, поэтому до�
 | `/projects` | Показать доступные отправителю проекты. |
 | `/bind` | Связать текущий topic с Project/Workspace. |
 | `/status` | Проверить версию SUMMING, Codex, account, binding и runs. |
-| `/files` | Открыть Project Viewer, diff, runner jobs и логи. |
+| `/files` | Открыть Project Viewer, Git Pull/Push, diff, runner jobs и логи. |
 | `/steer` | Добавить указание в активный turn. |
 | Reply на stream | То же, без команды. |
 | `/cancel` | Прервать активный turn topic. |
@@ -324,6 +325,19 @@ config/unit/Caddyfile сохраняются для rollback. После cutover
 Основной production URL Mini App — `https://assist.summing.org`; прежний
 `https://ash.summing.org` остаётся только постоянным HTTPS-редиректом с
 сохранением URI для уже отправленных Telegram-кнопок.
+
+Вкладка **Репозиторий** доступна администратору и назначенному owner. Она
+показывает текущую conversation-ветку и её состояние относительно `origin`.
+**Push** отправляет только уже существующие commits в одноимённую remote-ветку,
+никогда не использует force и не включает dirty working tree. **Pull** сначала
+обновляет remote refs и меняет локальную ветку только чистым fast-forward: при
+незакоммиченных или разошедшихся изменениях операция останавливается без merge,
+rebase или reset. Для private remote заранее настройте non-interactive write
+credentials пользователя `summing`.
+Поддерживаются SSH и HTTPS URL без embedded token; repository-local hooks,
+command filters, credential helpers, SSH overrides и URL rewrites намеренно не
+исполняются host-сервисом. Настраивайте ключ или helper глобально для Unix user
+`summing`.
 
 ## Переход существующего 8.x VPS на SUMMING 9.0
 

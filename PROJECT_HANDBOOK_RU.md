@@ -1,6 +1,6 @@
 # SUMMING 9.3: архитектура, эксплуатация и разработка
 
-> Версия: **9.3.1**
+> Версия: **9.3.2**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
 > Последняя сверка с кодом: **14 августа 2026 года**.
 
@@ -398,6 +398,10 @@ SUMMING не делает автоматически merge, rebase, commit, push
 владельца. Поэтому параллельность изолирует незавершённую работу, но интеграция
 веток остаётся явным решением.
 
+Администратор и owner могут синхронизировать текущую conversation-ветку вручную
+во вкладке **Репозиторий** Project Viewer. Это не автоматическая интеграция:
+каждый Push или Pull запускается отдельным явным нажатием пользователя.
+
 Если Workspace не является Git-репозиторием, используется исходный каталог
 напрямую. Runs одного такого Workspace сериализуются: это сохраняет целостность
 read-only профиля, но не даёт изоляции незавершённых изменений между
@@ -650,6 +654,7 @@ mobile-first интерфейс и JSON API показывают:
 - working diff относительно `HEAD`, включая синтетический diff untracked files;
 - последние commits и diff commit относительно parent;
 - before/after patch конкретного editor Run;
+- состояние текущей ветки относительно `origin` и явные Pull/Push;
 - очередь, статусы и журналы project runner.
 
 HTTPS-запрос Mini App должен содержать Telegram `initData`. Backend заново
@@ -658,6 +663,32 @@ HTTPS-запрос Mini App должен содержать Telegram `initData`.
 только для SSH tunnel. В group topic `/files` выдаёт deep link в личный чат;
 там бот создаёт `web_app` button, поскольку Telegram предоставляет Mini App
 identity именно в private bot chat.
+
+Git API использует только фиксированный remote `origin` и ветку worktree,
+соответствующего открытой Conversation. Перед отображением состояния выполняется
+`fetch --prune`; если одноимённой remote-ветки ещё нет, Pull сравнивает текущую
+ветку с `origin/HEAD`, затем с `origin/main`, `origin/master` или единственной
+доступной remote-веткой. Push отправляет точный показанный `HEAD` в одноимённую
+remote-ветку обычным non-force refspec и не включает незакоммиченные файлы. Pull
+разрешён только для чистого worktree, когда изменение возможно через
+`merge --ff-only`; divergence оставляется пользователю/Codex для явного merge
+или rebase.
+
+POST содержит ожидаемый полный HEAD, поэтому устаревшая кнопка не публикует и не
+обновляет уже изменившуюся ветку. Viewer-операции сериализуются на общий Git
+directory репозитория, включая все его conversation worktrees, и
+не запускаются во время активного Codex turn. Telegram HMAC и Project ACL дают
+write-кнопки только администратору и назначенному owner; credentials не
+передаются через API и должны быть настроены non-interactive для Unix user
+`summing`. Ошибка auth, network, protected branch, dirty worktree или
+non-fast-forward возвращается в UI без force, reset или автоматического commit.
+Remote subprocess получает только минимальные `HOME`/`PATH`/locale/SSH env без
+application secrets, игнорирует repository hooks и fsmonitor и принимает только
+SSH/HTTPS URL без embedded token. Project-local/worktree `include`, URL rewrite,
+credential helper, `core.sshCommand` и executable filter отключают sync, чтобы
+изменяемая Codex Git metadata не превращалась в исполнение команд host-сервисом.
+Доверенный SSH config или credential helper настраивается глобально для Unix
+user `summing`, а не внутри Project repository.
 
 Production Mini App работает на `https://assist.summing.org`. Installer
 принимает `SUMMING_VIEWER_DOMAIN=assist.summing.org` и необязательный
@@ -1161,7 +1192,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "9.3.1",
+  "version": "9.3.2",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",
@@ -1423,7 +1454,8 @@ Telegram/OpenAI/Groq end-to-end теста в репозитории нет.
 - documents/ZIP и voice/audio принимаются до Telegram download limit 20 МБ;
 - один бот и один SQLite;
 - нет multi-host coordination;
-- нет автоматического merge/push;
+- нет автоматического commit/merge/push и force push; ручные Pull/Push доступны
+  owner и администратору в Project Viewer;
 - нет смены owner, удаления Project или добавления второго repository через Telegram;
 - Viewer публикуется только через явно настроенный HTTPS proxy и owner ACL;
 - нет per-message approval UI;

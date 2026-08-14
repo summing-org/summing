@@ -81,6 +81,7 @@ async function requestBody(request: IncomingMessage, maximumBytes = 16_384): Pro
 
 export class ProjectViewerServer {
   private server: Server | null = null;
+  private readonly repositoryOperations = new Set<string>();
   readonly auth: ViewerAuthenticator;
   readonly artifacts: RunArtifactStore;
   readonly runner: ProjectRunnerClient;
@@ -174,6 +175,54 @@ export class ProjectViewerServer {
       json(response, 200, {
         environment: await this.runner.environment(scope.project.id, scope.project.workspace),
       });
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/api/viewer/repository") {
+      const scope = await this.scope(conversationId, telegramUser);
+      const activeRun = this.state.get(scope.conversation.id).activeTurnId !== null;
+      const operationKey = await scope.inspector.commonDirectory();
+      const repository = await this.withRepositoryOperation(operationKey, async () =>
+        scope.inspector.repositoryStatus(!activeRun)
+      );
+      json(response, 200, {
+        repository: activeRun
+          ? {
+              ...repository,
+              canPush: false,
+              canPull: false,
+              message: `${repository.message} Дождитесь завершения активного Codex run.`,
+            }
+          : repository,
+        activeRun,
+      });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/viewer/repository") {
+      const body = await requestBody(request) as Record<string, unknown> | null;
+      const requestedConversation = String(body?.conversation ?? "");
+      const action = String(body?.action ?? "");
+      const expectedHead = String(body?.expectedHead ?? "");
+      if (action !== "pull" && action !== "push") {
+        throw new ViewerHttpError(400, "неизвестное действие с репозиторием");
+      }
+      const scope = await this.scope(requestedConversation, telegramUser);
+      const operationKey = await scope.inspector.commonDirectory();
+      const repository = await this.withRepositoryOperation(operationKey, async () => {
+        if (this.state.get(scope.conversation.id).activeTurnId !== null) {
+          throw new ViewerHttpError(409, "дождитесь завершения активного Codex run");
+        }
+        try {
+          return action === "pull"
+            ? await scope.inspector.pullCurrentBranch(expectedHead)
+            : await scope.inspector.pushCurrentBranch(expectedHead);
+        } catch (error) {
+          if (error instanceof GitInspectorError) {
+            throw new ViewerHttpError(409, error.message);
+          }
+          throw error;
+        }
+      });
+      json(response, 200, { repository });
       return;
     }
     if (request.method === "PUT" && url.pathname === "/api/viewer/environment") {
@@ -332,6 +381,21 @@ export class ProjectViewerServer {
     }
     if (!this.deployment.available) {
       throw new ViewerHttpError(503, "automatic deployment is not configured");
+    }
+  }
+
+  private async withRepositoryOperation<T>(
+    repositoryKey: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    if (this.repositoryOperations.has(repositoryKey)) {
+      throw new ViewerHttpError(409, "другая операция с репозиторием ещё выполняется");
+    }
+    this.repositoryOperations.add(repositoryKey);
+    try {
+      return await operation();
+    } finally {
+      this.repositoryOperations.delete(repositoryKey);
     }
   }
 
