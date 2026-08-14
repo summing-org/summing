@@ -97,7 +97,9 @@ export interface TeamSpace {
   administratorUserId: number;
   phase: TeamSpacePhase;
   summary: string;
+  summaryStatus: "active" | "needs-review";
   announcedAt: number | null;
+  modelEgressAnnouncedAt: number | null;
   orientedAt: number | null;
   lastInterventionAt: number | null;
   createdAt: number;
@@ -197,7 +199,7 @@ export interface TeamIntervention {
   id: number;
   spaceId: string;
   sourceId: string;
-  kind: "admission" | "orientation" | "proactive";
+  kind: "admission" | "egress-notice" | "orientation" | "proactive";
   reason: string;
   text: string;
   replyToExternalEventId: string;
@@ -379,7 +381,10 @@ export class StateStore {
           phase TEXT NOT NULL DEFAULT 'observing'
             CHECK(phase IN ('observing', 'orienting', 'active', 'paused')),
           summary TEXT NOT NULL DEFAULT '',
+          summary_status TEXT NOT NULL DEFAULT 'active'
+            CHECK(summary_status IN ('active', 'needs-review')),
           announced_at REAL,
+          model_egress_announced_at REAL,
           oriented_at REAL,
           last_intervention_at REAL,
           created_at REAL NOT NULL,
@@ -491,7 +496,8 @@ export class StateStore {
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           space_id TEXT NOT NULL REFERENCES team_spaces(id) ON DELETE CASCADE,
           source_id TEXT NOT NULL REFERENCES team_sources(id),
-          kind TEXT NOT NULL CHECK(kind IN ('admission', 'orientation', 'proactive')),
+          kind TEXT NOT NULL CHECK(kind IN
+            ('admission', 'egress-notice', 'orientation', 'proactive')),
           reason TEXT NOT NULL,
           text TEXT NOT NULL,
           reply_to_external_event_id TEXT NOT NULL DEFAULT '',
@@ -521,6 +527,46 @@ export class StateStore {
         CREATE INDEX IF NOT EXISTS security_events_created
           ON security_events(created_at DESC, id DESC);
       `);
+      const teamSpaceColumns = this.db.prepare("PRAGMA table_info(team_spaces)").all() as Row[];
+      if (!teamSpaceColumns.some((column) => column.name === "summary_status")) {
+        this.db.exec(
+          "ALTER TABLE team_spaces ADD COLUMN summary_status TEXT NOT NULL DEFAULT 'active' " +
+            "CHECK(summary_status IN ('active', 'needs-review'))",
+        );
+      }
+      if (!teamSpaceColumns.some((column) => column.name === "model_egress_announced_at")) {
+        this.db.exec("ALTER TABLE team_spaces ADD COLUMN model_egress_announced_at REAL");
+      }
+      const interventionSchema = this.db.prepare(`
+        SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'team_interventions'
+      `).get() as Row | undefined;
+      if (!String(interventionSchema?.sql ?? "").includes("egress-notice")) {
+        this.db.exec(`
+          ALTER TABLE team_interventions RENAME TO team_interventions_legacy;
+          CREATE TABLE team_interventions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            space_id TEXT NOT NULL REFERENCES team_spaces(id) ON DELETE CASCADE,
+            source_id TEXT NOT NULL REFERENCES team_sources(id),
+            kind TEXT NOT NULL CHECK(kind IN
+              ('admission', 'egress-notice', 'orientation', 'proactive')),
+            reason TEXT NOT NULL,
+            text TEXT NOT NULL,
+            reply_to_external_event_id TEXT NOT NULL DEFAULT '',
+            provider_message_id TEXT NOT NULL DEFAULT '',
+            created_at REAL NOT NULL,
+            sent_at REAL
+          );
+          INSERT INTO team_interventions
+            (id, space_id, source_id, kind, reason, text, reply_to_external_event_id,
+             provider_message_id, created_at, sent_at)
+          SELECT id, space_id, source_id, kind, reason, text, reply_to_external_event_id,
+                 provider_message_id, created_at, sent_at
+          FROM team_interventions_legacy;
+          DROP TABLE team_interventions_legacy;
+          CREATE INDEX team_interventions_space
+            ON team_interventions(space_id, created_at DESC, id DESC);
+        `);
+      }
       const conversationColumns = this.db.prepare("PRAGMA table_info(conversations)").all() as Row[];
       if (!conversationColumns.some((column) => column.name === "readonly_codex_thread_id")) {
         this.db.exec("ALTER TABLE conversations ADD COLUMN readonly_codex_thread_id TEXT");
@@ -894,7 +940,12 @@ export class StateStore {
       administratorUserId: Number(row.administrator_user_id),
       phase: String(row.phase) as TeamSpacePhase,
       summary: String(row.summary),
+      summaryStatus: String(row.summary_status) as TeamSpace["summaryStatus"],
       announcedAt: row.announced_at === null ? null : Number(row.announced_at),
+      modelEgressAnnouncedAt:
+        row.model_egress_announced_at === null
+          ? null
+          : Number(row.model_egress_announced_at),
       orientedAt: row.oriented_at === null ? null : Number(row.oriented_at),
       lastInterventionAt:
         row.last_intervention_at === null ? null : Number(row.last_intervention_at),
@@ -1263,7 +1314,16 @@ export class StateStore {
     startedAt: number,
   ): void {
     if (eventIds.length === 0) return;
+    if (new Set(eventIds).size !== eventIds.length) {
+      throw new Error("team synthesis batch contains duplicate evidence ids");
+    }
     const eventSet = new Set(eventIds);
+    if (
+      result.proactiveReplyEventId !== null &&
+      !eventSet.has(result.proactiveReplyEventId)
+    ) {
+      throw new Error("team intervention cites evidence outside the synthesis batch");
+    }
     for (const item of result.knowledge) {
       if (item.evidenceEventIds.length === 0) {
         throw new Error("team knowledge requires evidence");
@@ -1274,6 +1334,7 @@ export class StateStore {
       if (item.visibility !== "space" && !item.visibilityRef) {
         throw new Error("restricted team knowledge requires a visibility reference");
       }
+      if (!item.statement.trim()) throw new Error("team knowledge requires a statement");
     }
     const now = Date.now() / 1_000;
     this.transaction(() => {
@@ -1286,6 +1347,18 @@ export class StateStore {
         throw new Error("team synthesis batch no longer matches pending evidence");
       }
       for (const item of result.knowledge) {
+        if (item.visibility === "source") {
+          const source = this.db.prepare(`
+            SELECT id FROM team_sources WHERE id = ? AND space_id = ?
+          `).get(item.visibilityRef, spaceId);
+          if (!source) throw new Error("team knowledge source visibility crosses its Team Space");
+        }
+        if (item.visibility === "person") {
+          const person = this.db.prepare(`
+            SELECT id FROM team_people WHERE id = ? AND space_id = ?
+          `).get(item.visibilityRef, spaceId);
+          if (!person) throw new Error("team knowledge person visibility crosses its Team Space");
+        }
         for (const supersededId of item.supersedesKnowledgeIds) {
           const existing = this.db.prepare(`
             SELECT id FROM team_knowledge WHERE id = ? AND space_id = ?
@@ -1352,6 +1425,7 @@ export class StateStore {
       this.db.prepare(`
         UPDATE team_spaces SET
           summary = ?,
+          summary_status = 'active',
           phase = CASE
             WHEN phase = 'paused' THEN phase
             WHEN oriented_at IS NOT NULL THEN 'active'
@@ -1400,6 +1474,31 @@ export class StateStore {
         UPDATE team_spaces SET announced_at = COALESCE(announced_at, ?), updated_at = ?
         WHERE id = ?
       `).run(announcedAt, announcedAt, spaceId);
+    });
+  }
+
+  markTeamSpaceModelEgressAnnounced(
+    spaceId: string,
+    announcedAt = Date.now() / 1_000,
+  ): void {
+    this.transaction(() => {
+      this.db.prepare(`
+        UPDATE team_spaces SET
+          model_egress_announced_at = COALESCE(model_egress_announced_at, ?),
+          updated_at = ?
+        WHERE id = ?
+      `).run(announcedAt, announcedAt, spaceId);
+    });
+  }
+
+  requeueSynthesizedTeamEvents(spaceId: string, eventIds: number[]): void {
+    if (eventIds.length === 0) return;
+    const placeholders = eventIds.map(() => "?").join(",");
+    this.transaction(() => {
+      this.db.prepare(`
+        UPDATE team_events SET synthesis_state = 'pending'
+        WHERE space_id = ? AND id IN (${placeholders}) AND synthesis_state = 'synthesized'
+      `).run(spaceId, ...eventIds);
     });
   }
 
@@ -1495,26 +1594,71 @@ export class StateStore {
       `).get(spaceId, provider, externalUserId) as Row | undefined;
       this.setTeamIdentityObservationInTransaction(spaceId, provider, externalUserId, false, now);
       if (!identity) return 0;
+      this.db.prepare(`
+        UPDATE team_people SET display_name = '', updated_at = ? WHERE id = ?
+      `).run(now, String(identity.person_id));
+      this.db.prepare(`
+        UPDATE team_identities SET display_name = '', last_seen_at = ?
+        WHERE space_id = ? AND provider = ? AND external_user_id = ?
+      `).run(now, spaceId, provider, externalUserId);
+      this.db.prepare(`
+        UPDATE team_events SET sender_display_name = '' WHERE space_id = ? AND person_id = ?
+      `).run(spaceId, String(identity.person_id));
       const eventRows = this.db.prepare(`
-        SELECT id FROM team_events
-        WHERE space_id = ? AND person_id = ? AND synthesis_state <> 'redacted'
+        SELECT id, source_id, external_event_id, synthesis_state FROM team_events
+        WHERE space_id = ? AND person_id = ?
       `).all(spaceId, String(identity.person_id)) as Row[];
       const eventIds = eventRows.map((row) => Number(row.id));
       if (eventIds.length === 0) return 0;
+      const newlyRedacted = eventRows.filter((row) => row.synthesis_state !== "redacted").length;
       const placeholders = eventIds.map(() => "?").join(",");
       this.db.prepare(`
-        UPDATE team_knowledge SET status = 'needs-review', updated_at = ?
+        DELETE FROM team_knowledge
         WHERE id IN (
           SELECT knowledge_id FROM team_knowledge_evidence
           WHERE event_id IN (${placeholders})
         )
-      `).run(now, ...eventIds);
+      `).run(...eventIds);
+      const erasedEventIds = new Set(eventIds);
+      const synthesisRows = this.db.prepare(`
+        SELECT id, event_ids_json FROM team_synthesis_runs WHERE space_id = ?
+      `).all(spaceId) as Row[];
+      for (const row of synthesisRows) {
+        let cited: unknown = [];
+        try {
+          cited = JSON.parse(String(row.event_ids_json));
+        } catch {
+          cited = [];
+        }
+        if (
+          Array.isArray(cited) &&
+          cited.some((eventId) => Number.isSafeInteger(eventId) && erasedEventIds.has(Number(eventId)))
+        ) {
+          this.db.prepare(`
+            UPDATE team_synthesis_runs SET response_json = '' WHERE id = ?
+          `).run(row.id as SQLInputValue);
+        }
+      }
+      for (const row of eventRows) {
+        this.db.prepare(`
+          UPDATE team_interventions SET text = ''
+          WHERE space_id = ? AND source_id = ? AND kind = 'proactive'
+            AND reply_to_external_event_id = ?
+        `).run(spaceId, row.source_id as SQLInputValue, row.external_event_id as SQLInputValue);
+      }
       this.db.prepare(`
-        UPDATE team_events SET text = '', attachments_json = '[]',
+        UPDATE team_events SET text = '', sender_display_name = '', attachments_json = '[]',
           synthesis_state = 'redacted', redacted_at = ?
         WHERE id IN (${placeholders})
       `).run(now, ...eventIds);
-      return eventIds.length;
+      this.db.prepare(`
+        UPDATE team_spaces SET summary_status = 'needs-review', updated_at = ? WHERE id = ?
+      `).run(now, spaceId);
+      this.db.prepare(`
+        UPDATE team_events SET synthesis_state = 'pending'
+        WHERE space_id = ? AND synthesis_state = 'synthesized' AND redacted_at IS NULL
+      `).run(spaceId);
+      return newlyRedacted;
     });
   }
 

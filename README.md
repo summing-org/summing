@@ -40,7 +40,8 @@ Team Space: создаётся при подключении командног�
   решения об ответе, даже если topic ещё не привязан к Project;
 - bind связывает Project с уже накопленным Team Space и не уничтожает evidence;
 - автоматическая отправка всей фоновой переписки в Codex для semantic synthesis
-  требует отдельного явного operator consent; без него journal остаётся локальным;
+  требует отдельного явного operator consent и `team_memory.model_egress_enabled = true`;
+  без него journal остаётся локальным;
 - `@mention` или reply в projectless source запускает прежний bounded read-only
   ответ без доступа к файлам, памяти и истории любого Project;
 - `/memory`, `/memory_me`, `/memory_forget_me` и `/memory_resume_me` делают
@@ -236,6 +237,16 @@ Codex thread, не расходует participant quota и не добавляе
 Projectless Q&A имеет отдельную от Project Conversation очередь: один активный ответ и
 не более четырёх активных/ожидающих вопросов суммарно. Зависший turn прерывается через
 две минуты и освобождает очередь.
+
+При `team_memory.model_egress_enabled = true` pending evidence каждые
+`team_memory.synthesis_batch_sec` секунд отправляется bounded-пакетом в отдельный ephemeral
+read-only Codex thread без Project, файлов, сети, environments и внешних инструментов.
+До первого batch Team Space получает отдельное уведомление о составе model egress.
+Structured output принимается только после проверки evidence ids, confidence,
+visibility, temporal validity и supersession links. После
+`team_memory.orientation_event_threshold` событий SUMMING один раз показывает своё понимание и
+уточняет главные пробелы; дальнейшие proactive replies ограничены
+`team_memory.intervention_cooldown_sec` и всегда привязаны к конкретному Telegram message.
 
 Документ можно отправить с caption или без него. SUMMING сохранит его внутри
 runtime-каталога conversation и передаст Codex точный относительный путь. Архивы

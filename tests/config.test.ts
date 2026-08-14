@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -22,6 +22,11 @@ participant_rate_limit_window_sec = 90
 
 [team_memory]
 enabled = true
+model_egress_enabled = true
+synthesis_batch_sec = 45
+max_batch_events = 80
+orientation_event_threshold = 25
+intervention_cooldown_sec = 7200
 raw_retention_days = 180
 announce_on_join = false
 
@@ -67,6 +72,11 @@ test("loads the explicit project model", () => {
     assert.equal(config.participantMessagesPerWindow, 8);
     assert.equal(config.participantRateLimitWindowSeconds, 90);
     assert.equal(config.teamMemoryEnabled, true);
+    assert.equal(config.teamModelEgressEnabled, true);
+    assert.equal(config.teamSynthesisBatchSeconds, 45);
+    assert.equal(config.teamSynthesisMaxEvents, 80);
+    assert.equal(config.teamOrientationEventThreshold, 25);
+    assert.equal(config.teamInterventionCooldownSeconds, 7_200);
     assert.equal(config.teamRawRetentionDays, 180);
     assert.equal(config.teamAnnounceOnJoin, false);
     assert.equal(config.codexLimitsProfileEnabled, false);
@@ -105,6 +115,25 @@ test("deployment control stays disabled unless both absolute paths are configure
       }),
       (error) => error instanceof ConfigError && error.message.includes("SUMMING_DEPLOY_REQUEST"),
     );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("background Team Space model egress is opt-in", () => {
+  const { root, configPath } = fixture();
+  try {
+    writeFileSync(
+      configPath,
+      readFileSync(configPath, "utf8").replace("model_egress_enabled = true\n", ""),
+    );
+    const config = loadConfig({
+      SUMMING_DATA_DIR: join(root, "data"),
+      SUMMING_CONFIG: configPath,
+      TELEGRAM_BOT_TOKEN: "test-token",
+      TELEGRAM_OWNER_ID: "42",
+    });
+    assert.equal(config.teamModelEgressEnabled, false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -15,6 +15,13 @@ network_access = true
 [team_memory]
 # Persist every authorized team message before reply/rate-limit decisions.
 enabled = true
+# Keep false until the operator explicitly approves sending bounded team-event
+# batches to the administrator's Codex App Server.
+model_egress_enabled = false
+synthesis_batch_sec = 120
+max_batch_events = 100
+orientation_event_threshold = 50
+intervention_cooldown_sec = 3600
 # Raw text is redacted after this many days; 0 keeps it indefinitely. Knowledge
 # and source references remain so corrections stay explainable.
 raw_retention_days = 365

@@ -236,8 +236,18 @@ items в `needs-review`; provider redelivery идемпотентна.
 
 Автоматический semantic synthesis всего Team Space не выводится из факта
 локального хранения. Он требует отдельного operator consent на model egress,
-описанного в `TEAM_MEMORY_RU.md`. Без него pending evidence остаётся локальным и
-не передаётся фоновым Codex turns.
+описанного в `TEAM_MEMORY_RU.md`, и настройки
+`team_memory.model_egress_enabled = true`. До первого batch runtime публикует
+отдельный egress notice. Без consent pending evidence остаётся локальным и не
+передаётся фоновым Codex turns.
+
+При включении runtime раз в `team_memory.synthesis_batch_sec` берёт bounded batch,
+создаёт fresh ephemeral read-only Codex thread в пустом runtime CWD с выключенными
+network, environments и внешними capabilities и требует structured output. Runtime
+повторно валидирует evidence ids, confidence, visibility, temporal validity,
+supersession и proactive reply target до SQLite. Ошибка оставляет events pending.
+После `team_memory.orientation_event_threshold` SUMMING один раз объясняет текущее понимание и
+задаёт главные вопросы; последующие evidence-linked proactive replies имеют cooldown.
 
 ### 3.5. Run
 
@@ -273,9 +283,9 @@ read-only thread: запускать команды или изменять Proj
 Для непривязанного топика те же признаки direct (`@mention` или reply боту) не
 попадают в Project routing: они запускают отдельный fresh projectless Q&A, описанный
 в разделе 3. Обычное сообщение там пополняет долговечный локальный Team Space journal
-и никогда не получает `response_mode=ambient`: автоматическая передача этого journal
-модели требует отдельного согласия оператора, а ambient-анализ пока разрешён лишь в
-Conversation уже привязанного Project.
+и никогда не получает Project `response_mode=ambient`. При явном consent оно может
+попасть в отдельный Team Space synthesis, который не является Conversation routing и
+не получает Project context или agency.
 
 ### 4.2. Фоновый смысловой анализ
 
@@ -795,7 +805,7 @@ worktree. `run` требует чистый committed `HEAD`. Периодиче
 | `/remember <факт>` | Добавить факт в Project memory. |
 | `/memory`, `/memory_status` | Показать видимое состояние Team Space. |
 | `/memory_me` | Показать собственные evidence и связанные knowledge items. |
-| `/memory_forget_me` | Redact собственных events и остановить будущий ingest. |
+| `/memory_forget_me` | Redact собственных events, удалить связанные выводы, пометить summary для пересборки и остановить будущий ingest. |
 | `/memory_resume_me` | Возобновить будущий ingest без восстановления удалённого. |
 | `/memory_pause`, `/memory_resume` | Приостановить/возобновить Space; только администратор. |
 | `/review` | Follow-up с просьбой проверить незакоммиченные изменения и не менять файлы. |
@@ -899,6 +909,11 @@ Telegram-проекты находятся в SQLite и не записываю�
 | `agent.participant_rate_limit_window_sec` | Длина rate-limit окна. | 60 |
 | `agent.network_access` | Сеть внутри Codex sandbox. | true |
 | `team_memory.enabled` | Локальный Team Space journal и privacy commands. | true |
+| `team_memory.model_egress_enabled` | Consent-gated bounded background synthesis в Codex. | false |
+| `team_memory.synthesis_batch_sec` | Окно накопления evidence перед synthesis. | 120 |
+| `team_memory.max_batch_events` | Максимум events в одном synthesis batch. | 100 |
+| `team_memory.orientation_event_threshold` | Минимум evidence до первого orientation. | 50 |
+| `team_memory.intervention_cooldown_sec` | Минимальный интервал proactive replies. | 3600 |
 | `team_memory.raw_retention_days` | Дни хранения raw evidence; 0 = бессрочно. | 365 |
 | `team_memory.announce_on_join` | Admission notice при добавлении в группу. | true |
 | `codex_usage.profile_enabled` | Обновлять short description Telegram-бота. | true |

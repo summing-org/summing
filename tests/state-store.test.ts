@@ -271,7 +271,11 @@ test("Team Space journals evidence, preserves provenance, and honors erasure", (
     assert.equal(store.forgetTeamIdentity(space.id, "telegram", "42"), 1);
     assert.equal(store.teamEvent(first.id)?.synthesisState, "redacted");
     assert.equal(store.teamEvent(first.id)?.text, "");
-    assert.equal(store.teamKnowledge(space.id).find((item) => item.kind === "decision")?.status, "needs-review");
+    assert.equal(store.teamEvent(first.id)?.senderDisplayName, "");
+    assert.equal(store.teamKnowledge(space.id).some((item) => item.kind === "decision"), false);
+    assert.equal(store.teamKnowledge(space.id).some((item) => item.kind === "task"), true);
+    assert.equal(store.teamSpace(space.id)?.summaryStatus, "needs-review");
+    assert.equal(store.pendingTeamEventCount(space.id), 1);
     assert.equal(store.recordTeamEvent({
       provider: "telegram",
       externalSpaceId: "-100500",
@@ -290,7 +294,7 @@ test("Team Space journals evidence, preserves provenance, and honors erasure", (
     const reopened = new StateStore(path);
     try {
       assert.equal(reopened.teamEventCount(space.id), 1);
-      assert.equal(reopened.teamKnowledge(space.id).length, 2);
+      assert.equal(reopened.teamKnowledge(space.id).length, 1);
     } finally {
       reopened.close();
     }
@@ -539,6 +543,67 @@ test("managed projects and owners persist", () => {
     );
   } finally {
     reopened.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("migrates the pre-egress Team Space intervention schema", () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-team-egress-migration-"));
+  const path = join(root, "state.sqlite3");
+  const legacy = new DatabaseSync(path);
+  legacy.exec(`
+    CREATE TABLE team_spaces (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      administrator_user_id INTEGER NOT NULL,
+      phase TEXT NOT NULL DEFAULT 'observing',
+      summary TEXT NOT NULL DEFAULT '',
+      announced_at REAL,
+      oriented_at REAL,
+      last_intervention_at REAL,
+      created_at REAL NOT NULL,
+      updated_at REAL NOT NULL
+    );
+    CREATE TABLE team_interventions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      space_id TEXT NOT NULL,
+      source_id TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK(kind IN ('admission', 'orientation', 'proactive')),
+      reason TEXT NOT NULL,
+      text TEXT NOT NULL,
+      reply_to_external_event_id TEXT NOT NULL DEFAULT '',
+      provider_message_id TEXT NOT NULL DEFAULT '',
+      created_at REAL NOT NULL,
+      sent_at REAL
+    );
+  `);
+  legacy.close();
+
+  const migrated = new StateStore(path);
+  try {
+    const { space, source } = migrated.ensureTeamSource({
+      provider: "telegram",
+      externalSpaceId: "-100700",
+      externalThreadId: "4",
+      spaceName: "Migration",
+      sourceTitle: "General",
+      administratorUserId: 1,
+    });
+    const interventionId = migrated.recordTeamIntervention({
+      spaceId: space.id,
+      sourceId: source.id,
+      kind: "egress-notice",
+      reason: "explicit consent",
+      text: "Model egress enabled",
+      replyToExternalEventId: "",
+      providerMessageId: "",
+    });
+    migrated.markTeamInterventionSent(interventionId, "900");
+    migrated.markTeamSpaceModelEgressAnnounced(space.id);
+    assert.equal(migrated.teamSpace(space.id)?.modelEgressAnnouncedAt !== null, true);
+    assert.equal(migrated.teamSpace(space.id)?.summaryStatus, "active");
+  } finally {
+    migrated.close();
     rmSync(root, { recursive: true, force: true });
   }
 });

@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { telegramEventAttachments, telegramTeamEventInput } from "../src/team-memory.js";
+import {
+  parseTeamSynthesisResponse,
+  TEAM_SYNTHESIS_OUTPUT_SCHEMA,
+  telegramEventAttachments,
+  telegramTeamEventInput,
+} from "../src/team-memory.js";
+import type { TeamEvent } from "../src/state-store.js";
 
 test("normalizes Telegram messages into provider-neutral Team Space evidence", () => {
   const message = {
@@ -61,4 +67,72 @@ test("normalizes service events without inventing participant intent", () => {
   assert.equal(input?.eventKind, "service");
   assert.equal(input?.sourceTitle, "Release");
   assert.equal(input?.text, "[Создан топик: Release]");
+});
+
+test("validates evidence, visibility, and intervention targets in model synthesis", () => {
+  const event: TeamEvent = {
+    id: 7,
+    spaceId: "team-1",
+    sourceId: "source-1",
+    personId: "person-1",
+    provider: "telegram",
+    externalEventId: "55",
+    eventKind: "message",
+    senderExternalId: "42",
+    senderDisplayName: "Маша",
+    text: "Кажется, мы рискуем не успеть к пятнице",
+    replyToExternalEventId: "",
+    attachments: [],
+    occurredAt: 1_700_000_000,
+    observedAt: 1_700_000_001,
+    synthesisState: "pending",
+    redactedAt: null,
+  };
+  const response = {
+    summary: "Команда обсуждает риск пятничного срока.",
+    knowledge: [{
+      kind: "risk",
+      subject: "релиз",
+      statement: "Срок пятницы находится под риском.",
+      confidence: 0.75,
+      status: "active",
+      visibility: "source",
+      visibility_ref: "source-1",
+      evidence_event_ids: [7],
+      supersedes_knowledge_ids: [],
+      valid_from: 1_700_000_000,
+      valid_to: null,
+    }],
+    orientation_ready: true,
+    orientation_message: "Я начал понимать контекст релиза.",
+    clarification_questions: ["Какой критерий определяет готовность?"],
+    proactive_reply_event_id: 7,
+    proactive_message: "Какой риск сейчас сильнее всего влияет на срок?",
+  };
+  const parsed = parseTeamSynthesisResponse(JSON.stringify(response), [event]);
+  assert.equal(parsed?.knowledge[0]?.visibilityRef, "source-1");
+  assert.equal(parsed?.proactiveReplyEventId, 7);
+  assert.equal(TEAM_SYNTHESIS_OUTPUT_SCHEMA.additionalProperties, false);
+
+  assert.equal(
+    parseTeamSynthesisResponse(JSON.stringify({
+      ...response,
+      knowledge: [{ ...response.knowledge[0], visibility_ref: "source-other" }],
+    }), [event]),
+    null,
+  );
+  assert.equal(
+    parseTeamSynthesisResponse(JSON.stringify({
+      ...response,
+      proactive_reply_event_id: 999,
+    }), [event]),
+    null,
+  );
+  assert.equal(
+    parseTeamSynthesisResponse(JSON.stringify({
+      ...response,
+      orientation_message: "",
+    }), [event]),
+    null,
+  );
 });

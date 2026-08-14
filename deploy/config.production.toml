@@ -10,6 +10,17 @@ participant_rate_limit_messages = 12
 participant_rate_limit_window_sec = 60
 network_access = true
 
+[team_memory]
+enabled = true
+# Enable only after explicit operator approval of background team-message egress.
+model_egress_enabled = false
+synthesis_batch_sec = 120
+max_batch_events = 100
+orientation_event_threshold = 50
+intervention_cooldown_sec = 3600
+raw_retention_days = 365
+announce_on_join = true
+
 [codex_usage]
 profile_enabled = true
 refresh_interval_sec = 900

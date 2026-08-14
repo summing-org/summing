@@ -88,11 +88,14 @@ operator consent на передачу текста, sender identity, message/re
 timestamps, attachment metadata и локально полученных транскрипций в Codex App
 Server администратора.
 
-До такого согласия runtime сохраняет события локально, но не запускает
-автоматический model synthesis. Прямое упоминание продолжает прежний ограниченный
-projectless Q&A flow: это явный запрос пользователя, а не фоновый egress.
+Согласие материализуется настройкой `team_memory.model_egress_enabled = true`; по
+умолчанию она выключена. До первого batch runtime публикует отдельный egress notice
+с точным составом передаваемых данных. До такого согласия события сохраняются
+локально, но автоматический model synthesis не запускается. Прямое упоминание
+продолжает прежний ограниченный projectless Q&A flow: это явный запрос пользователя,
+а не фоновый egress.
 
-После включения synthesis должен соблюдать следующие инварианты:
+После включения synthesis соблюдает следующие инварианты:
 
 1. один bounded batch вместо turn на каждое сообщение;
 2. read-only ephemeral Codex thread без Project, сети и внешних capabilities;
@@ -103,6 +106,19 @@ projectless Q&A flow: это явный запрос пользователя, �
 7. intervention создаётся только после warm-up, сохраняется с причиной и имеет
    cooldown.
 
+Runtime собирает до `team_memory.max_batch_events` pending events каждые
+`team_memory.synthesis_batch_sec` секунд. Модель получает текущий summary, последние knowledge
+items и provider-neutral evidence batch. Результат проходит JSON Schema и повторную
+детерминированную проверку: нельзя сослаться на событие вне batch, придумать чужой
+source/person visibility, дать пустому выводу provenance или выбрать несуществующее
+сообщение для proactive reply. Ошибка оставляет evidence pending для повторной
+обработки.
+
+До `team_memory.orientation_event_threshold` SUMMING только накапливает knowledge. После порога
+он один раз публикует orientation message и наиболее ценные вопросы. Proactive reply
+допустим только после успешной orientation, только reply к конкретному evidence event
+и не чаще `team_memory.intervention_cooldown_sec`.
+
 ## Transparency и управление
 
 При admission SUMMING публикует уведомление о durable observation. Доступны:
@@ -111,7 +127,7 @@ projectless Q&A flow: это явный запрос пользователя, �
 |---|---|
 | `/memory`, `/memory_status` | Состояние Team Space и видимые отправителю знания. |
 | `/memory_me` | События пользователя и выводы с их evidence. |
-| `/memory_forget_me` | Redact собственных событий, `needs-review` для выводов и opt-out будущего ingest. |
+| `/memory_forget_me` | Redact собственных событий, удалить связанные выводы, пометить summary для пересборки и остановить будущий ingest. |
 | `/memory_resume_me` | Возобновить будущий ingest; удалённое не восстанавливается. |
 | `/memory_pause` | Администратор приостанавливает весь Space. |
 | `/memory_resume` | Администратор возобновляет Space. |

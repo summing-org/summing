@@ -82,6 +82,11 @@ admission. Ingestion is immediate and durable; interpretation, synthesis, and re
 are asynchronous. Backfill from before admission requires a separate explicit import and
 must retain its origin and visibility.
 
+Durable local admission and model egress are separate grants. Background synthesis may
+begin only after the administrator explicitly enables it, and the affected Team Space
+must be told what event fields leave the local journal before the first batch is sent.
+Disabling model egress stops new background turns without deleting local evidence.
+
 Raw evidence and understanding are different authorities:
 
 - the evidence journal preserves what was observed, where, when, and from whom;
