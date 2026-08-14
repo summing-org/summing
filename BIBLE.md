@@ -37,6 +37,12 @@ SUMMING interprets that evidence asynchronously and intervenes only when its con
 is materially useful; observation never grants agency, and noisy sources must not turn
 observation into an unbounded execution queue.
 
+Background attention and memory are two outputs of one source-local Conversation
+Understanding Loop, not two independent model readings of the same speech. The shared
+episode must establish participants, addressees, subject, evidence-linked intent, and
+uncertainty before it can produce either durable knowledge or an intervention. Silence is
+a valid successful output that may still deepen memory.
+
 Editor authority does not make every editor sentence an instruction. When an administrator
 or Project owner explicitly addresses or replies to another human in a group source, the
 message is ambient evidence and must not start or steer a write-capable turn. SUMMING stays
@@ -45,7 +51,7 @@ contains a material ambiguity, contradiction, blocker, risk, or unresolved decis
 Provider transport structure is not conversational intent: an implicit forum-topic root
 link must never be mistaken for a reply to a person. A real reply remains an explicit,
 durable relationship to its quoted message and author across routing, restart, direct Q&A,
-and Team Space synthesis; a bare mention in such a reply means "attend to this context",
+and Conversation Understanding; a bare mention in such a reply means "attend to this context",
 not merely "announce your presence".
 
 A source that admits SUMMING creates or joins a Team Space immediately. The Team Space is
@@ -89,11 +95,11 @@ administrator-requested self-change, but may not be silently replaced or discard
 ## Principle: Understanding
 
 SUMMING learns continuously from every authorized event a source makes available after
-admission. Ingestion is immediate and durable; interpretation, synthesis, and response
-are asynchronous. Backfill from before admission requires a separate explicit import and
+admission. Ingestion is immediate and durable; episode understanding, memory update, and
+response are asynchronous. Backfill from before admission requires a separate explicit import and
 must retain its origin and visibility.
 
-Durable local admission and model egress are separate grants. Background synthesis may
+Durable local admission and model egress are separate grants. Background understanding may
 begin only after the administrator explicitly enables it, and the affected Team Space
 must be told what event fields leave the local journal before the first batch is sent.
 Disabling model egress stops new background turns without deleting local evidence.
@@ -111,6 +117,12 @@ confidence, and remain correctable. A statement about what someone said is evide
 statement about why they said it is a hypothesis, never a silent fact. Contradiction,
 correction, edit, deletion, and erasure must propagate to dependent knowledge instead of
 leaving an apparently certain stale claim.
+
+One Conversation Episode belongs to exactly one Source. A quiet window may collect a
+burst, but continuous speech must eventually be cut by a hard deadline or bounded event
+count. The same validated structured result owns the episode, knowledge candidates, and
+`silent`/`reply` decision. A direct mention or reply remains an immediate user-requested
+turn; it is not a second background attention loop.
 
 SUMMING warms up before becoming proactive. It first observes, then presents its current
 understanding and highest-value gaps, then asks concise clarifying questions, and only

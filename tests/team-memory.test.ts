@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  parseTeamSynthesisResponse,
-  TEAM_SYNTHESIS_OUTPUT_SCHEMA,
+  parseTeamUnderstandingResponse,
+  TEAM_UNDERSTANDING_OUTPUT_SCHEMA,
   telegramEventAttachments,
   telegramExplicitReply,
   telegramTeamEventInput,
@@ -80,7 +80,7 @@ test("normalizes service events without inventing participant intent", () => {
   assert.equal(input?.text, "[Создан топик: Release]");
 });
 
-test("validates evidence, visibility, and intervention targets in model synthesis", () => {
+test("validates one episode shared by memory and intervention", () => {
   const event: TeamEvent = {
     id: 7,
     spaceId: "team-1",
@@ -100,6 +100,20 @@ test("validates evidence, visibility, and intervention targets in model synthesi
     redactedAt: null,
   };
   const response = {
+    episode: {
+      source_id: "source-1",
+      subject: "Риск пятничного релиза",
+      synopsis: "Маша обозначила риск не успеть к пятнице.",
+      confidence: 0.9,
+      event_ids: [7],
+      participants: [{
+        person_id: "person-1",
+        role: "speaker",
+        intent: "Обозначить риск срока",
+        confidence: 0.75,
+        evidence_event_ids: [7],
+      }],
+    },
     summary: "Команда обсуждает риск пятничного срока.",
     knowledge: [{
       kind: "risk",
@@ -117,32 +131,45 @@ test("validates evidence, visibility, and intervention targets in model synthesi
     orientation_ready: true,
     orientation_message: "Я начал понимать контекст релиза.",
     clarification_questions: ["Какой критерий определяет готовность?"],
-    proactive_reply_event_id: 7,
-    proactive_message: "Какой риск сейчас сильнее всего влияет на срок?",
+    intervention: {
+      action: "reply",
+      reply_to_event_id: 7,
+      message: "Какой риск сейчас сильнее всего влияет на срок?",
+      reason: "Нужно уточнить блокирующий риск.",
+    },
   };
-  const parsed = parseTeamSynthesisResponse(JSON.stringify(response), [event]);
-  assert.equal(parsed?.knowledge[0]?.visibilityRef, "source-1");
-  assert.equal(parsed?.proactiveReplyEventId, 7);
-  assert.equal(TEAM_SYNTHESIS_OUTPUT_SCHEMA.additionalProperties, false);
+  const parsed = parseTeamUnderstandingResponse(JSON.stringify(response), [event]);
+  assert.equal(parsed?.episode.participants[0]?.role, "speaker");
+  assert.equal(parsed?.knowledge[0]?.kind, "episode");
+  assert.equal(parsed?.knowledge[1]?.visibilityRef, "source-1");
+  assert.equal(parsed?.intervention.replyToEventId, 7);
+  assert.equal(TEAM_UNDERSTANDING_OUTPUT_SCHEMA.additionalProperties, false);
 
   assert.equal(
-    parseTeamSynthesisResponse(JSON.stringify({
+    parseTeamUnderstandingResponse(JSON.stringify({
       ...response,
       knowledge: [{ ...response.knowledge[0], visibility_ref: "source-other" }],
     }), [event]),
     null,
   );
   assert.equal(
-    parseTeamSynthesisResponse(JSON.stringify({
+    parseTeamUnderstandingResponse(JSON.stringify({
       ...response,
-      proactive_reply_event_id: 999,
+      intervention: { ...response.intervention, reply_to_event_id: 999 },
     }), [event]),
     null,
   );
   assert.equal(
-    parseTeamSynthesisResponse(JSON.stringify({
+    parseTeamUnderstandingResponse(JSON.stringify({
       ...response,
       orientation_message: "",
+    }), [event]),
+    null,
+  );
+  assert.equal(
+    parseTeamUnderstandingResponse(JSON.stringify({
+      ...response,
+      episode: { ...response.episode, event_ids: [] },
     }), [event]),
     null,
   );

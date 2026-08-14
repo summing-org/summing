@@ -5,7 +5,6 @@ effort = "medium"
 # A safe starting point for a 4 GiB VPS. Increase on a larger server.
 max_parallel_conversations = 2
 stream_interval_sec = 1.0
-participant_batch_sec = 20
 participant_rate_limit_messages = 12
 participant_rate_limit_window_sec = 60
 network_access = true
@@ -14,8 +13,9 @@ network_access = true
 enabled = true
 # Enable only after explicit operator approval of background team-message egress.
 model_egress_enabled = false
-synthesis_batch_sec = 120
-max_batch_events = 100
+understanding_quiet_sec = 20
+understanding_max_wait_sec = 90
+understanding_max_events = 40
 orientation_event_threshold = 50
 intervention_cooldown_sec = 3600
 raw_retention_days = 365

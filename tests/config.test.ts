@@ -16,15 +16,15 @@ function fixture(): { root: string; configPath: string; workspace: string } {
 max_parallel_conversations = 3
 stream_interval_sec = 0.75
 network_access = true
-participant_batch_sec = 25
 participant_rate_limit_messages = 8
 participant_rate_limit_window_sec = 90
 
 [team_memory]
 enabled = true
 model_egress_enabled = true
-synthesis_batch_sec = 45
-max_batch_events = 80
+understanding_quiet_sec = 45
+understanding_max_wait_sec = 150
+understanding_max_events = 80
 orientation_event_threshold = 25
 intervention_cooldown_sec = 7200
 raw_retention_days = 180
@@ -68,13 +68,14 @@ test("loads the explicit project model", () => {
     });
     assert.equal(config.telegramOwnerId, 42);
     assert.equal(config.maxParallelConversations, 3);
-    assert.equal(config.participantBatchSeconds, 25);
+    assert.equal(config.participantBatchSeconds, 20);
     assert.equal(config.participantMessagesPerWindow, 8);
     assert.equal(config.participantRateLimitWindowSeconds, 90);
     assert.equal(config.teamMemoryEnabled, true);
     assert.equal(config.teamModelEgressEnabled, true);
-    assert.equal(config.teamSynthesisBatchSeconds, 45);
-    assert.equal(config.teamSynthesisMaxEvents, 80);
+    assert.equal(config.teamUnderstandingQuietSeconds, 45);
+    assert.equal(config.teamUnderstandingMaxWaitSeconds, 150);
+    assert.equal(config.teamUnderstandingMaxEvents, 80);
     assert.equal(config.teamOrientationEventThreshold, 25);
     assert.equal(config.teamInterventionCooldownSeconds, 7_200);
     assert.equal(config.teamRawRetentionDays, 180);
@@ -134,6 +135,29 @@ test("background Team Space model egress is opt-in", () => {
       TELEGRAM_OWNER_ID: "42",
     });
     assert.equal(config.teamModelEgressEnabled, false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("legacy synthesis keys map to the unified understanding scheduler", () => {
+  const { root, configPath } = fixture();
+  try {
+    writeFileSync(
+      configPath,
+      readFileSync(configPath, "utf8")
+        .replace("understanding_quiet_sec = 45", "synthesis_batch_sec = 55")
+        .replace("understanding_max_events = 80", "max_batch_events = 70"),
+    );
+    const config = loadConfig({
+      SUMMING_DATA_DIR: join(root, "data"),
+      SUMMING_CONFIG: configPath,
+      TELEGRAM_BOT_TOKEN: "test-token",
+      TELEGRAM_OWNER_ID: "42",
+    });
+    assert.equal(config.teamUnderstandingQuietSeconds, 55);
+    assert.equal(config.teamUnderstandingMaxWaitSeconds, 150);
+    assert.equal(config.teamUnderstandingMaxEvents, 70);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

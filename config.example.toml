@@ -4,9 +4,8 @@ model = ""
 effort = "medium"
 max_parallel_conversations = 4
 stream_interval_sec = 1.0
-# Ambient participant messages are analyzed together after this delay.
-participant_batch_sec = 20
-# Per participant and group. Excess ambient messages are dropped silently.
+# Per participant and group. This protects explicitly addressed participant turns;
+# background evidence is admitted before this limit and uses the Team Space loop.
 participant_rate_limit_messages = 12
 participant_rate_limit_window_sec = 60
 # Required for git fetch/push and dependency downloads inside a Codex turn.
@@ -16,10 +15,14 @@ network_access = true
 # Persist every authorized team message before reply/rate-limit decisions.
 enabled = true
 # Keep false until the operator explicitly approves sending bounded team-event
-# batches to the administrator's Codex App Server.
+# conversation episodes to the administrator's Codex App Server.
 model_egress_enabled = false
-synthesis_batch_sec = 120
-max_batch_events = 100
+# One Conversation Understanding Loop resets this quiet window on every new event.
+understanding_quiet_sec = 20
+# Continuous chatter cannot postpone understanding beyond this hard deadline.
+understanding_max_wait_sec = 90
+# Reaching this source-local batch size starts the loop immediately.
+understanding_max_events = 40
 orientation_event_threshold = 50
 intervention_cooldown_sec = 3600
 # Raw text is redacted after this many days; 0 keeps it indefinitely. Knowledge

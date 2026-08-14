@@ -80,10 +80,10 @@ tombstone, чтобы зависимые выводы не продолжали 
 которой он это сказал, всегда остаётся `hypothesis`; чувствительные свойства не
 выводятся. Visibility проверяется при чтении, а не доверяется формулировке LLM.
 
-## Model synthesis и egress
+## Conversation Understanding Loop и model egress
 
 Локальный event journal не означает автоматического разрешения отправлять всю
-командную переписку модели. Автоматический synthesis требует отдельного явного
+командную переписку модели. Фоновое осмысление требует отдельного явного
 operator consent на передачу текста, sender identity, message/reply ids,
 timestamps, attachment metadata и локально полученных транскрипций в Codex App
 Server администратора.
@@ -91,33 +91,126 @@ Server администратора.
 Согласие материализуется настройкой `team_memory.model_egress_enabled = true`; по
 умолчанию она выключена. До первого batch runtime публикует отдельный egress notice
 с точным составом передаваемых данных. До такого согласия события сохраняются
-локально, но автоматический model synthesis не запускается. Прямое упоминание
+локально, но Conversation Understanding Loop не запускается. Прямое упоминание
 продолжает прежний ограниченный projectless Q&A flow: это явный запрос пользователя,
 а не фоновый egress.
 
-После включения synthesis соблюдает следующие инварианты:
+### Один проход понимания, два результата
+
+У SUMMING нет отдельного Project ambient-turn «нужно ли ответить?» и отдельного
+Team Space turn «что запомнить?». Один source-local model pass сначала строит общую
+интерпретацию эпизода, а затем из неё одновременно выводит долговременную память и
+решение об интервенции:
+
+```text
+provider update
+      │
+      ▼
+credential interception → durable Event Journal
+      │
+      ▼
+source-local adaptive batch
+      │
+      ▼
+Conversation Understanding Loop          один model turn
+      ├── Conversation Episode            кто, кому, о чём и зачем
+      ├── Team Space summary delta         текущее общее понимание
+      ├── knowledge candidates             fact/decision/task/risk/…
+      └── intervention decision            silent | reply
+             │
+             └── Telegram reply только после deterministic gates
+```
+
+Это принципиальный инвариант: память и реплика не могут основываться на двух
+независимых прочтениях одного разговора. `silent` — полноценный успешный результат;
+он обновляет episode/knowledge, но ничего не отправляет в Telegram.
+
+### Граница Conversation Episode
+
+Batch всегда принадлежит ровно одному `team_source`: одному Telegram topic, Slack
+thread или будущему эквиваленту. События двух топиков одного Team Space не смешиваются
+в один episode. При этом loop видит уже подтверждённые знания всего Team Space и
+bounded `reply_target` snapshot, поэтому способен связать новую реплику с более ранним
+сообщением того же source.
+
+Планировщик использует три совместных триггера:
+
+1. `team_memory.understanding_quiet_sec` — trailing debounce; каждое новое событие
+   source перезапускает окно тишины, по умолчанию 20 секунд;
+2. `team_memory.understanding_max_wait_sec` — hard deadline от первого ожидающего
+   события, по умолчанию 90 секунд, поэтому непрерывный разговор не откладывает
+   понимание бесконечно;
+3. `team_memory.understanding_max_events` — немедленный запуск при достижении размера
+   batch, по умолчанию 40 событий.
+
+Следовательно, это не polling «один вызов каждые 20 секунд». Один короткий burst
+обычно создаёт один model turn после паузы; длинный непрерывный разговор режется hard
+deadline или event cap. Одновременно выполняется один background loop; остальные
+Sources сохраняют evidence и ждут своей очереди. После ошибки batch остаётся pending,
+а retry получает экспоненциальный backoff до одного часа.
+
+С точки зрения model usage один успешно обработанный batch равен одному Codex turn —
+не одному turn на сообщение и не двум turn для attention/memory. Runtime не рассылает
+один episode одновременно в Codex, OpenAI API, Anthropic и Gemini: background reasoning
+использует одну настроенную модель через Codex App Server. Direct mention/reply создаёт
+дополнительный немедленный turn, потому что это новый явный запрос пользователя.
+Транскрипция voice/audio является отдельным вызовом выбранного transcription API;
+чтение account limits раз в 15 минут — control-plane RPC без model inference.
+
+### Structured contract
+
+Model output состоит из пяти согласованных частей:
+
+- `episode` — `source_id`, тема, synopsis, confidence, полный набор `event_ids` и
+  участники с ролями `speaker` / `addressee` / `mentioned`; предполагаемый intent
+  всегда имеет собственный confidence;
+- `summary` — обновлённое bounded понимание Team Space;
+- `knowledge` — новые facts, decisions, tasks, questions, risks, terms, person items
+  и hypotheses; episode отдельно добавляет runtime, поэтому модель не дублирует его;
+- orientation — готовность впервые представиться команде и самые ценные вопросы;
+- `intervention` — `silent` либо `reply` с причиной и target event из текущего batch.
+
+Runtime не доверяет JSON только потому, что его вернула модель. Он проверяет, что
+episode покрывает batch целиком и не пересекает Source; участники существуют внутри
+Space; evidence ids, visibility и supersession не пересекают границы; confidence и
+temporal interval валидны; reply ссылается на реальное provider message текущего
+batch. Невалидный output не создаёт ни знания, ни видимость понимания.
+
+### Молчание, orientation и прямые обращения
+
+Для человеческой беседы default — `silent`. Loop не подтверждает, не пересказывает и
+не отвечает только потому, что сообщение написал администратор или Project owner.
+`reply` допустим для существенной неоднозначности, фактической ошибки, противоречия,
+blocker, риска или незакрытого решения, где краткая реплика помогает именно сейчас.
+
+До `team_memory.orientation_event_threshold` SUMMING накапливает понимание молча.
+После порога он один раз публикует orientation и главные вопросы. Дальнейший reply
+разрешён только после orientation, только к конкретному evidence event и не чаще
+`team_memory.intervention_cooldown_sec`. Решение `silent` и причина видны в audit
+успешного loop run; `team_interventions` хранит только реально подготовленные к
+доставке сообщения.
+
+Явный bot mention, reply боту или команда не ждут background batch: это отдельный
+немедленный direct turn с полномочиями конкретного пользователя. Он также остаётся
+evidence и позже войдёт в общий episode. Background loop никогда не получает Project
+files, editor history, network или agency и не запускает второй Project-aware ambient
+turn. Если для помощи нужна проверка репозитория, SUMMING формулирует пробел; человек
+явно обращается к боту, и только этот direct turn получает разрешённый Project context.
+
+После включения loop соблюдает следующие технические инварианты:
 
 1. один bounded batch вместо turn на каждое сообщение;
 2. read-only ephemeral Codex thread без Project, сети и внешних capabilities;
-3. structured output с evidence ids, confidence, visibility и temporal status;
+3. один structured output для episode, knowledge и intervention;
 4. deterministic validation до записи knowledge;
 5. credentials отбрасываются до journal и до model boundary;
 6. ошибка оставляет events pending и не симулирует понимание;
 7. intervention создаётся только после warm-up, сохраняется с причиной и имеет
    cooldown.
 
-Runtime собирает до `team_memory.max_batch_events` pending events каждые
-`team_memory.synthesis_batch_sec` секунд. Модель получает текущий summary, последние knowledge
-items и provider-neutral evidence batch. Результат проходит JSON Schema и повторную
-детерминированную проверку: нельзя сослаться на событие вне batch, придумать чужой
-source/person visibility, дать пустому выводу provenance или выбрать несуществующее
-сообщение для proactive reply. Ошибка оставляет evidence pending для повторной
-обработки.
-
-До `team_memory.orientation_event_threshold` SUMMING только накапливает knowledge. После порога
-он один раз публикует orientation message и наиболее ценные вопросы. Proactive reply
-допустим только после успешной orientation, только reply к конкретному evidence event
-и не чаще `team_memory.intervention_cooldown_sec`.
+Старые ключи `team_memory.synthesis_batch_sec` и `team_memory.max_batch_events`
+читаются как compatibility aliases для quiet window и event cap. Новые конфиги должны
+использовать `understanding_*`; отдельный synthesis scheduler больше не существует.
 
 ## Transparency и управление
 

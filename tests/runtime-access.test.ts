@@ -261,21 +261,17 @@ test("owners control projects while group participants get read-only Q&A", async
       42,
     );
     assert.equal(startedConversation, "");
+    assert.deepEqual(runtime.state.pendingAll(bound.id), []);
+    const boundSource = runtime.state.teamSourceForProvider("telegram", "-100", "5")!;
     assert.deepEqual(
-      runtime.state.pendingAll(bound.id).map((item) => [
-        item.access,
-        item.responseMode,
-        item.senderId,
-      ]),
+      runtime.state.recentTeamEvents(boundSource.spaceId, boundSource.id)
+        .slice(-2)
+        .map((event) => event.text),
       [
-        ["read-only", "ambient", 42],
-        ["read-only", "ambient", 42],
+        "@TON1K_01 текущий топик настроен на проект summing",
+        "тебя там владельцем поставим",
       ],
     );
-    runtime.state.consume(runtime.state.pendingAll(bound.id).map((item) => item.id));
-    (
-      runtime as unknown as { clearAmbientTimers(): void }
-    ).clearAmbientTimers();
 
     await send(
       42,
@@ -466,29 +462,25 @@ test("owners control projects while group participants get read-only Q&A", async
 
     await send(999, "Как устроена авторизация?", -100, "supergroup", 5);
     assert.equal(startedConversation, "");
-    assert.deepEqual(
-      runtime.state.pendingAll(bound.id).map((item) => [
-        item.text,
-        item.access,
-        item.senderId,
-        item.responseMode,
-      ]),
-      [["Как устроена авторизация?", "read-only", 999, "ambient"]],
-    );
+    assert.deepEqual(runtime.state.pendingAll(bound.id), []);
     await send(999, "@summing_bot, как устроена авторизация?", -100, "supergroup", 5);
     assert.equal(startedConversation, bound.id);
     await send(999, "А токены где проверяются?", -100, "supergroup", 5, true);
     assert.deepEqual(
       runtime.state.pendingAll(bound.id).map((item) => item.responseMode),
-      ["ambient", "direct", "direct"],
+      ["direct", "direct"],
     );
     await send(999, "/cancel", -100, "supergroup", 5);
     assert.match(replies.at(-1) ?? "", /гостевом режиме команды отключены/);
-    assert.equal(runtime.state.pendingAll(bound.id).length, 3);
+    assert.equal(runtime.state.pendingAll(bound.id).length, 2);
 
     const beforeRateLimit = runtime.state.pendingAll(bound.id).length;
     for (let index = 0; index < 12; index += 1) {
-      await send(888, `Фоновое сообщение ${index}`, -100, "supergroup", 5);
+      await send(888, `Обычное фоновое сообщение ${index}`, -100, "supergroup", 5);
+    }
+    assert.equal(runtime.state.pendingAll(bound.id).length, beforeRateLimit);
+    for (let index = 0; index < 12; index += 1) {
+      await send(888, `@summing_bot прямой вопрос ${index}`, -100, "supergroup", 5);
     }
     const beforeNotice = replies.length;
     await send(888, "@summing_bot ответь", -100, "supergroup", 5);
@@ -498,58 +490,16 @@ test("owners control projects while group participants get read-only Q&A", async
     await send(888, "@summing_bot ещё раз", -100, "supergroup", 5);
     assert.equal(replies.length, beforeNotice + 1);
 
-    const ambientPrompt = (
-      runtime as unknown as {
-        ambientPrompt(items: ReturnType<typeof runtime.state.pendingAll>): string;
-      }
-    ).ambientPrompt.bind(runtime);
-    const renderedAmbientPrompt = ambientPrompt(
-      runtime.state.pendingAll(bound.id).filter((item) => item.responseMode === "ambient"),
+    runtime.state.enqueueInput(
+      bound.id,
+      9999,
+      "legacy ambient input",
+      "followup",
+      "read-only",
+      999,
+      "ambient",
     );
-    assert.match(renderedAmbientPrompt, /Silence is the default for human-to-human conversation/);
-    assert.match(renderedAmbientPrompt, /Never echo, confirm, paraphrase/);
-
-    const parseAmbientDecision = (
-      runtime as unknown as {
-        parseAmbientDecision(
-          response: string,
-          candidates: number[],
-        ): { shouldReply: boolean; replyToMessageId: number | null; answer: string } | null;
-      }
-    ).parseAmbientDecision.bind(runtime);
-    assert.deepEqual(
-      parseAmbientDecision(
-        '{"should_reply":false,"reply_to_message_id":null,"answer":""}',
-        [10],
-      ),
-      { shouldReply: false, replyToMessageId: null, answer: "" },
-    );
-    assert.deepEqual(
-      parseAmbientDecision(
-        '{"should_reply":true,"reply_to_message_id":10,"answer":"Полезный ответ"}',
-        [10],
-      ),
-      { shouldReply: true, replyToMessageId: 10, answer: "Полезный ответ" },
-    );
-    assert.equal(
-      parseAmbientDecision(
-        '{"should_reply":true,"reply_to_message_id":999,"answer":"Не туда"}',
-        [10],
-      ),
-      null,
-    );
-    const longDecision = parseAmbientDecision(
-      JSON.stringify({
-        should_reply: true,
-        reply_to_message_id: 10,
-        answer: "а".repeat(5_000),
-      }),
-      [10],
-    );
-    assert.equal(longDecision?.answer.length, 3_900);
-    assert.match(longDecision?.answer ?? "", /…$/);
-
-    const executedModes: string[] = [];
+    let directRuns = 0;
     Object.assign(runtime, {
       executeRun: async (
         _conversationId: string,
@@ -557,9 +507,8 @@ test("owners control projects while group participants get read-only Q&A", async
         _replyTo: number,
         inputIds: number[],
         _access: string,
-        responseMode: string,
       ): Promise<void> => {
-        executedModes.push(responseMode);
+        directRuns += 1;
         runtime.state.consume(inputIds);
       },
     });
@@ -567,13 +516,7 @@ test("owners control projects while group participants get read-only Q&A", async
       runtime as unknown as { conversationLoop(conversationId: string): Promise<void> }
     ).conversationLoop.bind(runtime);
     await conversationLoop(bound.id);
-    assert.deepEqual(executedModes, ["direct"]);
-    assert.ok(runtime.state.pendingAll(bound.id).every((item) => item.responseMode === "ambient"));
-    (
-      runtime as unknown as { ambientReady: Set<string> }
-    ).ambientReady.add(bound.id);
-    await conversationLoop(bound.id);
-    assert.deepEqual(executedModes, ["direct", "ambient"]);
+    assert.equal(directRuns, 1);
     assert.equal(runtime.state.pendingAll(bound.id).length, 0);
 
     let readOnlyOptions: Record<string, unknown> = {};

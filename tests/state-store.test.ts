@@ -302,9 +302,41 @@ test("Team Space journals evidence, preserves provenance, and honors erasure", (
         [second.id, "Иван", "Я закончу миграцию к четвергу.", "101"],
       ],
     );
-    store.applyTeamSynthesis(space.id, [first.id, second.id], {
+    store.applyTeamUnderstanding(space.id, [first.id, second.id], {
+      episode: {
+        sourceId: first.sourceId,
+        subject: "Перенос релиза и миграция",
+        synopsis: "Маша перенесла релиз, Иван взял завершение миграции.",
+        confidence: 0.95,
+        eventIds: [first.id, second.id],
+        participants: [{
+          personId: first.personId,
+          role: "speaker",
+          intent: "Зафиксировать перенос релиза",
+          confidence: 0.9,
+          evidenceEventIds: [first.id],
+        }, {
+          personId: second.personId,
+          role: "speaker",
+          intent: "Взять обязательство по миграции",
+          confidence: 0.9,
+          evidenceEventIds: [second.id],
+        }],
+      },
       summary: "Команда готовит миграцию перед релизом.",
       knowledge: [{
+        kind: "episode",
+        subject: "Перенос релиза и миграция",
+        statement: "Маша перенесла релиз, Иван взял завершение миграции.",
+        confidence: 0.95,
+        status: "resolved",
+        visibility: "source",
+        visibilityRef: first.sourceId,
+        evidenceEventIds: [first.id, second.id],
+        supersedesKnowledgeIds: [],
+        validFrom: 1_700_000_100,
+        validTo: 1_700_000_110,
+      }, {
         kind: "decision",
         subject: "релиз",
         statement: "Релиз перенесён на пятницу.",
@@ -332,8 +364,12 @@ test("Team Space journals evidence, preserves provenance, and honors erasure", (
       orientationReady: false,
       orientationMessage: "",
       clarificationQuestions: [],
-      proactiveReplyEventId: null,
-      proactiveMessage: "",
+      intervention: {
+        action: "silent",
+        replyToEventId: null,
+        message: "",
+        reason: "Команда уже согласовала следующие действия.",
+      },
     }, 1_700_000_120);
     assert.equal(store.pendingTeamEventCount(space.id), 0);
     assert.equal(store.teamSpace(space.id)?.summary, "Команда готовит миграцию перед релизом.");
@@ -345,6 +381,7 @@ test("Team Space journals evidence, preserves provenance, and honors erasure", (
       ]).sort((left, right) => String(left[0]).localeCompare(String(right[0]))),
       [
         ["decision", "Релиз перенесён на пятницу.", [first.id]],
+        ["episode", "Маша перенесла релиз, Иван взял завершение миграции.", [first.id, second.id]],
         ["task", "Завершить миграцию к четвергу.", [second.id]],
       ],
     );
@@ -412,9 +449,35 @@ test("repairs legacy forum-root reply edges", () => {
       administratorUserId: 1,
     })!;
     assert.equal(store.teamEvent(event.id)?.replyToExternalEventId, "17");
-    store.applyTeamSynthesis(event.spaceId, [event.id], {
+    store.applyTeamUnderstanding(event.spaceId, [event.id], {
+      episode: {
+        sourceId: event.sourceId,
+        subject: "Legacy forum reply",
+        synopsis: "Сообщение было ошибочно связано с корнем forum topic.",
+        confidence: 0.8,
+        eventIds: [event.id],
+        participants: [{
+          personId: event.personId,
+          role: "speaker",
+          intent: "",
+          confidence: 1,
+          evidenceEventIds: [event.id],
+        }],
+      },
       summary: "Legacy summary built from a transport-only edge.",
       knowledge: [{
+        kind: "episode",
+        subject: "Legacy forum reply",
+        statement: "Сообщение было ошибочно связано с корнем forum topic.",
+        confidence: 0.8,
+        status: "resolved",
+        visibility: "source",
+        visibilityRef: event.sourceId,
+        evidenceEventIds: [event.id],
+        supersedesKnowledgeIds: [],
+        validFrom: 1_700_000_100,
+        validTo: 1_700_000_100,
+      }, {
         kind: "fact",
         subject: "forum reply",
         statement: "Сообщение якобы отвечало корню топика.",
@@ -430,8 +493,12 @@ test("repairs legacy forum-root reply edges", () => {
       orientationReady: false,
       orientationMessage: "",
       clarificationQuestions: [],
-      proactiveReplyEventId: null,
-      proactiveMessage: "",
+      intervention: {
+        action: "silent",
+        replyToEventId: null,
+        message: "",
+        reason: "Нет основания вмешиваться.",
+      },
     }, 1_700_000_110);
     assert.equal(store.teamEvent(event.id)?.synthesisState, "synthesized");
     store.close();

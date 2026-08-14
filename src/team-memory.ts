@@ -4,7 +4,7 @@ import type {
   TeamEvent,
   TeamKnowledgeItem,
   TeamSpace,
-  TeamSynthesisResult,
+  TeamUnderstandingResult,
 } from "./state-store.js";
 import type { TelegramObject } from "./telegram-api.js";
 
@@ -19,6 +19,8 @@ const TEAM_KNOWLEDGE_KINDS = new Set([
   "person",
   "hypothesis",
 ]);
+const MODEL_KNOWLEDGE_KINDS = [...TEAM_KNOWLEDGE_KINDS]
+  .filter((kind) => kind !== "episode");
 const TEAM_KNOWLEDGE_STATUSES = new Set([
   "active",
   "resolved",
@@ -31,17 +33,72 @@ const nullableNumberSchema = {
   anyOf: [{ type: "number" }, { type: "null" }],
 };
 
-export const TEAM_SYNTHESIS_OUTPUT_SCHEMA: Record<string, unknown> = {
+export const TEAM_UNDERSTANDING_OUTPUT_SCHEMA: Record<string, unknown> = {
   type: "object",
   properties: {
+    episode: {
+      type: "object",
+      properties: {
+        source_id: { type: "string" },
+        subject: { type: "string" },
+        synopsis: { type: "string" },
+        confidence: { type: "number", minimum: 0, maximum: 1 },
+        event_ids: {
+          type: "array",
+          minItems: 1,
+          uniqueItems: true,
+          items: { type: "integer" },
+        },
+        participants: {
+          type: "array",
+          minItems: 1,
+          maxItems: 100,
+          items: {
+            type: "object",
+            properties: {
+              person_id: { type: "string" },
+              role: {
+                type: "string",
+                enum: ["speaker", "addressee", "mentioned"],
+              },
+              intent: { type: "string" },
+              confidence: { type: "number", minimum: 0, maximum: 1 },
+              evidence_event_ids: {
+                type: "array",
+                minItems: 1,
+                uniqueItems: true,
+                items: { type: "integer" },
+              },
+            },
+            required: [
+              "person_id",
+              "role",
+              "intent",
+              "confidence",
+              "evidence_event_ids",
+            ],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: [
+        "source_id",
+        "subject",
+        "synopsis",
+        "confidence",
+        "event_ids",
+        "participants",
+      ],
+      additionalProperties: false,
+    },
     summary: { type: "string" },
     knowledge: {
       type: "array",
-      maxItems: 100,
+      maxItems: 99,
       items: {
         type: "object",
         properties: {
-          kind: { type: "string", enum: [...TEAM_KNOWLEDGE_KINDS] },
+          kind: { type: "string", enum: MODEL_KNOWLEDGE_KINDS },
           subject: { type: "string" },
           statement: { type: "string" },
           confidence: { type: "number", minimum: 0, maximum: 1 },
@@ -85,24 +142,33 @@ export const TEAM_SYNTHESIS_OUTPUT_SCHEMA: Record<string, unknown> = {
       maxItems: 5,
       items: { type: "string" },
     },
-    proactive_reply_event_id: {
-      anyOf: [{ type: "integer" }, { type: "null" }],
+    intervention: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["silent", "reply"] },
+        reply_to_event_id: {
+          anyOf: [{ type: "integer" }, { type: "null" }],
+        },
+        message: { type: "string" },
+        reason: { type: "string" },
+      },
+      required: ["action", "reply_to_event_id", "message", "reason"],
+      additionalProperties: false,
     },
-    proactive_message: { type: "string" },
   },
   required: [
+    "episode",
     "summary",
     "knowledge",
     "orientation_ready",
     "orientation_message",
     "clarification_questions",
-    "proactive_reply_event_id",
-    "proactive_message",
+    "intervention",
   ],
   additionalProperties: false,
 };
 
-function synthesisRecord(value: unknown): Record<string, unknown> | null {
+function objectRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
@@ -127,28 +193,51 @@ function nullableFiniteNumber(value: unknown): number | null | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
-export function parseTeamSynthesisResponse(
+export function parseTeamUnderstandingResponse(
   response: string,
   events: TeamEvent[],
-): TeamSynthesisResult | null {
+  contextPersonIds: Iterable<string> = [],
+): TeamUnderstandingResult | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(response);
   } catch {
     return null;
   }
-  const root = synthesisRecord(parsed);
+  const root = objectRecord(parsed);
+  const episodeRoot = objectRecord(root?.episode);
+  const interventionRoot = objectRecord(root?.intervention);
+  const episodeSourceId = boundedString(episodeRoot?.source_id, 250, false);
+  const episodeSubject = boundedString(episodeRoot?.subject, 500, false);
+  const episodeSynopsis = boundedString(episodeRoot?.synopsis, 4_000, false);
+  const episodeEventIds = integerList(episodeRoot?.event_ids, false);
   const summary = boundedString(root?.summary, 12_000);
   const orientationMessage = boundedString(root?.orientation_message, 3_900);
-  const proactiveMessage = boundedString(root?.proactive_message, 3_900);
+  const interventionMessage = boundedString(interventionRoot?.message, 3_900);
+  const interventionReason = boundedString(interventionRoot?.reason, 500, false);
   if (
     !root ||
+    !episodeRoot ||
+    !interventionRoot ||
+    episodeSourceId === null ||
+    episodeSubject === null ||
+    episodeSynopsis === null ||
+    episodeEventIds === null ||
+    typeof episodeRoot.confidence !== "number" ||
+    !Number.isFinite(episodeRoot.confidence) ||
+    episodeRoot.confidence < 0 ||
+    episodeRoot.confidence > 1 ||
+    !Array.isArray(episodeRoot.participants) ||
+    episodeRoot.participants.length === 0 ||
+    episodeRoot.participants.length > 100 ||
     summary === null ||
     orientationMessage === null ||
-    proactiveMessage === null ||
+    interventionMessage === null ||
+    interventionReason === null ||
+    !["silent", "reply"].includes(String(interventionRoot.action ?? "")) ||
     typeof root.orientation_ready !== "boolean" ||
     !Array.isArray(root.knowledge) ||
-    root.knowledge.length > 100 ||
+    root.knowledge.length > 99 ||
     !Array.isArray(root.clarification_questions) ||
     root.clarification_questions.length > 5
   ) {
@@ -162,10 +251,64 @@ export function parseTeamSynthesisResponse(
   }
   const eventIds = new Set(events.map((event) => event.id));
   const sourceIds = new Set(events.map((event) => event.sourceId));
-  const personIds = new Set(events.map((event) => event.personId));
-  const knowledge: TeamSynthesisResult["knowledge"] = [];
+  const personIds = new Set([
+    ...events.map((event) => event.personId),
+    ...contextPersonIds,
+  ]);
+  if (
+    events.length === 0 ||
+    sourceIds.size !== 1 ||
+    !sourceIds.has(episodeSourceId) ||
+    episodeEventIds.length !== events.length ||
+    episodeEventIds.some((eventId) => !eventIds.has(eventId))
+  ) {
+    return null;
+  }
+  const participants: TeamUnderstandingResult["episode"]["participants"] = [];
+  for (const value of episodeRoot.participants) {
+    const participant = objectRecord(value);
+    const personId = boundedString(participant?.person_id, 250, false);
+    const intent = boundedString(participant?.intent, 1_000);
+    const participantEvidenceIds = integerList(participant?.evidence_event_ids, false);
+    if (
+      !participant ||
+      personId === null ||
+      !personIds.has(personId) ||
+      intent === null ||
+      !["speaker", "addressee", "mentioned"].includes(String(participant.role ?? "")) ||
+      typeof participant.confidence !== "number" ||
+      !Number.isFinite(participant.confidence) ||
+      participant.confidence < 0 ||
+      participant.confidence > 1 ||
+      participantEvidenceIds === null ||
+      participantEvidenceIds.some((eventId) => !eventIds.has(eventId))
+    ) {
+      return null;
+    }
+    participants.push({
+      personId,
+      role: participant.role as TeamUnderstandingResult["episode"]["participants"][number]["role"],
+      intent,
+      confidence: participant.confidence,
+      evidenceEventIds: participantEvidenceIds,
+    });
+  }
+  const occurredAt = events.map((event) => event.occurredAt);
+  const knowledge: TeamUnderstandingResult["knowledge"] = [{
+    kind: "episode",
+    subject: episodeSubject,
+    statement: episodeSynopsis,
+    confidence: episodeRoot.confidence,
+    status: "resolved",
+    visibility: "source",
+    visibilityRef: episodeSourceId,
+    evidenceEventIds: episodeEventIds,
+    supersedesKnowledgeIds: [],
+    validFrom: Math.min(...occurredAt),
+    validTo: Math.max(...occurredAt),
+  }];
   for (const value of root.knowledge) {
-    const item = synthesisRecord(value);
+    const item = objectRecord(value);
     const subject = boundedString(item?.subject, 500);
     const statement = boundedString(item?.statement, 4_000, false);
     const visibilityRef = boundedString(item?.visibility_ref, 250);
@@ -177,6 +320,7 @@ export function parseTeamSynthesisResponse(
       !item ||
       typeof item.kind !== "string" ||
       !TEAM_KNOWLEDGE_KINDS.has(item.kind) ||
+      item.kind === "episode" ||
       typeof item.status !== "string" ||
       !TEAM_KNOWLEDGE_STATUSES.has(item.status) ||
       typeof item.visibility !== "string" ||
@@ -201,12 +345,12 @@ export function parseTeamSynthesisResponse(
       return null;
     }
     knowledge.push({
-      kind: item.kind as TeamSynthesisResult["knowledge"][number]["kind"],
+      kind: item.kind as TeamUnderstandingResult["knowledge"][number]["kind"],
       subject,
       statement,
       confidence: item.confidence,
-      status: item.status as TeamSynthesisResult["knowledge"][number]["status"],
-      visibility: item.visibility as TeamSynthesisResult["knowledge"][number]["visibility"],
+      status: item.status as TeamUnderstandingResult["knowledge"][number]["status"],
+      visibility: item.visibility as TeamUnderstandingResult["knowledge"][number]["visibility"],
       visibilityRef,
       evidenceEventIds,
       supersedesKnowledgeIds,
@@ -214,34 +358,49 @@ export function parseTeamSynthesisResponse(
       validTo,
     });
   }
-  const proactiveReplyEventId = root.proactive_reply_event_id;
+  const replyToEventId = interventionRoot.reply_to_event_id;
   if (
-    proactiveReplyEventId !== null &&
-    (!Number.isSafeInteger(proactiveReplyEventId) ||
+    replyToEventId !== null &&
+    (!Number.isSafeInteger(replyToEventId) ||
       !events.some((event) =>
-        event.id === proactiveReplyEventId &&
+        event.id === replyToEventId &&
         ["message", "command", "service"].includes(event.eventKind) &&
         /^\d+$/.test(event.externalEventId)
       ))
   ) {
     return null;
   }
+  const interventionAction = interventionRoot.action as "silent" | "reply";
   if (
-    (proactiveReplyEventId === null && proactiveMessage !== "") ||
-    (proactiveReplyEventId !== null && proactiveMessage === "") ||
+    (interventionAction === "silent" &&
+      (replyToEventId !== null || interventionMessage !== "")) ||
+    (interventionAction === "reply" &&
+      (replyToEventId === null || interventionMessage === "")) ||
     (root.orientation_ready === true && orientationMessage === "") ||
     (root.orientation_ready === false && orientationMessage !== "")
   ) {
     return null;
   }
   return {
+    episode: {
+      sourceId: episodeSourceId,
+      subject: episodeSubject,
+      synopsis: episodeSynopsis,
+      confidence: episodeRoot.confidence,
+      eventIds: episodeEventIds,
+      participants,
+    },
     summary,
     knowledge,
     orientationReady: root.orientation_ready,
     orientationMessage,
     clarificationQuestions: questions,
-    proactiveReplyEventId: proactiveReplyEventId as number | null,
-    proactiveMessage,
+    intervention: {
+      action: interventionAction,
+      replyToEventId: replyToEventId as number | null,
+      message: interventionMessage,
+      reason: interventionReason,
+    },
   };
 }
 

@@ -1,6 +1,6 @@
-# SUMMING 9.4: архитектура, эксплуатация и разработка
+# SUMMING 9.5: архитектура, эксплуатация и разработка
 
-> Версия: **9.4.4**
+> Версия: **9.5.0**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
 > Последняя сверка с кодом: **14 августа 2026 года**.
 
@@ -42,7 +42,7 @@ Telegram и SUMMING                  Codex App Server
 ---------------------------------  ---------------------------------
 администратор/owner/participant     модель и agent loop
 binding topic → project             editor/read-only Codex threads
-Team Space event journal            explicit model boundary only
+Team Space event journal            one Conversation Understanding Loop
 очередь access/steer/follow-up      sandboxed inspection or project work
 SQLite-состояние                    sandbox конкретного turn
 стрим Telegram                      persistent Codex thread
@@ -77,8 +77,9 @@ health port, процесс не имитирует успешный запус�
 попадает в journal.
 
 При старте runtime также ищет сохранённые `pending_inputs`: direct-очередь
-возобновляется сразу, а ambient-очередь получает новое окно агрегации. Поэтому
-после рестарта работа может начаться без нового сообщения.
+возобновляется сразу, а legacy ambient inputs удаляются, поскольку их authority —
+уже записанный Team Space event journal. Pending evidence планируется source-local
+Conversation Understanding Loop. Поэтому после рестарта работа может начаться без нового сообщения.
 Если очередь пуста, runtime только ждёт Telegram updates и события Codex;
 публичный HTTP-сервис не запускается.
 
@@ -186,7 +187,7 @@ forum group либо иметь отключённый Privacy Mode. Во вто
 `@BotFather` → `/setprivacy` → `Disable`, затем удалите и заново добавьте бота в
 группу: Telegram применяет изменение privacy после повторного добавления. При
 стандартном включённом режиме не-администратор видит только адресованные ему
-команды и replies, поэтому на полный direct/ambient routing полагаться нельзя. См.
+команды и replies, поэтому на полный direct/background routing полагаться нельзя. См.
 [официальное описание Privacy Mode](https://core.telegram.org/bots/features#privacy-mode).
 
 В обычном приватном чате `message_thread_id` равен нулю, поэтому весь чат является
@@ -204,7 +205,7 @@ projectless read-only Codex thread с `ephemeral = true` и `environments = []`;
 ответа runtime вызывает `thread/unsubscribe`. В prompt попадают прямой вопрос,
 последние 20 видимых evidence events этого Source и текст ответа бота при reply
 на него. Это explicitly requested Q&A boundary, а не автоматический background
-synthesis. Одно лишь `@mention` без вопроса обрабатывается локально подсказкой,
+understanding. Одно лишь `@mention` без вопроса обрабатывается локально подсказкой,
 но само сообщение остаётся evidence. CWD — отдельный
 пустой runtime-каталог; доступ к Project/Workspace,
 project memory, editor/read-only thread привязанных топиков, сети и внешним интеграциям
@@ -234,32 +235,33 @@ Runtime запрашивает Telegram updates типов `message`, `edited_me
 до следующего Telegram update. Edit и erasure переводят зависимые knowledge
 items в `needs-review`; provider redelivery идемпотентна.
 
-Автоматический semantic synthesis всего Team Space не выводится из факта
+Автоматический Conversation Understanding Loop не выводится из факта
 локального хранения. Он требует отдельного operator consent на model egress,
 описанного в `TEAM_MEMORY_RU.md`, и настройки
 `team_memory.model_egress_enabled = true`. До первого batch runtime публикует
 отдельный egress notice. Без consent pending evidence остаётся локальным и не
 передаётся фоновым Codex turns.
 
-При включении runtime раз в `team_memory.synthesis_batch_sec` берёт bounded batch,
-создаёт fresh ephemeral read-only Codex thread в пустом runtime CWD с выключенными
-network, environments и внешними capabilities и требует structured output. Runtime
-повторно валидирует evidence ids, confidence, visibility, temporal validity,
-supersession и proactive reply target до SQLite. Ошибка оставляет events pending.
+При включении runtime собирает source-local bounded batch по quiet window, hard deadline
+или event cap, создаёт fresh ephemeral read-only Codex thread в пустом runtime CWD с
+выключенными network, environments и внешними capabilities и требует единый structured
+output для episode, knowledge и intervention. Runtime повторно валидирует evidence ids,
+confidence, visibility, temporal validity, supersession и reply target до SQLite. Ошибка
+оставляет events pending.
 Для настоящего reply evidence batch содержит не только provider message id, но и
 `reply_target` snapshot исходного event: автора, время и текст последней доступной
 версии. Техническая ссылка Telegram forum message на корневое service-message topic
 не является reply и удаляется как из нового ingest, так и из накопленных legacy events;
-зависимые synthesis results переводятся в `needs-review`, а evidence переосмысливается.
+зависимые understanding results переводятся в `needs-review`, а evidence переосмысливается.
 После `team_memory.orientation_event_threshold` SUMMING один раз объясняет текущее понимание и
 задаёт главные вопросы; последующие evidence-linked proactive replies имеют cooldown.
 
 ### 3.5. Run
 
-Run — один пользовательский turn внутри Conversation. Каждый Run имеет
-`access_mode`: `write` для администратора/owner или `read-only` для участника, а
-также `response_mode`: `direct` для явного запроса или `ambient` для фонового
-семантического анализа.
+Run — один явно запрошенный пользовательский turn внутри Project Conversation. Каждый
+Run имеет `access_mode`: `write` для администратора/owner или `read-only` для участника,
+а его persisted `response_mode` равен `direct`. Background understanding не является
+Project Run и использует отдельный ephemeral thread без Project.
 
 Инварианты:
 
@@ -273,17 +275,17 @@ Run — один пользовательский turn внутри Conversation
 
 ## 4. Маршрутизация сообщений
 
-У `pending_inputs` есть две независимые оси: полномочие `access_mode` (`write` или
-`read-only`) и намерение ответа `response_mode` (`direct` или `ambient`). Editor
-inputs никогда не объединяются с participant inputs, а ambient batch никогда не
-может steer активный editor turn.
+Новые `pending_inputs` всегда являются direct и различаются полномочием `access_mode`
+(`write` или `read-only`). Editor inputs никогда не объединяются с participant inputs.
+Значение `response_mode=ambient` сохраняется в SQLite только для совместимости со
+старыми базами; при старте такие inputs удаляются в пользу уже durable `team_events`.
 
 Полномочие автора не превращает каждую его реплику в команду. В group/supergroup
 сообщение администратора или Project owner с ведущим `@mention` другого пользователя
-либо reply на сообщение человека получает `response_mode=ambient` и эффективный
-`access_mode=read-only`. Явное упоминание бота, reply боту и slash-команда имеют
+либо reply на сообщение человека классифицируется как background evidence и вообще не
+создаёт Project input. Явное упоминание бота, reply боту и slash-команда имеют
 приоритет и остаются direct. Поэтому человеческая беседа не запускает и не steer-ит
-editor turn, но остаётся Team Space evidence и может войти в тихий ambient batch.
+editor/read-only turn, но остаётся Team Space evidence и входит в общий understanding batch.
 
 Telegram Bot API добавляет `reply_to_message`, равный `message_thread_id`, к обычным
 сообщениям forum topic. Это transport edge на корневое service-message, а не действие
@@ -297,42 +299,66 @@ routing; обычные исправления без явного обраще�
 ### 4.1. Прямое обращение участника
 
 Упоминание `@username_бота` или reply на сообщение самого бота получает
-`response_mode=direct`. Такой input имеет приоритет над ожидающей ambient-очередью
-и запускается без batch-delay. Это явный запрос на ответ, но всё ещё в отдельном
+`response_mode=direct` и запускается без background batch-delay. Это явный запрос на ответ, но всё ещё в отдельном
 read-only thread: запускать команды или изменять Project от этого нельзя.
 
 Для непривязанного топика те же признаки direct (`@mention` или reply боту) не
 попадают в Project routing: они запускают отдельный fresh projectless Q&A, описанный
-в разделе 3. Обычное сообщение там пополняет долговечный локальный Team Space journal
-и никогда не получает Project `response_mode=ambient`. При явном consent оно может
-попасть в отдельный Team Space synthesis, который не является Conversation routing и
-не получает Project context или agency.
+в разделе 3. Обычное сообщение там пополняет долговечный локальный Team Space journal.
+При явном consent оно входит в тот же Conversation Understanding Loop, что и bound
+source; loop не является Project routing и не получает Project context или agency.
 
-### 4.2. Фоновый смысловой анализ
+### 4.2. Один Conversation Understanding Loop
 
-Остальные сообщения участников, а также явно адресованные человеку сообщения
-администратора/owner получают `response_mode=ambient`. Первый input
-запускает тихий таймер `participant_batch_sec`; новые сообщения до его истечения
-собираются в один пакет. После таймера Codex получает JSON-массив с Telegram
-message/user id и текстом, а `turn/start.outputSchema` требует строгое решение:
-отвечать ли, какому исходному сообщению и каким текстом.
+Остальные сообщения не становятся `pending_inputs` Project Conversation. Durable
+ingest сначала фиксирует их в `team_events`, затем один source-local scheduler собирает
+Conversation Episode. Это единственный фоновый model loop: старого Project ambient
+turn и отдельного Team Space synthesis turn больше нет.
 
-Молчание — default для человеческой беседы: ambient-анализ не подтверждает, не
-пересказывает и не отвечает только потому, что реплику написал editor. Ответ допустим
-только когда он существенно помогает обсуждению Project: это
-конкретный вопрос по реализации, вероятная фактическая ошибка, блокер, риск или
-решение, требующее уточнения. Приветствия, подтверждения, шутки, повторы, общая
-болтовня, мнения и просьбы выполнить действие остаются без ответа. Отрицательное
-или невалидное решение ничего не отправляет в Telegram. Для положительного
-решения runtime дополнительно проверяет, что выбранный message id действительно
-входил в пакет, ограничивает ответ одним Telegram-сообщением и отвечает reply на
-него без промежуточного служебного сообщения.
+Окно адаптивно. Новое событие перезапускает trailing quiet timer
+`team_memory.understanding_quiet_sec` (20 секунд), но время от первого pending event
+ограничено `understanding_max_wait_sec` (90 секунд). При
+`understanding_max_events` (40) loop стартует немедленно. Поэтому короткий burst даёт
+один вызов после паузы, а непрерывная беседа не зависает и не смешивается с другим
+Telegram topic. Background processors глобально сериализованы; события продолжают
+durable ingest, пока другой Source ждёт model capacity.
 
-До записи в очередь действует sliding-window rate limit по паре group/user. По
-умолчанию принимаются 12 сообщений за 60 секунд. Лишние ambient-сообщения
-отбрасываются молча; при лишнем direct-обращении одно уведомление о лимите может
-быть отправлено не чаще одного окна. Администратор и Project owner этим лимитом
-не ограничены.
+В один ephemeral read-only Codex turn передаются текущий Team Space summary, до 50
+knowledge items и provider-neutral evidence одного Source: sender/person identity,
+event/message/reply ids, timestamps, текст, attachment metadata, транскрипции и bounded
+snapshot реального reply target. Project files, Project memory, editor history, network,
+tools и environments недоступны.
+
+`turn/start.outputSchema` требует один согласованный объект:
+
+1. `episode`: source, тема, synopsis, полный набор batch event ids, confidence и
+   роли участников (`speaker`, `addressee`, `mentioned`) с evidence-linked intent;
+2. новый Team Space summary;
+3. knowledge candidates и их provenance;
+4. orientation readiness и уточняющие вопросы;
+5. `intervention`: `silent` либо `reply`, target event, сообщение и внутренняя причина.
+
+Runtime автоматически сохраняет episode как source-visible knowledge. Перед commit он
+повторно валидирует Source/Space/person boundaries, полноту episode, evidence ids,
+confidence, temporal validity, visibility, supersession и Telegram reply target. Любая
+ошибка оставляет batch pending и включает exponential backoff; частичное понимание не
+публикуется.
+
+Молчание — default для человеческой беседы и успешный результат loop. Оно обновляет
+episode и память, но не создаёт Telegram message. `reply` допустим только при
+существенной неоднозначности, фактической ошибке, противоречии, blocker, риске или
+незакрытом решении. До orientation threshold возможна только одна orientation; затем
+видимые вмешательства ограничены Space cooldown и всегда отвечают конкретному event.
+
+Loop не запускает второй Project-aware анализ. Если проверка требует repository/files,
+она остаётся явно сформулированным пробелом; mention/reply боту создаёт отдельный direct
+turn с полномочиями отправителя. Таким образом прямой ответ может быть дополнительным
+model call, но второго фонового прочтения той же реплики нет.
+
+Sliding-window rate limit 12 сообщений за 60 секунд применяется к явно адресованным
+direct Q&A обычного участника. Background evidence принимается до rate limit и не
+теряется из памяти; оно ограничено source batching, max events и общей model capacity.
+Администратор и Project owner direct-лимитом не ограничены.
 
 ### 4.3. Steer
 
@@ -375,8 +401,8 @@ Telegram-сообщение содержит уже сам ответ и сох�
 
 Если ответ длиннее лимита Telegram, создаются дополнительные сообщения. Reply на
 любую часть активного потока распознаётся как steer. На завершении выполняется
-принудительный flush итогового текста. Ambient Run не стримит внутреннее
-структурированное решение и публикует только выбранный полезный ответ.
+принудительный flush итогового текста. Conversation Understanding turn не использует
+Telegram stream; runtime публикует только прошедшую gates интервенцию.
 
 ### 4.6. Telegram polling и offset
 
@@ -542,7 +568,7 @@ SUMMING использует один execution substrate: официальны�
 | `account/rateLimits/read` | Получить quota windows VPS-аккаунта. |
 | `thread/start` | Создать постоянный контекст Conversation. |
 | `thread/resume` | Возобновить сохранённый thread. |
-| `turn/start` | Запустить Run; для ambient потребовать структурированное решение через `outputSchema`. |
+| `turn/start` | Запустить direct Run или один ephemeral Conversation Understanding turn со structured `outputSchema`. |
 | `turn/steer` | Передать указание в активный turn. |
 | `turn/interrupt` | Реализовать `/cancel`. |
 | `item/agentMessage/delta` | Стримить ответ. |
@@ -560,7 +586,7 @@ pending inputs как `consumed`, а затем вызывает `account/read`.
 авторизован, Run становится `failed`, но исходный input автоматически в очередь
 не возвращается — после входа его нужно отправить повторно. Direct editor Run
 просит выполнить `/login`, direct participant Run сообщает о недоступности, а
-ambient Run завершается без сообщения в группу.
+неудачный understanding batch остаётся pending для retry без сообщения в группу.
 
 Для входа отправьте боту `/login` в **личном чате**. SUMMING не показывает
 device code в группе. Команда доступна только администратору. После подтверждения
@@ -662,7 +688,7 @@ requirements из [deploy/codex-requirements.toml](deploy/codex-requirements.tom
 - остальные участники привязанного group topic могут отправлять только обычные
   Q&A-сообщения; все slash-команды блокируются;
 - direct mention/reply получает приоритетный read-only ответ, остальные сообщения
-  проходят rate-limited ambient batch и могут не породить ответ;
+  входят в один source-local Conversation Understanding batch и могут не породить ответ;
 - Q&A использует отдельный persistent thread и именованный профиль с read-only
   project root, выключенными network/web search/extensions и denied secrets;
 - создание/клонирование Projects, `/login`, `/restart` и `/panic` доступны только
@@ -913,7 +939,7 @@ SQLite хранит:
 - Team Spaces, Sources, People и не объединяемые автоматически provider identities;
 - event journal с replies, edits, reactions, membership и attachment metadata;
 - knowledge с confidence, visibility, temporal validity, evidence и supersession;
-- synthesis/intervention audit и opt-out/retention state;
+- understanding/intervention audit и opt-out/retention state;
 - последний подтверждённый Telegram update offset.
 
 Основные таблицы:
@@ -934,7 +960,7 @@ SQLite хранит:
 | `team_people`, `team_identities` | Люди и provider identities с observation preference. |
 | `team_events` | Нормализованный evidence journal и redaction state. |
 | `team_knowledge`, `team_knowledge_evidence`, `team_knowledge_supersessions` | Производные выводы, provenance и исправления. |
-| `team_synthesis_runs`, `team_interventions` | Audit фонового понимания и проактивных сообщений. |
+| `team_synthesis_runs`, `team_interventions` | Audit unified understanding runs (physical legacy table name) и реально подготовленных сообщений. |
 | `team_space_projects` | Отдельно подтверждённые связи Space с Project. |
 
 WAL сохраняет совместимость с существующей базой и допускает независимое чтение
@@ -955,14 +981,14 @@ Telegram-проекты находятся в SQLite и не записываю�
 | `agent.effort` | Reasoning effort. | `medium` |
 | `agent.max_parallel_conversations` | Общий предел параллельных topics. | 4 |
 | `agent.stream_interval_sec` | Частота edit Telegram. | 1.0 |
-| `agent.participant_batch_sec` | Окно агрегации ambient-сообщений. | 20 |
-| `agent.participant_rate_limit_messages` | Сообщений одного участника на окно. | 12 |
+| `agent.participant_rate_limit_messages` | Явных direct Q&A одного участника на окно. | 12 |
 | `agent.participant_rate_limit_window_sec` | Длина rate-limit окна. | 60 |
 | `agent.network_access` | Сеть внутри Codex sandbox. | true |
 | `team_memory.enabled` | Локальный Team Space journal и privacy commands. | true |
-| `team_memory.model_egress_enabled` | Consent-gated bounded background synthesis в Codex. | false |
-| `team_memory.synthesis_batch_sec` | Окно накопления evidence перед synthesis. | 120 |
-| `team_memory.max_batch_events` | Максимум events в одном synthesis batch. | 100 |
+| `team_memory.model_egress_enabled` | Consent-gated Conversation Understanding Loop в Codex. | false |
+| `team_memory.understanding_quiet_sec` | Trailing quiet window одного Source. | 20 |
+| `team_memory.understanding_max_wait_sec` | Hard deadline непрерывного episode. | 90 |
+| `team_memory.understanding_max_events` | Event cap и немедленный trigger batch. | 40 |
 | `team_memory.orientation_event_threshold` | Минимум evidence до первого orientation. | 50 |
 | `team_memory.intervention_cooldown_sec` | Минимальный интервал proactive replies. | 3600 |
 | `team_memory.raw_retention_days` | Дни хранения raw evidence; 0 = бессрочно. | 365 |
@@ -1336,7 +1362,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "9.4.4",
+  "version": "9.5.0",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",
@@ -1479,11 +1505,12 @@ login под другим Unix-user/Home.
 
 Для Project owner оно поставлено без acknowledgement в direct follow-up queue;
 после текущего Run такие сообщения объединяются в следующий turn. Для обычного
-участника отсутствие ответа может быть штатным: ambient input ждёт batch-window,
-а затем модель может признать его несущественным. Для гарантированного Q&A нужно
+участника отсутствие ответа штатно: обычное сообщение стало Team Space evidence,
+а единый understanding loop мог выбрать `silent`. Для гарантированного Q&A нужно
 упомянуть `@username_бота` или ответить на сообщение бота. Если не срабатывает и
-это, проверьте Privacy Mode/права администратора бота и rate limit. `/status`
-показывает `pending` текущего topic владельцу и глобальный счётчик администратору.
+это, проверьте Privacy Mode/права администратора бота и direct rate limit. `/status`
+показывает direct `pending` текущего topic владельцу, а health status — число
+scheduled/active understanding loops администратору.
 
 ### Steer не изменил текущий ответ
 

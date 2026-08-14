@@ -210,14 +210,38 @@ export interface TeamKnowledgeItem extends TeamKnowledgeInput {
   updatedAt: number;
 }
 
-export interface TeamSynthesisResult {
+export interface TeamEpisodeParticipant {
+  personId: string;
+  role: "speaker" | "addressee" | "mentioned";
+  intent: string;
+  confidence: number;
+  evidenceEventIds: number[];
+}
+
+export interface TeamConversationEpisode {
+  sourceId: string;
+  subject: string;
+  synopsis: string;
+  confidence: number;
+  eventIds: number[];
+  participants: TeamEpisodeParticipant[];
+}
+
+export interface TeamInterventionDecision {
+  action: "silent" | "reply";
+  replyToEventId: number | null;
+  message: string;
+  reason: string;
+}
+
+export interface TeamUnderstandingResult {
+  episode: TeamConversationEpisode;
   summary: string;
   knowledge: TeamKnowledgeInput[];
   orientationReady: boolean;
   orientationMessage: string;
   clarificationQuestions: string[];
-  proactiveReplyEventId: number | null;
-  proactiveMessage: string;
+  intervention: TeamInterventionDecision;
 }
 
 export interface TeamIntervention {
@@ -1396,6 +1420,14 @@ export class StateStore {
     `).all(spaceId, limit) as Row[]).map((row) => this.toTeamEvent(row));
   }
 
+  pendingTeamEventsForSource(sourceId: string, limit = 100): TeamEvent[] {
+    return (this.db.prepare(`
+      SELECT * FROM team_events
+      WHERE source_id = ? AND synthesis_state = 'pending'
+      ORDER BY occurred_at, id LIMIT ?
+    `).all(sourceId, limit) as Row[]).map((row) => this.toTeamEvent(row));
+  }
+
   recentTeamEvents(spaceId: string, sourceId: string, limit = 40): TeamEvent[] {
     return (this.db.prepare(`
       SELECT * FROM (
@@ -1417,6 +1449,13 @@ export class StateStore {
     const row = this.db.prepare(
       "SELECT COUNT(*) AS count FROM team_events WHERE space_id = ? AND synthesis_state = 'pending'",
     ).get(spaceId) as Row;
+    return Number(row.count);
+  }
+
+  pendingTeamEventCountForSource(sourceId: string): number {
+    const row = this.db.prepare(
+      "SELECT COUNT(*) AS count FROM team_events WHERE source_id = ? AND synthesis_state = 'pending'",
+    ).get(sourceId) as Row;
     return Number(row.count);
   }
 
@@ -1457,6 +1496,13 @@ export class StateStore {
       SELECT DISTINCT space_id FROM team_events
       WHERE synthesis_state = 'pending' ORDER BY space_id
     `).all() as Row[]).map((row) => String(row.space_id));
+  }
+
+  sourcesWithPendingTeamEvents(): string[] {
+    return (this.db.prepare(`
+      SELECT DISTINCT source_id FROM team_events
+      WHERE synthesis_state = 'pending' ORDER BY source_id
+    `).all() as Row[]).map((row) => String(row.source_id));
   }
 
   teamKnowledge(spaceId: string, limit = 100): TeamKnowledgeItem[] {
@@ -1549,29 +1595,68 @@ export class StateStore {
     };
   }
 
-  applyTeamSynthesis(
+  applyTeamUnderstanding(
     spaceId: string,
     eventIds: number[],
-    result: TeamSynthesisResult,
+    result: TeamUnderstandingResult,
     startedAt: number,
   ): void {
     if (eventIds.length === 0) return;
     if (new Set(eventIds).size !== eventIds.length) {
-      throw new Error("team synthesis batch contains duplicate evidence ids");
+      throw new Error("team understanding batch contains duplicate evidence ids");
     }
     const eventSet = new Set(eventIds);
     if (
-      result.proactiveReplyEventId !== null &&
-      !eventSet.has(result.proactiveReplyEventId)
+      result.intervention.replyToEventId !== null &&
+      !eventSet.has(result.intervention.replyToEventId)
     ) {
-      throw new Error("team intervention cites evidence outside the synthesis batch");
+      throw new Error("team intervention cites evidence outside the understanding batch");
+    }
+    if (
+      !result.intervention.reason.trim() ||
+      (result.intervention.action === "silent" &&
+        (result.intervention.replyToEventId !== null || result.intervention.message !== "")) ||
+      (result.intervention.action === "reply" &&
+        (result.intervention.replyToEventId === null || !result.intervention.message.trim()))
+    ) {
+      throw new Error("team intervention decision is internally inconsistent");
+    }
+    if (
+      result.episode.eventIds.length !== eventIds.length ||
+      result.episode.eventIds.some((eventId) => !eventSet.has(eventId))
+    ) {
+      throw new Error("conversation episode must cover the complete understanding batch");
+    }
+    if (result.episode.participants.length === 0) {
+      throw new Error("conversation episode requires at least one participant");
+    }
+    const episodeKnowledge = result.knowledge.find((item) =>
+      item.kind === "episode" &&
+      item.visibility === "source" &&
+      item.visibilityRef === result.episode.sourceId &&
+      item.subject === result.episode.subject &&
+      item.statement === result.episode.synopsis &&
+      item.confidence === result.episode.confidence &&
+      item.evidenceEventIds.length === eventIds.length &&
+      item.evidenceEventIds.every((eventId) => eventSet.has(eventId))
+    );
+    if (!episodeKnowledge) {
+      throw new Error("conversation episode must be persisted as evidence-backed knowledge");
+    }
+    for (const participant of result.episode.participants) {
+      if (
+        participant.evidenceEventIds.length === 0 ||
+        participant.evidenceEventIds.some((eventId) => !eventSet.has(eventId))
+      ) {
+        throw new Error("episode participant must cite evidence from the understanding batch");
+      }
     }
     for (const item of result.knowledge) {
       if (item.evidenceEventIds.length === 0) {
         throw new Error("team knowledge requires evidence");
       }
       if (item.evidenceEventIds.some((eventId) => !eventSet.has(eventId))) {
-        throw new Error("team knowledge cites evidence outside the synthesis batch");
+        throw new Error("team knowledge cites evidence outside the understanding batch");
       }
       if (item.visibility !== "space" && !item.visibilityRef) {
         throw new Error("restricted team knowledge requires a visibility reference");
@@ -1586,7 +1671,23 @@ export class StateStore {
         WHERE space_id = ? AND id IN (${placeholders}) AND synthesis_state = 'pending'
       `).get(spaceId, ...eventIds) as Row;
       if (Number(countRow.count) !== eventIds.length) {
-        throw new Error("team synthesis batch no longer matches pending evidence");
+        throw new Error("team understanding batch no longer matches pending evidence");
+      }
+      const sourceRows = this.db.prepare(`
+        SELECT DISTINCT source_id FROM team_events
+        WHERE space_id = ? AND id IN (${placeholders})
+      `).all(spaceId, ...eventIds) as Row[];
+      if (
+        sourceRows.length !== 1 ||
+        String(sourceRows[0]?.source_id ?? "") !== result.episode.sourceId
+      ) {
+        throw new Error("conversation episode must stay inside one Team Source");
+      }
+      for (const participant of result.episode.participants) {
+        const person = this.db.prepare(`
+          SELECT id FROM team_people WHERE id = ? AND space_id = ?
+        `).get(participant.personId, spaceId);
+        if (!person) throw new Error("episode participant crosses its Team Space");
       }
       for (const item of result.knowledge) {
         if (item.visibility === "source") {
@@ -1685,7 +1786,7 @@ export class StateStore {
     });
   }
 
-  recordTeamSynthesisFailure(
+  recordTeamUnderstandingFailure(
     spaceId: string,
     eventIds: number[],
     error: string,
@@ -1733,7 +1834,7 @@ export class StateStore {
     });
   }
 
-  requeueSynthesizedTeamEvents(spaceId: string, eventIds: number[]): void {
+  requeueUnderstoodTeamEvents(spaceId: string, eventIds: number[]): void {
     if (eventIds.length === 0) return;
     const placeholders = eventIds.map(() => "?").join(",");
     this.transaction(() => {

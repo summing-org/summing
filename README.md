@@ -1,4 +1,4 @@
-# SUMMING 9.4
+# SUMMING 9.5
 
 SUMMING — один постоянно живущий агент с одним администратором и назначаемыми
 владельцами проектов. Он работает на Linux VPS, принимает команды из Telegram
@@ -13,6 +13,7 @@ Team Space: создаётся при подключении командног�
   ├── People + provider identities
   ├── Durable event journal
   ├── Evidence-backed knowledge
+  ├── Conversation Understanding Loop: episode → memory + silent/reply
   └── Linked Projects
         ├── Owner: Telegram user ID
         ├── Workspace: local Git repository
@@ -30,15 +31,15 @@ Team Space: создаётся при подключении командног�
 - project memory общая для всех topics проекта;
 - администратор создаёт локальные проекты из личного чата, а владелец видит и
   использует только назначенные ему проекты;
-- остальные участники уже привязанного group topic могут задавать вопросы о
-  реализации обычными сообщениями, но не могут выполнять slash-команды;
+- остальные участники уже привязанного group topic могут явно упомянуть бота или
+  ответить ему и получить read-only Q&A о реализации, но не могут выполнять slash-команды;
 - `@mention` или reply на сообщение бота гарантированно ставит вопрос в
-  приоритетную очередь; остальные сообщения анализируются пакетами раз в 20
-  секунд, и бот отвечает только когда видит существенную пользу для обсуждения;
+  приоритетную очередь; остальные сообщения после source-local quiet window
+  проходят один Conversation Understanding Loop, который одновременно строит
+  episode, обновляет память и выбирает `silent` либо полезный reply;
 - сообщение администратора или Project owner, явно адресованное другому человеку
   через ведущий `@mention` или reply, считается фоновой беседой, а не editor-командой:
-  оно не запускает и не steer-ит write-run, а уточнение возможно только после
-  read-only анализа пакета и при реальной неоднозначности;
+  оно не запускает и не steer-ит Project run, а остаётся evidence общего loop;
 - технический `reply_to_message` на корневое service-message Telegram forum topic
   игнорируется при определении адресата. Для настоящего reply Codex получает id,
   автора и безопасную цитату; одинокий `@mention` в reply означает просьбу разобрать
@@ -47,15 +48,15 @@ Team Space: создаётся при подключении командног�
   edits, reactions и membership events долговременно фиксируются до rate limit и
   решения об ответе, даже если topic ещё не привязан к Project;
 - bind связывает Project с уже накопленным Team Space и не уничтожает evidence;
-- автоматическая отправка всей фоновой переписки в Codex для semantic synthesis
+- автоматическая отправка фоновой переписки в Codex для Conversation Understanding
   требует отдельного явного operator consent и `team_memory.model_egress_enabled = true`;
   без него journal остаётся локальным;
 - `@mention` или reply в projectless source запускает прежний bounded read-only
   ответ без доступа к файлам, памяти и истории любого Project;
 - `/memory`, `/memory_me`, `/memory_forget_me` и `/memory_resume_me` делают
   наблюдение прозрачным и управляемым для участников;
-- один участник по умолчанию может передать в анализ до 12 сообщений за 60
-  секунд; лишний фоновый шум отбрасывается без ответа;
+- один участник по умолчанию может явно обратиться к боту до 12 раз за 60 секунд;
+  background evidence сохраняется до применения лимита и ограничивается batching/capacity;
 - `/limits` показывает 5-часовой и недельный остаток именно VPS-аккаунта Codex,
   а short description профиля бота обновляется тем же недельным показателем и
   текущей версией SUMMING;
@@ -251,15 +252,21 @@ Projectless Q&A имеет отдельную от Project Conversation очер
 не более четырёх активных/ожидающих вопросов суммарно. Зависший turn прерывается через
 две минуты и освобождает очередь.
 
-При `team_memory.model_egress_enabled = true` pending evidence каждые
-`team_memory.synthesis_batch_sec` секунд отправляется bounded-пакетом в отдельный ephemeral
-read-only Codex thread без Project, файлов, сети, environments и внешних инструментов.
-До первого batch Team Space получает отдельное уведомление о составе model egress.
-Structured output принимается только после проверки evidence ids, confidence,
-visibility, temporal validity и supersession links. После
-`team_memory.orientation_event_threshold` событий SUMMING один раз показывает своё понимание и
-уточняет главные пробелы; дальнейшие proactive replies ограничены
-`team_memory.intervention_cooldown_sec` и всегда привязаны к конкретному Telegram message.
+При `team_memory.model_egress_enabled = true` pending evidence одного Source после
+`team_memory.understanding_quiet_sec` секунд тишины отправляется bounded-пакетом в
+отдельный ephemeral read-only Codex thread без Project, файлов, сети, environments и
+внешних инструментов. Quiet timer сбрасывается новым событием, но
+`understanding_max_wait_sec` гарантирует обработку непрерывной беседы, а
+`understanding_max_events` запускает заполненный batch немедленно.
+
+Один structured output содержит Conversation Episode, обновлённый summary,
+evidence-backed knowledge и `silent/reply` decision. Runtime принимает его только после
+проверки полноты episode, Source/Person boundaries, evidence ids, confidence,
+visibility, temporal validity, supersession links и reply target. Отдельного Project
+ambient model call нет. До первого batch Team Space получает уведомление о составе
+model egress; после `team_memory.orientation_event_threshold` событий SUMMING один раз
+показывает понимание и уточняет главные пробелы. Дальнейшие replies ограничены
+`team_memory.intervention_cooldown_sec` и всегда привязаны к конкретному provider message.
 
 Документ можно отправить с caption или без него. SUMMING сохранит его внутри
 runtime-каталога conversation и передаст Codex точный относительный путь. Архивы
@@ -273,9 +280,9 @@ runtime-каталога conversation и передаст Codex точный о�
 и обрабатывается выбранным API-провайдером; примените подходящие вашей
 организации data controls.
 
-В уже привязанном топике тегать бота необязательно. Обычные сообщения накапливаются в тихой очереди и
-раз в `participant_batch_sec` секунд отправляются одним read-only пакетом на
-смысловой анализ. Ответ появляется только на конкретное исходное сообщение,
+В уже привязанном топике тегать бота необязательно. Обычные сообщения сразу становятся
+Team Space evidence и после adaptive quiet window входят в единый read-only Conversation
+Understanding batch. Ответ появляется только на конкретное исходное сообщение,
 если оно содержит важный вопрос, вероятную фактическую ошибку, риск, блокер или
 решение, которое стоит уточнить. Приветствия, подтверждения, шутки, повторы,
 общая болтовня и просьбы выполнить действие остаются без ответа. Упоминание
