@@ -1,6 +1,6 @@
 # SUMMING 9.3: архитектура, эксплуатация и разработка
 
-> Версия: **9.3.2**
+> Версия: **9.3.3**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
 > Последняя сверка с кодом: **14 августа 2026 года**.
 
@@ -654,7 +654,8 @@ mobile-first интерфейс и JSON API показывают:
 - working diff относительно `HEAD`, включая синтетический diff untracked files;
 - последние commits и diff commit относительно parent;
 - before/after patch конкретного editor Run;
-- состояние текущей ветки относительно `origin` и явные Pull/Push;
+- подключение отсутствующего `origin` через проектный SSH deploy key, состояние
+  текущей ветки относительно remote и явные Pull/Push;
 - очередь, статусы и журналы project runner.
 
 HTTPS-запрос Mini App должен содержать Telegram `initData`. Backend заново
@@ -678,17 +679,33 @@ POST содержит ожидаемый полный HEAD, поэтому ус�
 обновляет уже изменившуюся ветку. Viewer-операции сериализуются на общий Git
 directory репозитория, включая все его conversation worktrees, и
 не запускаются во время активного Codex turn. Telegram HMAC и Project ACL дают
-write-кнопки только администратору и назначенному owner; credentials не
-передаются через API и должны быть настроены non-interactive для Unix user
-`summing`. Ошибка auth, network, protected branch, dirty worktree или
+write-кнопки только администратору и назначенному owner. POST `action=connect`
+принимает только нормализованный SSH URL, добавляет только отсутствующий
+`origin` и никогда не заменяет существующий remote. Для уже настроенного SSH
+remote тот же action без URL создаёт ключ, не меняя Git config. Ошибка auth,
+network, protected branch, dirty worktree или
 non-fast-forward возвращается в UI без force, reset или автоматического commit.
 Remote subprocess получает только минимальные `HOME`/`PATH`/locale/SSH env без
 application secrets, игнорирует repository hooks и fsmonitor и принимает только
 SSH/HTTPS URL без embedded token. Project-local/worktree `include`, URL rewrite,
 credential helper, `core.sshCommand` и executable filter отключают sync, чтобы
 изменяемая Codex Git metadata не превращалась в исполнение команд host-сервисом.
-Доверенный SSH config или credential helper настраивается глобально для Unix
-user `summing`, а не внутри Project repository.
+Встроенный мастер создаёт отдельный Ed25519 key pair для пары
+Project/workspace в
+`$SUMMING_DATA_DIR/repository-credentials/<project>/<workspace>/`: каталог и
+`known_hosts` имеют режим `0700`/`0600`, private key — `0600`. API возвращает
+только public key и SHA-256 fingerprint; private path, private key и SSH command
+не сериализуются. Managed SSH запускается через `/usr/bin/ssh` с отключёнными
+user config/agent/password prompts, единственным project key и отдельным
+`known_hosts`. Первый host key закрепляется по TOFU (`accept-new`), а его
+последующая подмена отклоняется. Файлы лежат вне repository, worktree, Codex
+archive и окружения runner/Codex. Потеря private key требует выпустить новый
+deploy key на стороне Git-сервиса.
+
+Если managed key отсутствует, сохраняется прежний внешний режим: доверенный SSH
+config или credential helper настраивается глобально для Unix user `summing`, а
+не внутри Project repository. HTTPS остаётся допустимым только в этом режиме и
+без embedded token; встроенный мастер намеренно принимает лишь SSH URL.
 
 Production Mini App работает на `https://assist.summing.org`. Installer
 принимает `SUMMING_VIEWER_DOMAIN=assist.summing.org` и необязательный
@@ -1192,7 +1209,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "9.3.2",
+  "version": "9.3.3",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",
@@ -1257,6 +1274,8 @@ at-least-once recovery: prompt может выполниться повторн�
 - `SUMMING_WORKTREE_ROOT`, если нужно сохранить незакоммиченные изменения;
 - `run-artifacts/`, `/etc/summing-runner` и `/var/lib/summing-runs` при
   использовании Viewer/runner;
+- `repository-credentials/`, если встроенные deploy keys должны пережить
+  восстановление без перевыпуска на стороне Git-сервиса;
 - исходные Git-репозитории и их refs, если они не гарантированно находятся в
   origin.
 
@@ -1388,6 +1407,7 @@ src/
 ├── codex-app-server.ts     # типизированная JSONL/RPC boundary
 ├── project-catalog.ts      # managed Projects, owners и Git provisioning
 ├── git-inspector.ts        # safe tree/file/diff/snapshot/archive boundary
+├── repository-credentials.ts # per-project SSH deploy keys outside worktrees
 ├── project-viewer.ts       # Mini App static/API loopback server
 ├── viewer-auth.ts          # Telegram initData и local bearer validation
 ├── project-runner-*.ts     # Unix socket client/server/CLI
@@ -1402,6 +1422,7 @@ tests/
 ├── deploy-assets.test.ts
 ├── project-catalog.test.ts
 ├── git-inspector.test.ts
+├── repository-credentials.test.ts
 ├── project-runner.test.ts
 ├── viewer-auth.test.ts
 ├── attachment-service.test.ts

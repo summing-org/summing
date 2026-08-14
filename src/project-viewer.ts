@@ -13,6 +13,10 @@ import {
   type RunnerAction,
 } from "./project-runner-client.js";
 import { RunArtifactStore } from "./run-artifacts.js";
+import {
+  type ManagedRepositoryCredential,
+  RepositoryCredentialStore,
+} from "./repository-credentials.js";
 import type { Conversation, StateStore } from "./state-store.js";
 import { ViewerAuthenticator, ViewerAuthError } from "./viewer-auth.js";
 import { VIEWER_CSS, VIEWER_HTML, VIEWER_JS, VIEWER_LOGO_SVG } from "./viewer-assets.js";
@@ -21,6 +25,14 @@ interface ViewerScope {
   conversation: Conversation;
   inspector: GitInspector;
   project: { id: string; name: string; workspace: string };
+}
+
+interface ViewerRepositoryConnection {
+  mode: "none" | "external" | "managed-ssh";
+  publicKey: string;
+  fingerprint: string;
+  canCreateDeployKey: boolean;
+  hostKeyPolicy: "" | "trust-on-first-use";
 }
 
 class ViewerHttpError extends Error {
@@ -86,6 +98,7 @@ export class ProjectViewerServer {
   readonly artifacts: RunArtifactStore;
   readonly runner: ProjectRunnerClient;
   readonly deployment: DeploymentControl;
+  readonly repositoryCredentials: RepositoryCredentialStore;
 
   constructor(
     readonly config: RuntimeConfig,
@@ -100,6 +113,7 @@ export class ProjectViewerServer {
     );
     this.artifacts = new RunArtifactStore(config.dataDir);
     this.runner = new ProjectRunnerClient(config.runnerSocket);
+    this.repositoryCredentials = new RepositoryCredentialStore(config.dataDir);
     this.deployment = deployment ?? new DeploymentController(
       config.deploymentRequestPath,
       config.deploymentStatePath,
@@ -181,8 +195,9 @@ export class ProjectViewerServer {
       const scope = await this.scope(conversationId, telegramUser);
       const activeRun = this.state.get(scope.conversation.id).activeTurnId !== null;
       const operationKey = await scope.inspector.commonDirectory();
+      const context = await this.repositoryContext(scope);
       const repository = await this.withRepositoryOperation(operationKey, async () =>
-        scope.inspector.repositoryStatus(!activeRun)
+        context.inspector.repositoryStatus(!activeRun)
       );
       json(response, 200, {
         repository: activeRun
@@ -193,6 +208,7 @@ export class ProjectViewerServer {
               message: `${repository.message} Дождитесь завершения активного Codex run.`,
             }
           : repository,
+        connection: this.repositoryConnection(repository, context.credential),
         activeRun,
       });
       return;
@@ -202,19 +218,51 @@ export class ProjectViewerServer {
       const requestedConversation = String(body?.conversation ?? "");
       const action = String(body?.action ?? "");
       const expectedHead = String(body?.expectedHead ?? "");
-      if (action !== "pull" && action !== "push") {
+      const remoteUrl = String(body?.remoteUrl ?? "");
+      if (action !== "pull" && action !== "push" && action !== "connect") {
         throw new ViewerHttpError(400, "неизвестное действие с репозиторием");
       }
       const scope = await this.scope(requestedConversation, telegramUser);
       const operationKey = await scope.inspector.commonDirectory();
-      const repository = await this.withRepositoryOperation(operationKey, async () => {
+      const result = await this.withRepositoryOperation(operationKey, async () => {
         if (this.state.get(scope.conversation.id).activeTurnId !== null) {
           throw new ViewerHttpError(409, "дождитесь завершения активного Codex run");
         }
         try {
-          return action === "pull"
-            ? await scope.inspector.pullCurrentBranch(expectedHead)
-            : await scope.inspector.pushCurrentBranch(expectedHead);
+          if (action === "connect") {
+            const current = await scope.inspector.summary();
+            if (!current.remote && !remoteUrl) {
+              throw new ViewerHttpError(400, "укажите SSH URL репозитория");
+            }
+            if (current.remote && remoteUrl) {
+              throw new ViewerHttpError(409, "origin уже настроен; его замена через Mini App запрещена");
+            }
+            if (current.remote && !this.supportsManagedSsh(current.remote)) {
+              throw new ViewerHttpError(409, "deploy key можно подключить только к SSH origin");
+            }
+            if (!current.remote) await scope.inspector.validateManagedSshOrigin(remoteUrl);
+            const credential = await this.repositoryCredentials.ensure(
+              scope.project.id,
+              scope.project.workspace,
+            );
+            const inspector = new GitInspector(scope.inspector.root, credential);
+            const connected = current.remote
+              ? await inspector.repositoryStatus(false)
+              : await inspector.connectOrigin(remoteUrl);
+            const repository = {
+              ...connected,
+              canPush: false,
+              canPull: false,
+              message:
+                "Deploy key создан. Добавьте публичный ключ в Git-сервис с правом записи, затем проверьте доступ.",
+            };
+            return { repository, credential };
+          }
+          const context = await this.repositoryContext(scope);
+          const repository = action === "pull"
+            ? await context.inspector.pullCurrentBranch(expectedHead)
+            : await context.inspector.pushCurrentBranch(expectedHead);
+          return { repository, credential: context.credential };
         } catch (error) {
           if (error instanceof GitInspectorError) {
             throw new ViewerHttpError(409, error.message);
@@ -222,7 +270,10 @@ export class ProjectViewerServer {
           throw error;
         }
       });
-      json(response, 200, { repository });
+      json(response, 200, {
+        repository: result.repository,
+        connection: this.repositoryConnection(result.repository, result.credential),
+      });
       return;
     }
     if (request.method === "PUT" && url.pathname === "/api/viewer/environment") {
@@ -397,6 +448,39 @@ export class ProjectViewerServer {
     } finally {
       this.repositoryOperations.delete(repositoryKey);
     }
+  }
+
+  private async repositoryContext(scope: ViewerScope): Promise<{
+    inspector: GitInspector;
+    credential: ManagedRepositoryCredential | null;
+  }> {
+    const credential = await this.repositoryCredentials.inspect(
+      scope.project.id,
+      scope.project.workspace,
+    );
+    return {
+      inspector: credential ? new GitInspector(scope.inspector.root, credential) : scope.inspector,
+      credential,
+    };
+  }
+
+  private repositoryConnection(
+    repository: { remote: string },
+    credential: ManagedRepositoryCredential | null,
+  ): ViewerRepositoryConnection {
+    return {
+      mode: credential ? "managed-ssh" : repository.remote ? "external" : "none",
+      publicKey: credential?.publicKey ?? "",
+      fingerprint: credential?.fingerprint ?? "",
+      canCreateDeployKey: !credential && (
+        !repository.remote || this.supportsManagedSsh(repository.remote)
+      ),
+      hostKeyPolicy: credential ? "trust-on-first-use" : "",
+    };
+  }
+
+  private supportsManagedSsh(remote: string): boolean {
+    return /^ssh:\/\//i.test(remote) || /^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:/.test(remote);
   }
 
   private async scope(conversationId: string, telegramUser: number): Promise<ViewerScope> {

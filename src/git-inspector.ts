@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
 import { lstat, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve, sep } from "node:path";
+import { isAbsolute, join, resolve, sep } from "node:path";
+import type { RepositorySshCredential } from "./repository-credentials.js";
 
 const MAX_GIT_OUTPUT = 4_000_000;
 const MAX_ARCHIVE_BYTES = 50_000_000;
@@ -170,6 +171,22 @@ function safeRemoteUrl(value: string): string {
   }
 }
 
+function shellArgument(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function decodedUrlPath(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return "";
+  }
+}
+
+function safeSshHost(value: string): boolean {
+  return /^(?:[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])$/.test(value);
+}
+
 function gitFailure(result: CommandResult, remote: string): string {
   const detail = result.stderr
     .trim()
@@ -181,7 +198,10 @@ function gitFailure(result: CommandResult, remote: string): string {
 }
 
 export class GitInspector {
-  constructor(readonly root: string) {}
+  constructor(
+    readonly root: string,
+    private readonly repositoryCredential: RepositorySshCredential | null = null,
+  ) {}
 
   private async git(args: string[], options: { allowFailure?: boolean; env?: NodeJS.ProcessEnv } = {}): Promise<CommandResult> {
     const result = await command(
@@ -401,6 +421,25 @@ export class GitInspector {
     return this.repositoryStatus(false);
   }
 
+  async connectOrigin(remoteUrl: string): Promise<RepositorySyncStatus> {
+    const value = remoteUrl.trim();
+    if (!value || value.length > 2_048 || value !== remoteUrl) {
+      throw new GitInspectorError("укажите корректный SSH URL репозитория");
+    }
+    await this.validateManagedSshOrigin(value);
+    await this.rejectUnsafeRepositoryConfig("--local");
+    await this.rejectUnsafeRepositoryConfig("--worktree");
+    const current = await this.git(["remote", "get-url", "origin"], { allowFailure: true });
+    if (current.code === 0) {
+      throw new GitInspectorError("origin уже настроен; его замена через Mini App запрещена");
+    }
+    const added = await this.git(["remote", "add", "origin", value], { allowFailure: true });
+    if (added.code !== 0) {
+      throw new GitInspectorError(`Не удалось настроить origin: ${gitFailure(added, value)}`);
+    }
+    return this.repositoryStatus(false);
+  }
+
   private verifyExpectedHead(status: RepositorySyncStatus, expectedHead: string): void {
     if (!/^[0-9a-f]{40}$/.test(expectedHead) || expectedHead !== status.head) {
       throw new GitInspectorError(
@@ -410,9 +449,37 @@ export class GitInspector {
   }
 
   private repositoryEnvironment(): NodeJS.ProcessEnv {
+    const credential = this.repositoryCredential;
+    let sshCommand = "/usr/bin/ssh";
+    if (credential) {
+      if (
+        !isAbsolute(credential.identityFile) ||
+        !isAbsolute(credential.knownHostsFile) ||
+        credential.identityFile.includes("\0") ||
+        credential.knownHostsFile.includes("\0")
+      ) {
+        throw new GitInspectorError("invalid managed SSH credential path");
+      }
+      sshCommand = [
+        "/usr/bin/ssh",
+        "-F /dev/null",
+        `-i ${shellArgument(credential.identityFile)}`,
+        "-o IdentitiesOnly=yes",
+        "-o IdentityAgent=none",
+        "-o BatchMode=yes",
+        "-o PreferredAuthentications=publickey",
+        "-o PasswordAuthentication=no",
+        "-o KbdInteractiveAuthentication=no",
+        "-o StrictHostKeyChecking=accept-new",
+        `-o UserKnownHostsFile=${shellArgument(credential.knownHostsFile)}`,
+        "-o GlobalKnownHostsFile=/dev/null",
+        "-o ConnectTimeout=10",
+        "-o ForwardAgent=no",
+      ].join(" ");
+    }
     return safeCommandEnvironment({
       GIT_ASKPASS: "/bin/false",
-      GIT_SSH_COMMAND: "/usr/bin/ssh",
+      GIT_SSH_COMMAND: sshCommand,
       SSH_ASKPASS: "/bin/false",
     });
   }
@@ -463,9 +530,13 @@ export class GitInspector {
     }
     if (/^ssh:\/\//i.test(value)) {
       const parsed = new URL(value);
-      if (parsed.hostname && !parsed.password && !parsed.search && !parsed.hash) return;
+      if (safeSshHost(parsed.hostname) && !parsed.password && !parsed.search && !parsed.hash) return;
     }
-    if (/^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[^\s]+$/.test(value)) return;
+    if (
+      /^[A-Za-z0-9._][A-Za-z0-9._-]*@[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?:[^\s]+$/.test(
+        value,
+      )
+    ) return;
 
     let localPath = value;
     if (/^file:\/\//i.test(value)) {
@@ -488,6 +559,40 @@ export class GitInspector {
     }
     throw new GitInspectorError(
       "Синхронизация поддерживает SSH/HTTPS origin или local test remote внутри Git directory.",
+    );
+  }
+
+  async validateManagedSshOrigin(value: string): Promise<void> {
+    if (!value || value.length > 2_048 || value !== value.trim()) {
+      throw new GitInspectorError("укажите корректный SSH URL репозитория");
+    }
+    if (/^ssh:\/\//i.test(value)) {
+      let parsed: URL;
+      try {
+        parsed = new URL(value);
+      } catch {
+        throw new GitInspectorError("SSH URL репозитория имеет неверный формат");
+      }
+      const decodedPath = decodedUrlPath(parsed.pathname);
+      if (
+        parsed.protocol === "ssh:" &&
+        safeSshHost(parsed.hostname) &&
+        !parsed.password &&
+        !parsed.search &&
+        !parsed.hash &&
+        /^[A-Za-z0-9._-]*$/.test(parsed.username) &&
+        /^\/[A-Za-z0-9._~+/-]+$/.test(parsed.pathname) &&
+        decodedPath &&
+        !decodedPath.split("/").includes("..")
+      ) return;
+      throw new GitInspectorError("SSH URL репозитория имеет небезопасный формат");
+    }
+    const match = value.match(
+      /^([A-Za-z0-9._][A-Za-z0-9._-]*)@([A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?):([A-Za-z0-9._~+/-]+)$/,
+    );
+    if (match && !match[3]!.split("/").includes("..") && !match[3]!.startsWith("-")) return;
+    throw new GitInspectorError(
+      "Для deploy key используйте SSH URL вида git@github.com:owner/repository.git.",
     );
   }
 

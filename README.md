@@ -174,8 +174,10 @@ curl --fail http://127.0.0.1:8765/health
 `/project_create` создаёт пустой Git-репозиторий в
 `$SUMMING_DATA_DIR/repositories/<project>/<repo>`. `/project_clone` клонирует
 существующий remote туда же. Обе команды принимает только личный чат
-администратора; перезапуск не нужен. Не передавайте token в Git URL — настройте
-SSH/credential helper для системного пользователя `summing`.
+администратора; перезапуск не нужен. Для `/project_clone` не передавайте token в
+Git URL — заранее настройте SSH/credential helper для системного пользователя
+`summing`. Репозиторий из `/project_create` можно позднее подключить к SSH
+`origin` встроенным мастером во вкладке **Репозиторий**.
 Идентификатор проекта должен соответствовать `[a-z0-9][a-z0-9._-]{0,63}`;
 последовательность `..` и окончание `.lock` запрещены, потому что ID входит в
 имя рабочей Git-ветки.
@@ -333,11 +335,22 @@ config/unit/Caddyfile сохраняются для rollback. После cutover
 обновляет remote refs и меняет локальную ветку только чистым fast-forward: при
 незакоммиченных или разошедшихся изменениях операция останавливается без merge,
 rebase или reset. Для private remote заранее настройте non-interactive write
-credentials пользователя `summing`.
-Поддерживаются SSH и HTTPS URL без embedded token; repository-local hooks,
-command filters, credential helpers, SSH overrides и URL rewrites намеренно не
-исполняются host-сервисом. Настраивайте ключ или helper глобально для Unix user
-`summing`.
+credentials пользователя `summing` либо используйте встроенный SSH-мастер.
+
+Если `origin` отсутствует, owner вставляет SSH URL вида
+`git@github.com:owner/repository.git`. SUMMING один раз добавляет `origin`,
+создаёт отдельный Ed25519 deploy key для Project repository и показывает в API
+и интерфейсе только публичную часть. Добавьте её в Git-сервис с write-доступом и
+нажмите **Проверить доступ**. Уже настроенный `origin` мастер не заменяет; для
+существующего SSH remote без credentials он умеет создать ключ отдельно.
+Приватный ключ и изолированный `known_hosts` лежат вне repository/worktree в
+`$SUMMING_DATA_DIR/repository-credentials/<project>/<workspace>/`. Первый SSH
+host key принимается по TOFU, после чего его изменение блокируется.
+
+Существующие внешние SSH и HTTPS URL без embedded token продолжают работать;
+repository-local hooks, command filters, credential helpers, SSH overrides и
+URL rewrites намеренно не исполняются host-сервисом. Для внешнего режима
+настраивайте ключ или helper глобально для Unix user `summing`.
 
 ## Переход существующего 8.x VPS на SUMMING 9.0
 

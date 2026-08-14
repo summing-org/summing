@@ -18,6 +18,7 @@ packages:
   - git
   - file
   - jq
+  - openssh-client
   - rsync
   - sqlite3
   - sudo

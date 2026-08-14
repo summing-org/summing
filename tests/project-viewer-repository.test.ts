@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHmac } from "node:crypto";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -199,8 +199,144 @@ test("repository tab gives the project owner and administrator safe push and pul
 
 test("repository controls are present in the Mini App", () => {
   assert.match(VIEWER_HTML, /data-tab="repository">Репозиторий/);
+  assert.match(VIEWER_HTML, /id="repositoryUrl"/);
+  assert.match(VIEWER_HTML, /id="repositoryPublicKey"/);
+  assert.match(VIEWER_HTML, /id="verifyRepository"/);
   assert.match(VIEWER_HTML, /id="pullRepository"/);
   assert.match(VIEWER_HTML, /id="pushRepository"/);
+  assert.match(VIEWER_JS, /action:"connect"/);
+  assert.match(VIEWER_JS, /copyRepositoryKey/);
   assert.match(VIEWER_JS, /syncRepository\("pull"\)/);
   assert.match(VIEWER_JS, /syncRepository\("push"\)/);
+});
+
+test("repository onboarding configures a missing origin and returns only its public deploy key", async () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-viewer-repository-onboarding-"));
+  const workspace = join(root, "workspace");
+  initializeRepository(workspace);
+  const dataDir = join(root, "data");
+  const state = new StateStore(join(dataDir, "state.sqlite3"));
+  const port = await freePort();
+  const config = new RuntimeConfig(
+    dataDir,
+    join(root, "codex"),
+    join(root, "worktrees"),
+    "bot-token",
+    1,
+    "codex",
+    8_765,
+    2,
+    1,
+    "",
+    "medium",
+    true,
+    new Map(),
+    20,
+    12,
+    60,
+    "openai",
+    "gpt-transcribe",
+    "",
+    "",
+    20_000_000,
+    port,
+    "",
+    300,
+  );
+  state.createManagedProject({
+    id: "client",
+    name: "Client",
+    ownerId: 42,
+    defaultWorkspaceId: "repo",
+    workspaces: [{ id: "repo", path: workspace }],
+    createdAt: Date.now() / 1_000,
+  });
+  const projects = new ProjectCatalog(config, state);
+  const conversation = state.bind(42, 1, "client", "repo");
+  const viewer = new ProjectViewerServer(config, state, projects);
+  const endpoint = `http://127.0.0.1:${port}`;
+  const auth = (userId: number): Record<string, string> => ({
+    "x-telegram-init-data": signedInitData("bot-token", userId),
+  });
+  const request = (userId: number, remoteUrl: string) => fetch(`${endpoint}/api/viewer/repository`, {
+    method: "POST",
+    headers: { ...auth(userId), "content-type": "application/json" },
+    body: JSON.stringify({
+      conversation: conversation.id,
+      action: "connect",
+      remoteUrl,
+    }),
+  });
+  try {
+    await viewer.start();
+
+    const initial = await fetch(
+      `${endpoint}/api/viewer/repository?conversation=${conversation.id}`,
+      { headers: auth(42) },
+    );
+    assert.equal(initial.status, 200);
+    const initialBody = await initial.json() as {
+      repository: { remote: string };
+      connection: { mode: string; canCreateDeployKey: boolean };
+    };
+    assert.equal(initialBody.repository.remote, "");
+    assert.equal(initialBody.connection.mode, "none");
+    assert.equal(initialBody.connection.canCreateDeployKey, true);
+
+    const denied = await request(99, "git@example.test:owner/project.git");
+    assert.equal(denied.status, 403);
+    assert.equal(git(workspace, "remote"), "");
+
+    state.setActive(conversation.id, "active-turn", null);
+    const busy = await request(42, "git@example.test:owner/project.git");
+    assert.equal(busy.status, 409);
+    state.clearActive(conversation.id);
+
+    const identity = join(
+      dataDir,
+      "repository-credentials",
+      "client",
+      "repo",
+      "id_ed25519",
+    );
+    const invalid = await request(42, "https://example.test/owner/project.git");
+    assert.equal(invalid.status, 409);
+    assert.equal(existsSync(identity), false);
+    assert.equal(git(workspace, "remote"), "");
+
+    const connected = await request(42, "git@example.test:owner/project.git");
+    assert.equal(connected.status, 200);
+    const body = await connected.json() as {
+      repository: { remote: string; state: string; canPush: boolean; message: string };
+      connection: {
+        mode: string;
+        publicKey: string;
+        fingerprint: string;
+        hostKeyPolicy: string;
+      };
+    };
+    assert.equal(body.repository.remote, "git@example.test:owner/project.git");
+    assert.equal(body.repository.state, "unpublished");
+    assert.equal(body.repository.canPush, false);
+    assert.match(body.repository.message, /Добавьте публичный ключ/);
+    assert.equal(body.connection.mode, "managed-ssh");
+    assert.match(body.connection.publicKey, /^ssh-ed25519 /);
+    assert.match(body.connection.fingerprint, /^SHA256:/);
+    assert.equal(body.connection.hostKeyPolicy, "trust-on-first-use");
+    const serialized = JSON.stringify(body);
+    assert.doesNotMatch(serialized, /BEGIN OPENSSH PRIVATE KEY/);
+    assert.doesNotMatch(serialized, /identityFile|knownHostsFile|repository-credentials/);
+
+    assert.equal(existsSync(identity), true);
+    assert.equal(statSync(identity).mode & 0o777, 0o600);
+    assert.equal(git(workspace, "remote", "get-url", "origin"), "git@example.test:owner/project.git");
+
+    const replacement = await request(42, "git@example.test:owner/other.git");
+    assert.equal(replacement.status, 409);
+    assert.equal(git(workspace, "remote", "get-url", "origin"), "git@example.test:owner/project.git");
+  } finally {
+    await viewer.close();
+    state.close();
+    rmSync(root, { recursive: true, force: true });
+  }
 });

@@ -41,6 +41,7 @@ required_packages=(
   bubblewrap
   file
   jq
+  openssh-client
   unzip
 )
 missing_packages=()

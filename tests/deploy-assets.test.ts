@@ -15,6 +15,7 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
   const path = asset("deploy/summing-deploy.path");
   const service = asset("deploy/summing-deploy.service");
   const activation = asset("deploy/activate.sh");
+  const cloudInit = asset("deploy/cloud-init.yaml");
 
   const syntax = spawnSync("bash", ["-n", join(root, "deploy/summing-deploy")], {
     encoding: "utf8",
@@ -42,6 +43,8 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
   assert.match(activation, /systemctl start summing-deploy\.path summing-deploy\.timer/);
   assert.match(activation, /runner_uid=\$\(id -u summing-runner\)/);
   assert.match(activation, /sed "s\/RUNNER_UID\/\$\{runner_uid\}\/g"/);
+  assert.match(activation, /\n  openssh-client\n/);
+  assert.match(cloudInit, /\n  - openssh-client\n/);
   assert.doesNotMatch(activation, /systemctl restart summing-secrets\.service/);
   assert.match(
     asset("deploy/summing-runner.service"),

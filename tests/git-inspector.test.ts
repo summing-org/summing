@@ -98,6 +98,41 @@ test("creates immutable snapshots without changing the worktree index", async ()
   }
 });
 
+test("connects a missing origin only to a validated SSH URL and never replaces it", async () => {
+  const root = repository();
+  try {
+    const inspector = new GitInspector(root);
+    await assert.rejects(
+      inspector.connectOrigin("https://github.com/example/project.git"),
+      /Для deploy key используйте SSH URL/,
+    );
+    await assert.rejects(
+      inspector.connectOrigin("ssh://git:secret@example.test/project.git"),
+      /небезопасный формат/,
+    );
+    await assert.rejects(
+      inspector.connectOrigin("git@example.test:owner/../project.git"),
+      /Для deploy key используйте SSH URL/,
+    );
+    await assert.rejects(
+      inspector.connectOrigin("ssh://git@-oProxyCommand.example/project.git"),
+      /небезопасный формат/,
+    );
+
+    const connected = await inspector.connectOrigin("git@example.test:owner/project.git");
+    assert.equal(connected.remote, "git@example.test:owner/project.git");
+    assert.equal(connected.state, "unpublished");
+    assert.equal(gitOutput(root, "remote", "get-url", "origin"), "git@example.test:owner/project.git");
+    await assert.rejects(
+      inspector.connectOrigin("git@example.test:owner/other.git"),
+      /origin уже настроен/,
+    );
+    assert.equal(gitOutput(root, "remote", "get-url", "origin"), "git@example.test:owner/project.git");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("publishes and fast-forwards the current branch without force or automatic commits", async () => {
   const fixture = mkdtempSync(join(tmpdir(), "summing-inspector-sync-"));
   const local = join(fixture, "local");
