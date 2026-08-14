@@ -21,6 +21,14 @@ import {
   runtimeEnvironmentText,
   type ParsedEnvironment,
 } from "./project-environment.js";
+import {
+  currentEnvironmentVerification,
+  importLegacyConnections,
+  ProjectEnvironmentMigrationError,
+  recordEnvironmentMigrationVerification,
+  type EnvironmentMigrationMarker,
+  type LegacyEnvironmentMigrationTarget,
+} from "./project-environment-migration.js";
 import type { RunnerAction, RunnerJob } from "./project-runner-client.js";
 
 const PROJECT_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
@@ -188,6 +196,10 @@ export class ProjectRunnerServer {
   private processing = false;
   private readonly environments: ProjectEnvironmentStore;
   private readonly runtimeEnvironmentRoot: string;
+  private ready: boolean;
+  private readonly migrationTargets: ReadonlyMap<string, LegacyEnvironmentMigrationTarget>;
+  private readonly importedMigrations = new Set<string>();
+  private readonly migrationImports = new Map<string, Promise<EnvironmentMigrationMarker>>();
 
   constructor(
     readonly socketPath: string,
@@ -195,12 +207,20 @@ export class ProjectRunnerServer {
     readonly configRoot: string,
     readonly dockerBinary: string,
     environmentKey: Buffer,
+    initiallyReady = true,
+    migrationTargets: LegacyEnvironmentMigrationTarget[] = [],
+    readonly migrationBrokerSocket = process.env.SUMMING_SECRETS_RUNTIME_SOCKET ||
+      "/run/summing-secrets/runtime.sock",
   ) {
     if (!isAbsolute(socketPath) || basename(socketPath) !== "runner.sock") {
       throw new Error("runner socket must be an absolute runner.sock path");
     }
     mkdirSync(dataRoot, { recursive: true, mode: 0o700 });
     this.environments = new ProjectEnvironmentStore(resolve(dataRoot, "environments"), environmentKey);
+    this.ready = initiallyReady;
+    this.migrationTargets = new Map(
+      migrationTargets.map((target) => [this.migrationKey(target.projectId, target.workspaceId), target]),
+    );
     this.runtimeEnvironmentRoot = resolve(socketPath, "..", "environments");
     mkdirSync(this.runtimeEnvironmentRoot, { recursive: true, mode: 0o700 });
     for (const entry of readdirSync(this.runtimeEnvironmentRoot)) {
@@ -209,6 +229,10 @@ export class ProjectRunnerServer {
       const metadata = lstatSync(path);
       if (metadata.isFile() && !metadata.isSymbolicLink()) rmSync(path);
     }
+  }
+
+  markReady(): void {
+    this.ready = true;
   }
 
   async start(): Promise<void> {
@@ -247,7 +271,56 @@ export class ProjectRunnerServer {
   private async route(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const url = new URL(request.url ?? "/", "http://runner.local");
     if (request.method === "GET" && url.pathname === "/health") {
-      json(response, 200, { ok: true, queued: this.queue.length, running: this.processing });
+      json(response, this.ready ? 200 : 503, {
+        ok: this.ready,
+        queued: this.queue.length,
+        running: this.processing,
+      });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/migration/import") {
+      const target = this.migrationTarget(url);
+      const body = await jsonBody(request);
+      if (typeof body.manifest !== "string") {
+        throw new RunnerHttpError(400, "pinned migration manifest is required");
+      }
+      const marker = await this.importMigration(target, body.manifest);
+      const verified = currentEnvironmentVerification(
+        resolve(target.stateRoot, "verified.json"),
+        target.projectId,
+        target.workspaceId,
+        target.revision,
+        this.environments,
+      );
+      json(response, 200, {
+        migration: {
+          projectId: target.projectId,
+          workspaceId: target.workspaceId,
+          environmentRevision: marker.environmentRevision,
+          variableNames: marker.variableNames,
+          verified,
+        },
+      });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/migration/verify") {
+      const target = this.migrationTarget(url);
+      const body = await jsonBody(request);
+      const validateJobId = String(body.validateJobId ?? "");
+      const dryRunJobId = String(body.dryRunJobId ?? "");
+      if (!JOB_ID.test(validateJobId) || !JOB_ID.test(dryRunJobId)) {
+        throw new RunnerHttpError(400, "migration verification job ids are invalid");
+      }
+      const result = recordEnvironmentMigrationVerification({
+        projectId: target.projectId,
+        workspaceId: target.workspaceId,
+        revision: target.revision,
+        markerPath: resolve(target.stateRoot, "verified.json"),
+        store: this.environments,
+        validateJob: this.storedJob(target.projectId, validateJobId),
+        dryRunJob: this.storedJob(target.projectId, dryRunJobId),
+      });
+      json(response, 200, { verification: { status: result.status, ...result.marker } });
       return;
     }
     if (url.pathname === "/environment" && (request.method === "GET" || request.method === "PUT")) {
@@ -414,6 +487,9 @@ export class ProjectRunnerServer {
         );
       }
     }
+    if (raw.envPath !== undefined && !environmentBootstrap.has("repo")) {
+      environmentBootstrap.set("repo", safeAbsolutePath(raw.envPath, "envPath"));
+    }
     return {
       configPath: safeAbsolutePath(raw.configPath, "configPath"),
       dataPath: safeAbsolutePath(raw.dataPath, "dataPath"),
@@ -422,12 +498,68 @@ export class ProjectRunnerServer {
     };
   }
 
+  private migrationKey(projectId: string, workspaceId: string): string {
+    return `${projectId}:${workspaceId}`;
+  }
+
+  private migrationTarget(url: URL): LegacyEnvironmentMigrationTarget {
+    const projectId = url.searchParams.get("project") ?? "";
+    const workspaceId = url.searchParams.get("workspace") ?? "";
+    const revision = url.searchParams.get("revision") ?? "";
+    if (!PROJECT_ID.test(projectId) || !WORKSPACE_ID.test(workspaceId) || !REVISION.test(revision)) {
+      throw new RunnerHttpError(400, "invalid migration target");
+    }
+    const target = this.migrationTargets.get(this.migrationKey(projectId, workspaceId));
+    if (!target || target.revision !== revision) {
+      throw new RunnerHttpError(404, "environment migration target is not configured");
+    }
+    return target;
+  }
+
+  private async importMigration(
+    target: LegacyEnvironmentMigrationTarget,
+    manifestText: string,
+  ): Promise<EnvironmentMigrationMarker> {
+    const key = this.migrationKey(target.projectId, target.workspaceId);
+    const active = this.migrationImports.get(key);
+    if (active) return await active;
+    const migration = importLegacyConnections({
+      projectId: target.projectId,
+      workspaceId: target.workspaceId,
+      manifestPath: target.manifestPath,
+      manifestText,
+      brokerSocket: this.migrationBrokerSocket,
+      bootstrapPath: target.bootstrapPath,
+      markerPath: resolve(target.stateRoot, "imported.json"),
+      store: this.environments,
+    }).then((result) => result.marker);
+    this.migrationImports.set(key, migration);
+    try {
+      const marker = await migration;
+      this.importedMigrations.add(key);
+      if (this.importedMigrations.size === this.migrationTargets.size) this.markReady();
+      return marker;
+    } finally {
+      this.migrationImports.delete(key);
+    }
+  }
+
   private jobDirectory(projectId: string, jobId: string): string {
     return resolve(this.dataRoot, "projects", projectId, "runs", jobId);
   }
 
   private jobMetadataPath(job: RunnerJob): string {
     return resolve(this.jobDirectory(job.projectId, job.id), "job.json");
+  }
+
+  private storedJob(projectId: string, jobId: string): RunnerJob {
+    const path = resolve(this.jobDirectory(projectId, jobId), "job.json");
+    if (!existsSync(path)) throw new RunnerHttpError(404, "migration verification job not found");
+    try {
+      return JSON.parse(readFileSync(path, "utf8")) as RunnerJob;
+    } catch {
+      throw new RunnerHttpError(409, "migration verification job is malformed");
+    }
   }
 
   private saveJob(job: RunnerJob): void {
@@ -729,6 +861,10 @@ export class ProjectRunnerServer {
     }
     if (error instanceof ProjectEnvironmentError) {
       json(response, 400, { error: error.message });
+      return;
+    }
+    if (error instanceof ProjectEnvironmentMigrationError) {
+      json(response, 409, { error: error.message });
       return;
     }
     console.error("project runner request failed", error);

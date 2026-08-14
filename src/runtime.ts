@@ -25,6 +25,7 @@ import {
 } from "./attachment-service.js";
 import { ConfigError, type RuntimeConfig } from "./config.js";
 import { HealthServer } from "./health-server.js";
+import { productionEnvironmentMigrationCoordinator } from "./project-environment-coordinator.js";
 import { helpMessage } from "./help-message.js";
 import { ProjectCatalog, ProjectCatalogError } from "./project-catalog.js";
 import { GitInspector } from "./git-inspector.js";
@@ -331,6 +332,7 @@ export class SummingRuntime {
 
   async run(): Promise<number> {
     let pollTask: Promise<void> | null = null;
+    let environmentMigrationTask: Promise<void> | null = null;
     const onEvent = (event: CodexEvent): void => {
       void this.routeCodexEvent(event).catch((error) => console.error("Codex event failed", error));
     };
@@ -353,6 +355,13 @@ export class SummingRuntime {
       this.scheduleCodexLimitsRefresh();
       await this.health.start();
       await this.viewer.start();
+      environmentMigrationTask = productionEnvironmentMigrationCoordinator(
+        this.config.runnerSocket,
+      ).run(this.shutdownController.signal).catch((error) => {
+        if (!this.shutdownController.signal.aborted) {
+          console.error("project environment migration coordinator failed", error);
+        }
+      });
       for (const conversation of this.state.listConversations()) {
         const queued = this.state.pendingAll(conversation.id);
         if (queued.some((item) => item.responseMode === "ambient")) {
@@ -382,6 +391,7 @@ export class SummingRuntime {
         active.done.resolve(undefined);
       }
       if (pollTask) await Promise.allSettled([pollTask]);
+      if (environmentMigrationTask) await Promise.allSettled([environmentMigrationTask]);
       await Promise.allSettled([...this.provisioning.values()].map((task) => task.promise));
       await Promise.allSettled([...this.processors.values()]);
       await Promise.allSettled([...this.unboundProcessors]);

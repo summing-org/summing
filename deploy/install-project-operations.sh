@@ -107,9 +107,22 @@ if [ ! -f /etc/summing-runner/environment.key ]; then
 fi
 install -d -o "${runner_user}" -g "${runner_user}" -m 0700 "${runner_home}/jobs"
 install -d -o "${runner_user}" -g "${runner_user}" -m 0700 /var/lib/summing-runs/ash-seo/data
-install -o root -g summing -m 0640 \
-  "${repo_dir}/deploy/ash-seo.runner.json" \
-  /etc/summing-runner/projects/ash-seo.json
+runner_project_config=/etc/summing-runner/projects/ash-seo.json
+legacy_env_path=
+if [ -f "${runner_project_config}" ]; then
+  legacy_env_path=$(jq -r '.envPath // empty' "${runner_project_config}")
+fi
+if [ -n "${legacy_env_path}" ]; then
+  compatible_runner_config=$(mktemp /run/ash-seo-runner.XXXXXX)
+  jq --arg envPath "${legacy_env_path}" '. + {envPath: $envPath}' \
+    "${repo_dir}/deploy/ash-seo.runner.json" > "${compatible_runner_config}"
+  install -o root -g summing -m 0640 \
+    "${compatible_runner_config}" "${runner_project_config}"
+  rm -f "${compatible_runner_config}"
+else
+  install -o root -g summing -m 0640 \
+    "${repo_dir}/deploy/ash-seo.runner.json" "${runner_project_config}"
+fi
 if [ ! -f /etc/summing-runner/projects/ash-seo.env ]; then
   install -o root -g "${runner_user}" -m 0640 \
     "${repo_dir}/deploy/ash-seo.env.example" \
@@ -147,22 +160,26 @@ if ! command -v caddy >/dev/null 2>&1; then
   apt-get update
   DEBIAN_FRONTEND=noninteractive apt-get install -y caddy
 fi
-temporary_caddy=$(mktemp /etc/caddy/Caddyfile.XXXXXX)
-trap 'rm -f "${temporary_caddy}"' EXIT
-sed "s/VIEWER_DOMAIN/${viewer_domain}/g" \
-  "${repo_dir}/deploy/Caddyfile.viewer" > "${temporary_caddy}"
-if [ -n "${viewer_redirect_domain}" ]; then
-  printf '\n%s {\n\tredir https://%s{uri} permanent\n}\n' \
-    "${viewer_redirect_domain}" \
-    "${viewer_domain}" \
-    >> "${temporary_caddy}"
+if [ -z "${legacy_env_path}" ] || [ ! -f /etc/caddy/Caddyfile ]; then
+  temporary_caddy=$(mktemp /etc/caddy/Caddyfile.XXXXXX)
+  trap 'rm -f "${temporary_caddy}"' EXIT
+  sed "s/VIEWER_DOMAIN/${viewer_domain}/g" \
+    "${repo_dir}/deploy/Caddyfile.viewer" > "${temporary_caddy}"
+  if [ -n "${viewer_redirect_domain}" ]; then
+    printf '\n%s {\n\tredir https://%s{uri} permanent\n}\n' \
+      "${viewer_redirect_domain}" \
+      "${viewer_domain}" \
+      >> "${temporary_caddy}"
+  fi
+  caddy fmt --overwrite "${temporary_caddy}"
+  caddy validate --config "${temporary_caddy}"
+  chown root:root "${temporary_caddy}"
+  chmod 0644 "${temporary_caddy}"
+  mv -f "${temporary_caddy}" /etc/caddy/Caddyfile
+  trap - EXIT
+else
+  printf '%s\n' 'Keeping the legacy Connections route until environment verification succeeds.'
 fi
-caddy fmt --overwrite "${temporary_caddy}"
-caddy validate --config "${temporary_caddy}"
-chown root:root "${temporary_caddy}"
-chmod 0644 "${temporary_caddy}"
-mv -f "${temporary_caddy}" /etc/caddy/Caddyfile
-trap - EXIT
 
 env_file=/etc/summing/summing.env
 if ! grep -q '^SUMMING_VIEWER_URL=' "${env_file}"; then

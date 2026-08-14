@@ -150,6 +150,13 @@ switch_current() {
   mv -Tf "${next_link}" "${current_link}"
 }
 
+finalize_project_environment_cutover() {
+  local release=$1
+  local hook=${release}/deploy/project-environment-cutover
+  if [ ! -x "${hook}" ]; then return 0; fi
+  SUMMING_ENV_MIGRATION_RELEASE="${release}" "${hook}"
+}
+
 restart_services() {
   if systemctl is-enabled --quiet summing-runner.service 2>/dev/null; then
     systemctl restart summing-runner.service
@@ -250,6 +257,12 @@ if ! valid_sha "${target_sha}"; then
   exit 1
 fi
 if [ "${previous_sha}" = "${target_sha}" ]; then
+  if ! finalize_project_environment_cutover "${previous_target}"; then
+    write_state failed \
+      "Версия установлена, но завершение migration cutover не удалось" \
+      "${previous_sha}" "${target_sha}" "$(now)"
+    exit 1
+  fi
   write_state idle "Установлена актуальная версия" "${previous_sha}" "${target_sha}" \
     "$(now)"
   exit 0
@@ -308,6 +321,13 @@ switched=1
 restart_services
 wait_for_health
 switched=0
+
+if ! finalize_project_environment_cutover "${release_dir}"; then
+  write_state failed \
+    "Версия установлена, но завершение migration cutover не удалось" \
+    "${target_sha}" "${target_sha}" "$(now)"
+  exit 1
+fi
 
 write_state succeeded "Обновление установлено" "${target_sha}" "${target_sha}" \
   "$(now)"

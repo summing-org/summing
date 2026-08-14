@@ -315,9 +315,12 @@ sudo /opt/summing/deploy/install-project-operations.sh
 Installer создаёт отдельного `summing-runner`, rootless Docker с лимитом build
 cache 8 ГБ, приватный AES-ключ для project env, HTTPS proxy, project config/data
 и timer unit. Пользователь `summing` не получает Docker socket. При первом
-переходе существующий `/etc/summing-runner/projects/ash-seo.env` импортируется в
-encrypted store; после этого редактируйте значения во вкладке **Энвы**. Проверьте
-`ash-seo.config.json`, затем запустите Validate и Dry run из Viewer.
+переходе static env и raw credentials из legacy Connections автоматически
+объединяются в encrypted store. Затем runner выполняет Validate и Dry run на
+одной env revision; только успешная проверка разрешает следующему deploy tick
+убрать Connections route и отключить broker. Legacy vault и recovery-копии
+config/unit/Caddyfile сохраняются для rollback. После cutover редактируйте
+значения во вкладке **Энвы**. Полный протокол: [ENVIRONMENTS_RU.md](ENVIRONMENTS_RU.md).
 Основной production URL Mini App — `https://assist.summing.org`; прежний
 `https://ash.summing.org` остаётся только постоянным HTTPS-редиректом с
 сохранением URI для уже отправленных Telegram-кнопок.

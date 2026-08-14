@@ -1,0 +1,353 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+if [ "${EUID}" -ne 0 ]; then
+  printf '%s\n' 'Project environment cutover must run as root.' >&2
+  exit 2
+fi
+
+project_id=${SUMMING_ENV_MIGRATION_PROJECT:-ash-seo}
+workspace_id=${SUMMING_ENV_MIGRATION_WORKSPACE:-repo}
+runner_user=${SUMMING_ENV_MIGRATION_RUNNER_USER:-summing-runner}
+runner_data=${SUMMING_RUNNER_DATA:-/var/lib/summing-runner/jobs}
+config_path=${SUMMING_ENV_MIGRATION_PROJECT_CONFIG:-/etc/summing-runner/projects/${project_id}.json}
+schedule_path=${SUMMING_ENV_MIGRATION_SCHEDULE:-/etc/summing-runner/schedules/${project_id}.json}
+state_root=${SUMMING_ENV_MIGRATION_STATE:-${runner_data}/migrations/connections-to-environment/${project_id}--${workspace_id}}
+verified_marker=${state_root}/verified.json
+finalized_marker=${state_root}/finalized.json
+imported_marker=${state_root}/imported.json
+runner_unit=/etc/systemd/system/summing-runner.service
+caddy_file=/etc/caddy/Caddyfile
+release_root=${SUMMING_ENV_MIGRATION_RELEASE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
+environment_envelope=${runner_data}/environments/${project_id}--${workspace_id}.json
+
+if [[ ! "${project_id}" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ ]] || \
+  [[ ! "${workspace_id}" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ ]]; then
+  printf '%s\n' 'Project or workspace id is invalid.' >&2
+  exit 2
+fi
+
+private_regular_file() {
+  local path=$1
+  local mode=
+  [ -f "${path}" ] && [ ! -L "${path}" ] || return 1
+  mode=$(stat -c '%a' "${path}")
+  [ "${mode}" = 400 ] || [ "${mode}" = 600 ]
+}
+
+valid_environment_key() {
+  local path=$1
+  private_regular_file "${path}" && \
+    [ "$(stat -c '%U' "${path}")" = "${runner_user}" ] && \
+    [ "$(stat -c '%s' "${path}")" = 65 ] && \
+    grep -Eq '^[0-9a-fA-F]{64}$' "${path}"
+}
+
+if [ -L "${state_root}" ]; then
+  printf '%s\n' 'Migration state directory must not be a symlink.' >&2
+  exit 2
+fi
+if [ -e "${state_root}" ] && \
+  { [ ! -d "${state_root}" ] || \
+    [ "$(stat -c '%a' "${state_root}")" != 700 ] || \
+    [ "$(stat -c '%U' "${state_root}")" != "${runner_user}" ]; }; then
+  printf '%s\n' 'Migration state directory must be private and runner-owned.' >&2
+  exit 2
+fi
+
+if [ -L "${imported_marker}" ]; then
+  printf '%s\n' 'Imported migration marker must not be a symlink.' >&2
+  exit 2
+fi
+if [ ! -f "${imported_marker}" ]; then
+  printf 'No imported legacy environment migration for %s/%s; cutover skipped.\n' \
+    "${project_id}" "${workspace_id}"
+  exit 0
+fi
+if ! private_regular_file "${imported_marker}"; then
+  printf '%s\n' 'Imported migration marker is not a private regular file.' >&2
+  exit 2
+fi
+if [ -L "${verified_marker}" ]; then
+  printf '%s\n' 'Verification marker must not be a symlink.' >&2
+  exit 2
+fi
+if [ ! -f "${verified_marker}" ]; then
+  printf 'Legacy environment migration for %s/%s is imported but not verified yet.\n' \
+    "${project_id}" "${workspace_id}" >&2
+  exit 1
+fi
+if ! private_regular_file "${verified_marker}"; then
+  printf '%s\n' 'Verification marker is not a private regular file.' >&2
+  exit 2
+fi
+if [ -L "${finalized_marker}" ]; then
+  printf '%s\n' 'Finalized migration marker must not be a symlink.' >&2
+  exit 2
+fi
+if [ -f "${finalized_marker}" ]; then
+  if ! private_regular_file "${finalized_marker}" || ! jq -e \
+    --arg project "${project_id}" \
+    --arg workspace "${workspace_id}" \
+    '.version == 1 and .projectId == $project and .workspaceId == $workspace and
+     .legacyBrokerDataPreserved == true' "${finalized_marker}" >/dev/null; then
+    printf '%s\n' 'Finalized migration marker is invalid.' >&2
+    exit 2
+  fi
+  printf 'Legacy environment migration already finalized for %s/%s.\n' \
+    "${project_id}" "${workspace_id}"
+  exit 0
+fi
+if ! id "${runner_user}" >/dev/null 2>&1; then
+  printf 'Runner user is missing: %s\n' "${runner_user}" >&2
+  exit 2
+fi
+if [ ! -f "${config_path}" ] || [ -L "${config_path}" ] || \
+  [ ! -f "${schedule_path}" ] || [ -L "${schedule_path}" ] || \
+  [ ! -f "${runner_unit}" ] || [ -L "${runner_unit}" ]; then
+  printf '%s\n' 'Runner project config or systemd unit is missing.' >&2
+  exit 2
+fi
+if ! jq -e \
+  --arg project "${project_id}" \
+  --arg workspace "${workspace_id}" \
+  '.version == 1 and .projectId == $project and .workspaceId == $workspace and
+   (.environmentRevision | type == "number") and (.environmentRevision >= 1) and
+   (.integrationIds | type == "array") and (.variableNames | type == "array")' \
+  "${imported_marker}" >/dev/null; then
+  printf '%s\n' 'Imported environment marker is invalid.' >&2
+  exit 2
+fi
+if ! jq -e \
+  --arg project "${project_id}" \
+  --arg workspace "${workspace_id}" \
+  '.version == 1 and .projectId == $project and .workspaceId == $workspace and
+   (.environmentRevision | type == "number") and (.environmentRevision >= 1) and
+   (.revision | type == "string") and
+   (.validateJobId | type == "string") and (.dryRunJobId | type == "string") and
+   (.validateJobId != .dryRunJobId)' \
+  "${verified_marker}" >/dev/null; then
+  printf '%s\n' 'Environment verification marker is invalid.' >&2
+  exit 2
+fi
+verified_revision=$(jq -r '.revision' "${verified_marker}")
+verified_environment_revision=$(jq -r '.environmentRevision' "${verified_marker}")
+validate_job_id=$(jq -r '.validateJobId' "${verified_marker}")
+dry_run_job_id=$(jq -r '.dryRunJobId' "${verified_marker}")
+schedule_revision=$(jq -r \
+  --arg project "${project_id}" \
+  --arg workspace "${workspace_id}" \
+  'if .projectId == $project and (.workspaceId // "repo") == $workspace
+   then .revision // empty else empty end' \
+  "${schedule_path}")
+if [[ ! "${verified_revision}" =~ ^[0-9a-f]{40}$ ]] || \
+  [ "${verified_revision}" != "${schedule_revision}" ] || \
+  [[ ! "${validate_job_id}" =~ ^[0-9a-f-]{36}$ ]] || \
+  [[ ! "${dry_run_job_id}" =~ ^[0-9a-f-]{36}$ ]]; then
+  printf '%s\n' 'Verification marker does not match the active project schedule.' >&2
+  exit 2
+fi
+if ! private_regular_file "${environment_envelope}" || \
+  [ "$(jq -r '.revision // empty' "${environment_envelope}")" != "${verified_environment_revision}" ]; then
+  printf '%s\n' 'Encrypted environment changed after Validate/Dry run verification.' >&2
+  exit 1
+fi
+
+installed_environment_key=/etc/summing-runner/environment.key
+bootstrap_environment_key=/var/lib/summing-runner/environment.key
+if [ -e "${installed_environment_key}" ] || [ -L "${installed_environment_key}" ]; then
+  if ! valid_environment_key "${installed_environment_key}"; then
+    printf '%s\n' 'Installed runner environment key is invalid.' >&2
+    exit 2
+  fi
+else
+  if ! valid_environment_key "${bootstrap_environment_key}"; then
+    printf '%s\n' 'Private bootstrap environment key is missing or invalid.' >&2
+    exit 2
+  fi
+  install -d -o root -g summing -m 0750 /etc/summing-runner
+  install -o "${runner_user}" -g "${runner_user}" -m 0400 \
+    "${bootstrap_environment_key}" "${installed_environment_key}"
+fi
+
+bootstrap_path=$(jq -r \
+  --arg workspace "${workspace_id}" \
+  '.environmentBootstrap[$workspace] // .envPath // empty' \
+  "${config_path}")
+if [[ "${bootstrap_path}" != /* ]]; then
+  printf '%s\n' 'Runner project config has no absolute legacy/bootstrap env path.' >&2
+  exit 2
+fi
+
+install -d -o "${runner_user}" -g "${runner_user}" -m 0700 "${state_root}"
+config_before=$(mktemp /run/summing-project-config.XXXXXX)
+unit_before=$(mktemp /run/summing-runner-unit.XXXXXX)
+caddy_before=
+config_changed=0
+unit_changed=0
+caddy_changed=0
+broker_was_enabled=0
+broker_was_active=0
+committed=0
+cp "${config_path}" "${config_before}"
+cp "${runner_unit}" "${unit_before}"
+if [ -f "${caddy_file}" ]; then
+  caddy_before=$(mktemp /run/summing-caddy.XXXXXX)
+  cp "${caddy_file}" "${caddy_before}"
+fi
+if systemctl is-enabled --quiet summing-secrets.service 2>/dev/null; then broker_was_enabled=1; fi
+if systemctl is-active --quiet summing-secrets.service 2>/dev/null; then broker_was_active=1; fi
+
+rollback() {
+  local status=$?
+  trap - ERR
+  set +e
+  if [ "${committed}" = 0 ]; then
+    if [ "${broker_was_enabled}" = 1 ]; then systemctl enable summing-secrets.service >/dev/null 2>&1; fi
+    if [ "${broker_was_active}" = 1 ]; then systemctl start summing-secrets.service >/dev/null 2>&1; fi
+    if [ "${caddy_changed}" = 1 ] && [ -n "${caddy_before}" ]; then
+      install -o root -g root -m 0644 "${caddy_before}" "${caddy_file}"
+      systemctl reload caddy.service >/dev/null 2>&1
+    fi
+    if [ "${unit_changed}" = 1 ]; then
+      install -o root -g root -m 0644 "${unit_before}" "${runner_unit}"
+    fi
+    if [ "${config_changed}" = 1 ]; then
+      install -o root -g summing -m 0640 "${config_before}" "${config_path}"
+    fi
+    systemctl daemon-reload >/dev/null 2>&1
+    systemctl restart summing-runner.service >/dev/null 2>&1
+  fi
+  rm -f "${config_before}" "${unit_before}"
+  if [ -n "${caddy_before}" ]; then rm -f "${caddy_before}"; fi
+  exit "${status}"
+}
+trap rollback ERR
+
+config_next=$(mktemp "${config_path}.XXXXXX")
+jq \
+  --arg workspace "${workspace_id}" \
+  --arg bootstrap "${bootstrap_path}" \
+  '.environmentBootstrap = ((.environmentBootstrap // {}) + {($workspace): $bootstrap}) |
+   del(.envPath)' \
+  "${config_path}" > "${config_next}"
+chown root:summing "${config_next}"
+chmod 0640 "${config_next}"
+mv -f "${config_next}" "${config_path}"
+config_changed=1
+if [ ! -f "${state_root}/project-config.before.json" ]; then
+  install -o "${runner_user}" -g "${runner_user}" -m 0400 \
+    "${config_before}" "${state_root}/project-config.before.json"
+fi
+
+runner_uid=$(id -u "${runner_user}")
+unit_next=$(mktemp /run/summing-runner-next.XXXXXX)
+sed "s/RUNNER_UID/${runner_uid}/g" \
+  "${release_root}/deploy/summing-runner.service" > "${unit_next}"
+install -o root -g root -m 0644 "${unit_next}" "${runner_unit}"
+rm -f "${unit_next}"
+unit_changed=1
+if [ ! -f "${state_root}/summing-runner.service.before" ]; then
+  install -o "${runner_user}" -g "${runner_user}" -m 0400 \
+    "${unit_before}" "${state_root}/summing-runner.service.before"
+fi
+systemctl daemon-reload
+systemctl restart summing-runner.service
+runner_healthy=0
+for _ in $(seq 1 60); do
+  if curl --fail --silent --unix-socket /run/summing-runner/runner.sock \
+    http://localhost/health >/dev/null 2>&1; then
+    runner_healthy=1
+    break
+  fi
+  sleep 1
+done
+if [ "${runner_healthy}" != 1 ]; then
+  printf '%s\n' 'Runner did not stay healthy with the finalized unit.' >&2
+  false
+fi
+
+if [ -f "${caddy_file}" ]; then
+  route_audit=$(awk '
+    /^[[:space:]]*handle \/connections\* \{[[:space:]]*$/ {
+      routes += 1
+      inside = 1
+      next
+    }
+    inside && /^[[:space:]]*\}[[:space:]]*$/ {
+      inside = 0
+      next
+    }
+    inside && /^[[:space:]]*reverse_proxy 127\.0\.0\.1:8767[[:space:]]*$/ {
+      upstreams += 1
+      next
+    }
+    inside && /^[[:space:]]*($|#)/ { next }
+    inside { unexpected += 1 }
+    END { printf "%d %d %d %d\n", routes, upstreams, unexpected, inside }
+  ' "${caddy_file}")
+  read -r route_count route_upstreams route_unexpected route_open <<< "${route_audit}"
+  if [ "${route_count}" -gt 1 ]; then
+    printf '%s\n' 'Caddyfile has multiple legacy Connections routes.' >&2
+    false
+  fi
+  if [ "${route_count}" = 1 ]; then
+    if [ "${route_upstreams}" != 1 ] || [ "${route_unexpected}" != 0 ] || \
+      [ "${route_open}" != 0 ]; then
+      printf '%s\n' 'Legacy Connections route has unexpected contents.' >&2
+      false
+    fi
+    caddy_next=$(mktemp /etc/caddy/Caddyfile.XXXXXX)
+    awk '
+      /^[[:space:]]*handle \/connections\* \{[[:space:]]*$/ { skipping=1; next }
+      skipping && /^[[:space:]]*\}[[:space:]]*$/ { skipping=0; next }
+      skipping { next }
+      { print }
+      END { if (skipping) exit 42 }
+    ' "${caddy_file}" > "${caddy_next}"
+    caddy fmt --overwrite "${caddy_next}"
+    caddy validate --config "${caddy_next}"
+    if [ ! -f "${state_root}/Caddyfile.before" ]; then
+      install -o "${runner_user}" -g "${runner_user}" -m 0400 \
+        "${caddy_before}" "${state_root}/Caddyfile.before"
+    fi
+    install -o root -g root -m 0644 "${caddy_next}" "${caddy_file}"
+    rm -f "${caddy_next}"
+    caddy_changed=1
+    systemctl reload caddy.service
+  fi
+fi
+
+if systemctl list-unit-files --no-legend summing-secrets.service 2>/dev/null | \
+  grep -q '^summing-secrets\.service'; then
+  systemctl disable --now summing-secrets.service
+fi
+
+if [ -e "${bootstrap_environment_key}" ] || [ -L "${bootstrap_environment_key}" ]; then
+  if ! valid_environment_key "${bootstrap_environment_key}" || \
+    ! cmp -s "${bootstrap_environment_key}" "${installed_environment_key}"; then
+    printf '%s\n' 'Bootstrap and installed environment keys diverged.' >&2
+    false
+  fi
+  rm -f "${bootstrap_environment_key}"
+fi
+
+finalized_next=$(mktemp /run/summing-environment-finalized.XXXXXX)
+jq -n \
+  --arg projectId "${project_id}" \
+  --arg workspaceId "${workspace_id}" \
+  --arg finalizedAt "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" \
+  --argjson verification "$(cat "${verified_marker}")" \
+  '{version: 1, projectId: $projectId, workspaceId: $workspaceId,
+    finalizedAt: $finalizedAt, verification: $verification,
+    legacyBrokerDataPreserved: true}' > "${finalized_next}"
+install -o "${runner_user}" -g "${runner_user}" -m 0400 \
+  "${finalized_next}" "${finalized_marker}"
+rm -f "${finalized_next}"
+
+committed=1
+trap - ERR
+rm -f "${config_before}" "${unit_before}"
+if [ -n "${caddy_before}" ]; then rm -f "${caddy_before}"; fi
+printf 'Legacy Connections cutover finalized for %s/%s; broker data was preserved.\n' \
+  "${project_id}" "${workspace_id}"

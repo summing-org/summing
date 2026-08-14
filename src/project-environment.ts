@@ -13,7 +13,7 @@ import {
   renameSync,
   writeFileSync,
 } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 
 const IDENTIFIER = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const VARIABLE = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
@@ -167,6 +167,29 @@ export function readEnvironmentKey(path: string): Buffer {
     : Buffer.from(encoded, "base64");
   if (key.length !== 32) throw new ProjectEnvironmentError("runner environment key must contain 32 bytes");
   return key;
+}
+
+export function readOrCreateEnvironmentKey(path: string): Buffer {
+  if (existsSync(path)) return readEnvironmentKey(path);
+  const directory = dirname(path);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const metadata = lstatSync(directory);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink() || (metadata.mode & 0o077) !== 0) {
+    throw new ProjectEnvironmentError("runner environment key directory must be private");
+  }
+  const key = randomBytes(32);
+  try {
+    try {
+      writeFileSync(path, `${key.toString("hex")}\n`, { flag: "wx", mode: 0o400 });
+      chmodSync(path, 0o400);
+      return Buffer.from(key);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return readEnvironmentKey(path);
+      throw error;
+    }
+  } finally {
+    key.fill(0);
+  }
 }
 
 export class ProjectEnvironmentStore {

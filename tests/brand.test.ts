@@ -43,5 +43,5 @@ test("the bot profile always preserves the complete SUMMING version", () => {
   const description = summingProfileDescription("x".repeat(200));
 
   assert.equal(description.length, 120);
-  assert.match(description, / · SUMMING 9\.3\.0$/);
+  assert.match(description, / · SUMMING 9\.3\.1$/);
 });

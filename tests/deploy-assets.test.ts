@@ -9,6 +9,8 @@ const asset = (path: string): string => readFileSync(join(root, path), "utf8");
 
 test("deployment assets use an atomic release and one timer/path worker", () => {
   const script = asset("deploy/summing-deploy");
+  const cutoverPath = join(root, "deploy/project-environment-cutover");
+  const cutover = asset("deploy/project-environment-cutover");
   const timer = asset("deploy/summing-deploy.timer");
   const path = asset("deploy/summing-deploy.path");
   const service = asset("deploy/summing-deploy.service");
@@ -18,6 +20,9 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
     encoding: "utf8",
   });
   assert.equal(syntax.status, 0, syntax.stderr);
+  const cutoverSyntax = spawnSync("bash", ["-n", cutoverPath], { encoding: "utf8" });
+  assert.equal(cutoverSyntax.status, 0, cutoverSyntax.stderr);
+  assert.notEqual(statSync(cutoverPath).mode & 0o111, 0, "cutover hook must be executable");
   assert.match(script, /git_as_summing -C "\$\{repo_dir\}" fetch --prune/);
   assert.match(script, /SUMMING_DEPLOY_EXPECTED_REMOTE/);
   assert.match(script, /runuser -u summing-builder -- env -i/);
@@ -27,6 +32,8 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
   assert.match(script, /mv -Tf "\$\{next_link\}" "\$\{current_link\}"/);
   assert.match(script, /rolling_back/);
   assert.match(script, /wait_for_idle_runtime/);
+  assert.match(script, /finalize_project_environment_cutover "\$\{previous_target\}"/);
+  assert.match(script, /finalize_project_environment_cutover "\$\{release_dir\}"/);
   assert.doesNotMatch(script, /git .*\b(?:pull|reset|checkout)\b/);
   assert.doesNotMatch(service, /summing\.env/);
   assert.match(service, /ExecStart=\/opt\/summing-current\/deploy\/summing-deploy/);
@@ -41,6 +48,15 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
     /ReadWritePaths=.*\/var\/lib\/summing-runs(?:\s|$)/,
     "the hardened runner must be able to create persistent dry-run artifacts",
   );
+  assert.match(cutover, /if \[ ! -f "\$\{verified_marker\}" \]/);
+  assert.match(cutover, /Encrypted environment changed after Validate\/Dry run verification/);
+  assert.match(cutover, /del\(\.envPath\)/);
+  assert.match(cutover, /systemctl restart summing-runner\.service/);
+  assert.match(cutover, /systemctl disable --now summing-secrets\.service/);
+  assert.match(cutover, /legacyBrokerDataPreserved: true/);
+  assert.match(cutover, /project-config\.before\.json/);
+  assert.match(cutover, /Caddyfile\.before/);
+  assert.match(cutover, /trap rollback ERR/);
 });
 
 test("Project Viewer installer supports an HTTPS domain transition", () => {
@@ -82,6 +98,9 @@ test("runner environment deployment keeps its encryption key private and one HTT
   assert.doesNotMatch(service, /SUMMING_SECRETS/);
   assert.doesNotMatch(caddy, /connections|8767/);
   assert.match(caddy, /reverse_proxy 127\.0\.0\.1:8766/);
+  assert.match(installer, /Keeping the legacy Connections route until environment verification succeeds/);
+  assert.match(installer, /\. \+ \{envPath: \$envPath\}/);
+  assert.match(service, /SUMMING_RUNNER_SCHEDULES=\/etc\/summing-runner\/schedules/);
 });
 
 test("host identity migration is guarded, recoverable, and preserves worktrees", () => {

@@ -1,5 +1,8 @@
 import { request } from "node:http";
 import type { ProjectEnvironmentDocument } from "./project-environment.js";
+import type {
+  EnvironmentVerificationMarker,
+} from "./project-environment-migration.js";
 
 export type RunnerAction = "build" | "validate" | "dry-run" | "run";
 export type RunnerJobStatus = "queued" | "running" | "completed" | "failed";
@@ -28,6 +31,14 @@ export interface RunnerArtifact {
 
 export interface RunnerArtifactContent extends RunnerArtifact {
   content: string;
+}
+
+export interface RunnerEnvironmentMigration {
+  projectId: string;
+  workspaceId: string;
+  environmentRevision: number;
+  variableNames: string[];
+  verified: EnvironmentVerificationMarker | null;
 }
 
 export class ProjectRunnerClientError extends Error {
@@ -179,5 +190,38 @@ export class ProjectRunnerClient {
       body,
     );
     return result.environment;
+  }
+
+  async importLegacyEnvironmentMigration(
+    projectId: string,
+    workspaceId: string,
+    revision: string,
+    manifest: string,
+  ): Promise<RunnerEnvironmentMigration> {
+    const query = new URLSearchParams({ project: projectId, workspace: workspaceId, revision });
+    const body = Buffer.from(JSON.stringify({ manifest }), "utf8");
+    const result = await this.call<{ migration: RunnerEnvironmentMigration }>(
+      "POST",
+      `/migration/import?${query.toString()}`,
+      body,
+    );
+    return result.migration;
+  }
+
+  async verifyLegacyEnvironmentMigration(
+    projectId: string,
+    workspaceId: string,
+    revision: string,
+    validateJobId: string,
+    dryRunJobId: string,
+  ): Promise<EnvironmentVerificationMarker> {
+    const query = new URLSearchParams({ project: projectId, workspace: workspaceId, revision });
+    const body = Buffer.from(JSON.stringify({ validateJobId, dryRunJobId }), "utf8");
+    const result = await this.call<{ verification: EnvironmentVerificationMarker & { status: string } }>(
+      "POST",
+      `/migration/verify?${query.toString()}`,
+      body,
+    );
+    return result.verification;
   }
 }
