@@ -363,9 +363,6 @@ export class SummingRuntime {
       this.projects,
       undefined,
       (conversation) => this.processors.has(conversation.id),
-      (chatId, topicId) => {
-        this.unboundTopicMessages.delete(this.unboundTopicKey(chatId, topicId));
-      },
     );
     this.semaphore = new Semaphore(config.maxParallelConversations);
   }
