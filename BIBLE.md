@@ -41,8 +41,10 @@ An unbound Telegram topic is not a Conversation and grants no Project context. O
 messages there may be retained only in a small volatile context window and must never
 schedule a run or a reply. An explicit mention or reply may receive a fresh projectless,
 read-only answer based only on that direct question, general knowledge, the bounded
-recent topic window, and the referenced bot answer for a reply. The thread is ephemeral,
-and both per-topic and aggregate volatile context retention are bounded. It must not
+recent topic window, and the referenced bot answer for a reply. A bare mention without
+a question is answered locally with a usage hint and must not start a thread or enter
+any execution queue. The thread is ephemeral, and both per-topic and aggregate volatile
+context retention are bounded. It must not
 expose or infer files, memory, history, or authority from
 any bound topic, and it must not use network or external capabilities.
 Its direct-question queue is bounded, time-limited, and isolated from Project Conversation

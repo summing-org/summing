@@ -203,8 +203,13 @@ test("owners control projects while group participants get read-only Q&A", async
     assert.equal(runtime.state.byTopic(-100, 6), null);
     assert.ok(runtime.state.telegramTopic(-100, 6));
 
+    await send(999, "@summing_bot", -100, "supergroup", 6);
+    assert.equal(replies.at(-1), "Я здесь. Напишите вопрос вместе с упоминанием.");
+    assert.equal(unboundQuestions.length, 0);
+    const afterBareMentionReplies = replies.length;
+
     await send(999, "@summing_bot, подведи итог обсуждения", -100, "supergroup", 6);
-    assert.equal(replies.length, beforeUnboundReplies);
+    assert.equal(replies.length, afterBareMentionReplies);
     assert.equal(unboundQuestions.length, 1);
     assert.equal(unboundQuestions[0]?.topicId, 6);
     assert.equal(unboundQuestions[0]?.senderId, 999);
@@ -567,6 +572,27 @@ test("explicit questions in unbound topics run without Project access", async ()
         chatId: -500,
         text: "Короткий ответ по обсуждению.",
         options: { topicId: 77, replyTo: 10 },
+      },
+    ]);
+
+    replies.length = 0;
+    runtime.codex.startThread = async () => {
+      throw new Error("thread/start did not preserve any runtime workspace roots");
+    };
+    await answerUnboundQuestion({
+      chatId: -500,
+      topicId: 77,
+      messageId: 11,
+      senderId: 999,
+      text: "@summing_bot, что решили?",
+      hasAttachment: false,
+      context: [],
+    });
+    assert.deepEqual(replies, [
+      {
+        chatId: -500,
+        text: "Не удалось ответить. Попробуйте ещё раз позже.",
+        options: { topicId: 77, replyTo: 11 },
       },
     ]);
   } finally {

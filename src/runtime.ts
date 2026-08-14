@@ -656,6 +656,19 @@ export class SummingRuntime {
         );
         return;
       }
+      if (
+        responseMode === "direct" &&
+        attachmentCandidate === null &&
+        this.isBareBotMention(text)
+      ) {
+        await this.reply(
+          chatId,
+          topicId,
+          messageId,
+          "Я здесь. Напишите вопрос вместе с упоминанием.",
+        );
+        return;
+      }
       const context = this.unboundTopicContext(chatId, topicId);
       const repliedToBot = this.repliedToBotContext(message);
       if (repliedToBot) context.push(repliedToBot);
@@ -1041,7 +1054,16 @@ export class SummingRuntime {
       console.error("unbound topic answer failed", error);
       if (!this.stopping) {
         try {
-          await stream.flush(`Ошибка: ${errorText(error)}`);
+          if (active) {
+            await stream.flush("Не удалось ответить. Попробуйте ещё раз позже.");
+          } else {
+            await this.reply(
+              question.chatId,
+              question.topicId,
+              question.messageId,
+              "Не удалось ответить. Попробуйте ещё раз позже.",
+            );
+          }
         } catch (reportError) {
           console.error("could not report unbound topic answer failure", reportError);
         }
@@ -1137,6 +1159,13 @@ export class SummingRuntime {
       "i",
     );
     return mention.test(text) ? "direct" : "ambient";
+  }
+
+  private isBareBotMention(text: string): boolean {
+    if (!this.telegramUsername) return false;
+    const escaped = this.telegramUsername.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const decoration = "(?:\\s|[,.!?;:…—–-])*";
+    return new RegExp(`^${decoration}@${escaped}${decoration}$`, "iu").test(text);
   }
 
   private repliedToBotMessage(message: TelegramObject): TelegramObject | null {
