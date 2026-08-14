@@ -32,6 +32,10 @@ import { GitInspector } from "./git-inspector.js";
 import { ProjectViewerServer } from "./project-viewer.js";
 import { detectSecretFile, detectSecretText, type SecretDetection } from "./secret-ingress.js";
 import {
+  teamKnowledgeText,
+  telegramTeamEventInput,
+} from "./team-memory.js";
+import {
   StateStore,
   type Conversation,
   type PendingInput,
@@ -115,8 +119,6 @@ const ACTIVE_BOT_MEMBERSHIP_STATUSES = new Set([
 ]);
 const MAX_AMBIENT_ANSWER_LENGTH = 3_900;
 const MAX_UNBOUND_CONTEXT_MESSAGES = 20;
-const MAX_UNBOUND_CONTEXT_CHARACTERS = 12_000;
-const MAX_UNBOUND_CONTEXT_TOPICS = 100;
 const MAX_UNBOUND_QUESTION_PROCESSORS = 4;
 const UNBOUND_TURN_TIMEOUT_MILLISECONDS = 120_000;
 
@@ -290,6 +292,7 @@ export class SummingRuntime {
   private codexLimitsState: CodexRateLimitsSnapshot | null = null;
   private codexLimitsRefresh: Promise<CodexRateLimitsSnapshot | null> | null = null;
   private codexLimitsTimer: NodeJS.Timeout | null = null;
+  private teamRetentionTimer: NodeJS.Timeout | null = null;
   private codexLimitsProfileDescription = "";
   private lastTelegramPoll: number | null = null;
   private readonly processors = new Map<string, Promise<void>>();
@@ -299,7 +302,6 @@ export class SummingRuntime {
   private readonly activeUnboundByThread = new Map<string, CodexResponseRun>();
   private readonly activeUnboundByTurn = new Map<string, CodexResponseRun>();
   private readonly unboundProcessors = new Set<Promise<void>>();
-  private readonly unboundTopicMessages = new Map<string, UnboundTopicMessage[]>();
   private readonly loadedThreads = new Set<string>();
   private readonly workspaceRuns = new KeyedMutex();
   private readonly ambientTimers = new Map<string, NodeJS.Timeout>();
@@ -350,6 +352,8 @@ export class SummingRuntime {
       mkdirSync(this.config.dataDir, { recursive: true });
       this.projects.initialize();
       this.workspaces.initialize(this.projects.all().map((entry) => entry.project));
+      this.purgeTeamEvidence();
+      this.scheduleTeamRetention();
       await this.codex.start();
       this.accountState = await this.codex.account();
       const me = await this.telegram.getMe();
@@ -396,6 +400,7 @@ export class SummingRuntime {
       this.shutdownController.abort();
       this.clearAmbientTimers();
       this.clearCodexLimitsTimer();
+      this.clearTeamRetentionTimer();
       await this.telegram.close();
       await this.codex.close(this.exitCode === 99);
       for (const active of this.activeByThread.values()) {
@@ -428,6 +433,7 @@ export class SummingRuntime {
     this.shutdownController.abort();
     this.clearAmbientTimers();
     this.clearCodexLimitsTimer();
+    this.clearTeamRetentionTimer();
     this.shutdown.resolve(undefined);
   }
 
@@ -519,6 +525,31 @@ export class SummingRuntime {
     this.codexLimitsTimer = null;
   }
 
+  private purgeTeamEvidence(): void {
+    if (!this.config.teamMemoryEnabled) return;
+    const redacted = this.state.purgeExpiredTeamEvidence(this.config.teamRawRetentionDays);
+    if (redacted > 0) console.info(`redacted ${redacted} expired Team Space events`);
+  }
+
+  private scheduleTeamRetention(): void {
+    this.clearTeamRetentionTimer();
+    if (this.stopping || !this.config.teamMemoryEnabled) return;
+    this.teamRetentionTimer = setTimeout(() => {
+      try {
+        this.purgeTeamEvidence();
+      } finally {
+        this.scheduleTeamRetention();
+      }
+    }, 86_400_000);
+    this.teamRetentionTimer.unref();
+  }
+
+  private clearTeamRetentionTimer(): void {
+    if (!this.teamRetentionTimer) return;
+    clearTimeout(this.teamRetentionTimer);
+    this.teamRetentionTimer = null;
+  }
+
   private async pollTelegram(): Promise<void> {
     let offset = this.state.telegramOffset();
     while (!this.stopping) {
@@ -527,15 +558,24 @@ export class SummingRuntime {
         this.lastTelegramPoll = Date.now() / 1000;
         for (const update of updates) {
           const nextOffset = Math.max(offset ?? 0, Number(update.update_id ?? 0) + 1);
+          const updateId = String(update.update_id ?? "");
           const membership = record(update.my_chat_member);
           if (membership) {
             try {
-              this.handleChatMemberUpdate(membership);
+              await this.handleChatMemberUpdate(membership, updateId);
             } catch (error) {
               console.error("could not record Telegram membership update", error);
             }
           }
-          const message = record(update.message);
+          const member = record(update.chat_member);
+          if (member) {
+            try {
+              this.handleTeamMemberUpdate(member, updateId);
+            } catch (error) {
+              console.error("could not record Telegram team membership update", error);
+            }
+          }
+          const message = record(update.message) ?? record(update.channel_post);
           if (message) {
             try {
               await this.handleMessage(message);
@@ -547,6 +587,22 @@ export class SummingRuntime {
               } catch (replyError) {
                 console.error("could not report message failure", replyError);
               }
+            }
+          }
+          const edited = record(update.edited_message) ?? record(update.edited_channel_post);
+          if (edited) {
+            try {
+              await this.handleTeamEditedMessage(edited, updateId);
+            } catch (error) {
+              console.error("could not record edited Telegram message", error);
+            }
+          }
+          const reaction = record(update.message_reaction) ?? record(update.message_reaction_count);
+          if (reaction) {
+            try {
+              this.handleTeamReaction(reaction, updateId);
+            } catch (error) {
+              console.error("could not record Telegram reaction", error);
             }
           }
           offset = nextOffset;
@@ -570,7 +626,10 @@ export class SummingRuntime {
     ];
   }
 
-  private handleChatMemberUpdate(update: TelegramObject): void {
+  private async handleChatMemberUpdate(
+    update: TelegramObject,
+    providerUpdateId = "",
+  ): Promise<void> {
     const chat = record(update.chat);
     const actor = record(update.from);
     const oldMember = record(update.old_chat_member);
@@ -600,7 +659,69 @@ export class SummingRuntime {
       lastEventJson: JSON.stringify(update),
       observedAt,
     });
-    if (["left", "kicked"].includes(newStatus)) this.forgetUnboundChat(chatId);
+    if (
+      !this.config.teamMemoryEnabled ||
+      !["group", "supergroup"].includes(String(chat.type ?? ""))
+    ) {
+      return;
+    }
+    const ensured = this.state.ensureTeamSource({
+      provider: "telegram",
+      externalSpaceId: String(chatId),
+      externalThreadId: "0",
+      spaceName: this.telegramChatTitle(chat) || String(chatId),
+      sourceTitle: "general",
+      administratorUserId: this.config.telegramOwnerId,
+      joinedAt: observedAt,
+    });
+    const actorName = [actor?.first_name, actor?.last_name]
+      .filter((part): part is string => typeof part === "string" && Boolean(part.trim()))
+      .join(" ")
+      .trim() || String(actor?.username ?? (actorId || "Telegram"));
+    if (actorId) {
+      this.state.recordTeamEvent({
+        provider: "telegram",
+        externalSpaceId: String(chatId),
+        externalThreadId: "0",
+        spaceName: ensured.space.name,
+        sourceTitle: ensured.source.title,
+        externalEventId: providerUpdateId
+          ? `bot-membership:update:${providerUpdateId}`
+          : `bot-membership:${observedAt}:${newStatus}`,
+        eventKind: "membership",
+        senderExternalId: String(actorId),
+        senderDisplayName: actorName,
+        text: `SUMMING membership changed from ${oldStatus || "unknown"} to ${newStatus}`,
+        occurredAt: observedAt,
+        administratorUserId: this.config.telegramOwnerId,
+      });
+    }
+    if (
+      !joined ||
+      !this.config.teamAnnounceOnJoin ||
+      ensured.space.announcedAt !== null
+    ) {
+      return;
+    }
+    const announcement = [
+      `Я начал наблюдение за Team Space «${ensured.space.name}».`,
+      "Новые сообщения сохраняются локально как источник командной памяти до принятия решения отвечать или молчать.",
+      `Raw-текст хранится ${this.config.teamRawRetentionDays === 0 ? "без автоматического удаления" : `${this.config.teamRawRetentionDays} дней`}; обнаруженные credentials не сохраняются.`,
+      "Любой участник может проверить /memory_me, остановить наблюдение за собой и удалить свои данные через /memory_forget_me.",
+      "Наблюдение не даёт мне доступа к Project, файлам или права выполнять действия.",
+    ].join("\n");
+    const interventionId = this.state.recordTeamIntervention({
+      spaceId: ensured.space.id,
+      sourceId: ensured.source.id,
+      kind: "admission",
+      reason: "transparent durable observation notice",
+      text: announcement,
+      replyToExternalEventId: "",
+      providerMessageId: "",
+    });
+    const providerMessageId = await this.telegram.sendMessage(chatId, announcement);
+    this.state.markTeamInterventionSent(interventionId, String(providerMessageId));
+    this.state.markTeamSpaceAnnounced(ensured.space.id);
   }
 
   private observeTelegramMessage(message: TelegramObject, chat: TelegramObject): void {
@@ -656,34 +777,49 @@ export class SummingRuntime {
     const chat = record(message.chat) ?? {};
     const sender = record(message.from) ?? {};
     this.observeTelegramMessage(message, chat);
-    if (!chatId || !senderId || sender.is_bot === true) return;
+    if (!chatId) return;
     const chatType = String(chat.type ?? "");
     const conversation = this.state.byTopic(chatId, topicId);
     const knownOwner = this.projects.isKnownOwner(senderId);
     const groupParticipant = chatType === "supergroup" && conversation !== null;
     let text = String(message.text ?? message.caption ?? "").trim();
     const attachmentCandidate = telegramAttachment(message);
-    if (!text && !attachmentCandidate) return;
     const messageId = Number(message.message_id ?? 0);
     const textDetections = detectSecretText(text);
+    const teamEligible =
+      this.config.teamMemoryEnabled &&
+      ["group", "supergroup", "channel"].includes(chatType);
+    if (teamEligible && textDetections.length > 0) {
+      const teamSenderId = senderId || Number(record(message.sender_chat)?.id ?? 0);
+      await this.interceptSecretMessage(
+        chatId,
+        topicId,
+        messageId,
+        teamSenderId,
+        conversation?.projectId ?? "",
+        textDetections,
+        this.participantResponseMode(message, text) === "direct",
+      );
+      return;
+    }
+    const teamInput = teamEligible
+      ? telegramTeamEventInput(message, this.config.telegramOwnerId)
+      : null;
+    const teamEvent = teamInput ? this.state.recordTeamEvent(teamInput) : null;
+    if (!senderId || sender.is_bot === true) return;
+    if (
+      text.startsWith("/memory") &&
+      await this.handleTeamMemoryCommand(chatId, topicId, messageId, senderId, text)
+    ) {
+      return;
+    }
+    if (!text && !attachmentCandidate) return;
 
     if (chatType === "supergroup" && !conversation && !text.startsWith("/")) {
       const responseMode = this.participantResponseMode(
         message,
         text || "[Telegram attachment]",
       );
-      if (textDetections.length > 0) {
-        await this.interceptSecretMessage(
-          chatId,
-          topicId,
-          messageId,
-          senderId,
-          "",
-          textDetections,
-          responseMode === "direct",
-        );
-        return;
-      }
       if (
         responseMode === "direct" &&
         attachmentCandidate === null &&
@@ -697,10 +833,31 @@ export class SummingRuntime {
         );
         return;
       }
-      const context = this.unboundTopicContext(chatId, topicId);
+      const source = this.state.teamSourceForProvider(
+        "telegram",
+        String(chatId),
+        String(topicId),
+      );
+      const context = source
+        ? this.state.recentTeamEvents(
+            source.spaceId,
+            source.id,
+            MAX_UNBOUND_CONTEXT_MESSAGES + 1,
+          )
+            .filter((item) => item.id !== teamEvent?.id)
+            .map((item) => {
+              const externalMessageId = Number(item.externalEventId);
+              return {
+                messageId: Number.isSafeInteger(externalMessageId)
+                  ? externalMessageId
+                  : item.id,
+                senderId: Number(item.senderExternalId) || 0,
+                text: item.text,
+              };
+            })
+        : [];
       const repliedToBot = this.repliedToBotContext(message);
       if (repliedToBot) context.push(repliedToBot);
-      if (text) this.rememberUnboundTopicMessage(chatId, topicId, messageId, senderId, text);
       if (responseMode === "ambient") return;
       if (!knownOwner) {
         const quota = this.consumeParticipantQuota(chatId, senderId);
@@ -808,6 +965,7 @@ export class SummingRuntime {
         if (fileDetections.length > 0) {
           this.attachments.remove([attachment]);
           attachment = null;
+          if (teamEvent) this.state.redactTeamEvent(teamEvent.id);
           await this.interceptSecretMessage(
             chatId,
             topicId,
@@ -824,6 +982,7 @@ export class SummingRuntime {
           if (transcriptDetections.length > 0) {
             this.attachments.remove([attachment]);
             attachment = null;
+            if (teamEvent) this.state.redactTeamEvent(teamEvent.id);
             await this.interceptSecretMessage(
               chatId,
               topicId,
@@ -838,6 +997,12 @@ export class SummingRuntime {
             text,
             `Транскрипция аудио «${attachment.fileName}»:\n${transcript}`,
           ].filter(Boolean).join("\n\n");
+          if (teamEvent) {
+            this.state.enrichTeamEvent(
+              teamEvent.id,
+              `Транскрипция аудио «${attachment.fileName}»:\n${transcript}`,
+            );
+          }
           this.attachments.remove([attachment]);
           attachment = null;
         } else if (!text) {
@@ -918,50 +1083,123 @@ export class SummingRuntime {
     this.startProcessor(conversation);
   }
 
-  private unboundTopicKey(chatId: number, topicId: number): string {
-    return `${chatId}:${topicId}`;
+  private async handleTeamEditedMessage(
+    message: TelegramObject,
+    providerUpdateId = "",
+  ): Promise<void> {
+    if (!this.config.teamMemoryEnabled) return;
+    const chat = record(message.chat) ?? {};
+    const chatId = Number(chat.id ?? 0);
+    const chatType = String(chat.type ?? "");
+    if (!chatId || !["group", "supergroup", "channel"].includes(chatType)) return;
+    const text = String(message.text ?? message.caption ?? "").trim();
+    const detections = detectSecretText(text);
+    const [_, topicId, senderId] = this.messageLocation(message);
+    const messageId = Number(message.message_id ?? 0);
+    if (detections.length > 0) {
+      const teamSenderId = senderId || Number(record(message.sender_chat)?.id ?? 0);
+      await this.interceptSecretMessage(
+        chatId,
+        topicId,
+        messageId,
+        teamSenderId,
+        this.state.byTopic(chatId, topicId)?.projectId ?? "",
+        detections,
+        false,
+      );
+      return;
+    }
+    const editDate = Number(message.edit_date ?? message.date ?? 0) || Date.now() / 1_000;
+    const input = telegramTeamEventInput(
+      message,
+      this.config.telegramOwnerId,
+      "edit",
+      `${messageId}:${providerUpdateId ? `update:${providerUpdateId}` : editDate}`,
+    );
+    if (input) this.state.recordTeamEvent(input);
   }
 
-  private unboundTopicContext(chatId: number, topicId: number): UnboundTopicMessage[] {
-    const key = this.unboundTopicKey(chatId, topicId);
-    const messages = this.unboundTopicMessages.get(key);
-    if (!messages) return [];
-    this.unboundTopicMessages.delete(key);
-    this.unboundTopicMessages.set(key, messages);
-    return [...messages];
+  private handleTeamMemberUpdate(update: TelegramObject, providerUpdateId = ""): void {
+    if (!this.config.teamMemoryEnabled) return;
+    const chat = record(update.chat);
+    if (!chat || !["group", "supergroup"].includes(String(chat.type ?? ""))) return;
+    const chatId = Number(chat.id ?? 0);
+    if (!chatId) return;
+    const actor = record(update.from) ?? {};
+    const oldMember = record(update.old_chat_member) ?? {};
+    const newMember = record(update.new_chat_member) ?? {};
+    const member = record(newMember.user) ?? record(oldMember.user) ?? {};
+    const actorId = Number(actor.id ?? member.id ?? 0);
+    const memberId = Number(member.id ?? 0);
+    if (!actorId) return;
+    const occurredAt = Number(update.date ?? 0) || Date.now() / 1_000;
+    const actorName = [actor.first_name, actor.last_name]
+      .filter((part): part is string => typeof part === "string" && Boolean(part.trim()))
+      .join(" ")
+      .trim() || String(actor.username ?? actorId);
+    const memberName = [member.first_name, member.last_name]
+      .filter((part): part is string => typeof part === "string" && Boolean(part.trim()))
+      .join(" ")
+      .trim() || String(member.username ?? (memberId || "unknown"));
+    this.state.recordTeamEvent({
+      provider: "telegram",
+      externalSpaceId: String(chatId),
+      externalThreadId: "0",
+      spaceName: this.telegramChatTitle(chat) || String(chatId),
+      sourceTitle: "general",
+      externalEventId: providerUpdateId
+        ? `member:update:${providerUpdateId}`
+        : `member:${memberId}:${occurredAt}:${String(newMember.status ?? "")}`,
+      eventKind: "membership",
+      senderExternalId: String(actorId),
+      senderDisplayName: actorName,
+      text: `${actorName} changed ${memberName} membership from ` +
+        `${String(oldMember.status ?? "unknown")} to ${String(newMember.status ?? "unknown")}`,
+      occurredAt,
+      administratorUserId: this.config.telegramOwnerId,
+    });
   }
 
-  private rememberUnboundTopicMessage(
-    chatId: number,
-    topicId: number,
-    messageId: number,
-    senderId: number,
-    text: string,
-  ): void {
-    const key = this.unboundTopicKey(chatId, topicId);
-    const messages = this.unboundTopicMessages.get(key) ?? [];
-    this.unboundTopicMessages.delete(key);
-    while (this.unboundTopicMessages.size >= MAX_UNBOUND_CONTEXT_TOPICS) {
-      const oldest = this.unboundTopicMessages.keys().next().value as string | undefined;
-      if (oldest === undefined) break;
-      this.unboundTopicMessages.delete(oldest);
-    }
-    messages.push({ messageId, senderId, text });
-    let characters = messages.reduce((total, item) => total + item.text.length, 0);
-    while (
-      messages.length > MAX_UNBOUND_CONTEXT_MESSAGES ||
-      characters > MAX_UNBOUND_CONTEXT_CHARACTERS
-    ) {
-      characters -= messages.shift()?.text.length ?? 0;
-    }
-    this.unboundTopicMessages.set(key, messages);
-  }
-
-  private forgetUnboundChat(chatId: number): void {
-    const prefix = `${chatId}:`;
-    for (const key of this.unboundTopicMessages.keys()) {
-      if (key.startsWith(prefix)) this.unboundTopicMessages.delete(key);
-    }
+  private handleTeamReaction(update: TelegramObject, providerUpdateId = ""): void {
+    if (!this.config.teamMemoryEnabled) return;
+    const chat = record(update.chat);
+    if (!chat || !["group", "supergroup", "channel"].includes(String(chat.type ?? ""))) return;
+    const chatId = Number(chat.id ?? 0);
+    const messageId = Number(update.message_id ?? 0);
+    if (!chatId || !messageId) return;
+    const actor = record(update.user) ?? record(update.actor_chat) ?? {};
+    const actorId = Number(actor.id ?? 0);
+    const occurredAt = Number(update.date ?? 0) || Date.now() / 1_000;
+    const actorName = [actor.first_name, actor.last_name]
+      .filter((part): part is string => typeof part === "string" && Boolean(part.trim()))
+      .join(" ")
+      .trim() || String(actor.username ?? actor.title ?? (actorId || "Telegram"));
+    const oldReaction = Array.isArray(update.old_reaction) ? update.old_reaction : [];
+    const newReaction = Array.isArray(update.new_reaction)
+      ? update.new_reaction
+      : Array.isArray(update.reactions)
+        ? update.reactions
+        : [];
+    this.state.recordTeamEvent({
+      provider: "telegram",
+      externalSpaceId: String(chatId),
+      externalThreadId: String(Number(update.message_thread_id ?? 0)),
+      spaceName: this.telegramChatTitle(chat) || String(chatId),
+      sourceTitle: Number(update.message_thread_id ?? 0)
+        ? `topic ${String(update.message_thread_id)}`
+        : "general",
+      externalEventId: providerUpdateId
+        ? `reaction:update:${providerUpdateId}`
+        : `reaction:${messageId}:${occurredAt}:${actorId || "aggregate"}`,
+      eventKind: "reaction",
+      senderExternalId: String(actorId || `chat:${chatId}`),
+      senderDisplayName: actorName,
+      text: `Reaction on message ${messageId}: ${JSON.stringify(oldReaction)} -> ` +
+        JSON.stringify(newReaction),
+      replyToExternalEventId: String(messageId),
+      occurredAt,
+      administratorUserId: this.config.telegramOwnerId,
+    });
   }
 
   private repliedToBotContext(message: TelegramObject): UnboundTopicMessage | null {
@@ -1282,6 +1520,144 @@ export class SummingRuntime {
     return lines.join("\n");
   }
 
+  private async handleTeamMemoryCommand(
+    chatId: number,
+    topicId: number,
+    messageId: number,
+    senderId: number,
+    text: string,
+  ): Promise<boolean> {
+    const separator = text.indexOf(" ");
+    const commandPart = separator < 0 ? text : text.slice(0, separator);
+    const command = (commandPart.split("@", 1)[0] ?? "").toLowerCase();
+    const supported = new Set([
+      "/memory",
+      "/memory_status",
+      "/memory_me",
+      "/memory_forget_me",
+      "/memory_resume_me",
+      "/memory_pause",
+      "/memory_resume",
+    ]);
+    if (!supported.has(command)) return false;
+    if (!this.config.teamMemoryEnabled) {
+      await this.reply(chatId, topicId, messageId, "Team Space memory отключена в конфигурации.");
+      return true;
+    }
+    const space = this.state.teamSpaceForProvider("telegram", String(chatId));
+    if (!space) {
+      await this.reply(chatId, topicId, messageId, "Для этого чата Team Space ещё не создан.");
+      return true;
+    }
+    if (command === "/memory" || command === "/memory_status") {
+      const source = this.state.teamSourceForProvider(
+        "telegram",
+        String(chatId),
+        String(topicId),
+      );
+      const personId = this.state.teamPersonIdForIdentity(
+        space.id,
+        "telegram",
+        String(senderId),
+      ) ?? "";
+      const knowledge = source
+        ? this.state.teamKnowledgeVisibleTo(space.id, source.id, personId, 20)
+        : this.state.teamKnowledge(space.id, 20).filter((item) => item.visibility === "space");
+      await this.replyLong(
+        chatId,
+        topicId,
+        messageId,
+        teamKnowledgeText(
+          space,
+          knowledge,
+          this.state.teamEventCount(space.id),
+          this.state.pendingTeamEventCount(space.id),
+        ),
+      );
+      return true;
+    }
+    if (command === "/memory_me") {
+      const count = this.state.teamEventCountForIdentity(
+        space.id,
+        "telegram",
+        String(senderId),
+      );
+      const knowledge = this.state.teamKnowledgeForIdentity(
+        space.id,
+        "telegram",
+        String(senderId),
+        20,
+      );
+      const lines = [
+        `В Team Space сохранено ваших событий: ${count}.`,
+        `Знаний со ссылкой на них: ${knowledge.length}.`,
+      ];
+      for (const item of knowledge) {
+        lines.push(
+          `- [${item.kind}; ${Math.round(item.confidence * 100)}%; ` +
+            `evidence:${item.evidenceEventIds.join(",")}] ${item.statement}`,
+        );
+      }
+      lines.push(
+        "",
+        "Команда /memory_forget_me удалит сохранённый текст и вложения ваших событий, " +
+          "пометит зависимые выводы для пересмотра и остановит дальнейшее наблюдение за вами.",
+      );
+      await this.replyLong(chatId, topicId, messageId, lines.join("\n"));
+      return true;
+    }
+    if (command === "/memory_forget_me") {
+      const forgotten = this.state.forgetTeamIdentity(
+        space.id,
+        "telegram",
+        String(senderId),
+      );
+      await this.reply(
+        chatId,
+        topicId,
+        messageId,
+        `Удалено содержимое ваших событий: ${forgotten}. Будущие сообщения не сохраняются. ` +
+          "Вернуть наблюдение можно командой /memory_resume_me.",
+      );
+      return true;
+    }
+    if (command === "/memory_resume_me") {
+      this.state.setTeamIdentityObservation(space.id, "telegram", String(senderId), true);
+      await this.reply(
+        chatId,
+        topicId,
+        messageId,
+        "Наблюдение за вашими будущими сообщениями возобновлено. Удалённые данные не восстановлены.",
+      );
+      return true;
+    }
+    if (senderId !== this.config.telegramOwnerId) {
+      await this.reply(
+        chatId,
+        topicId,
+        messageId,
+        "Приостановить память всего Team Space может только администратор SUMMING.",
+      );
+      return true;
+    }
+    if (command === "/memory_pause") {
+      this.state.setTeamSpacePhase(space.id, "paused");
+      await this.reply(
+        chatId,
+        topicId,
+        messageId,
+        "Наблюдение Team Space приостановлено. Новые сообщения не сохраняются.",
+      );
+      return true;
+    }
+    this.state.setTeamSpacePhase(
+      space.id,
+      space.orientedAt === null ? "observing" : "active",
+    );
+    await this.reply(chatId, topicId, messageId, "Наблюдение Team Space возобновлено.");
+    return true;
+  }
+
   private async handleCommand(
     chatId: number,
     topicId: number,
@@ -1557,7 +1933,8 @@ export class SummingRuntime {
         const project = this.projects.project(parts[2]!);
         const workspace = project.workspace(parts[3] ?? "");
         const bound = this.state.bind(targetChatId, targetTopicId, project.id, workspace.id);
-        this.unboundTopicMessages.delete(this.unboundTopicKey(targetChatId, targetTopicId));
+        const teamSpace = this.state.teamSpaceForProvider("telegram", String(targetChatId));
+        if (teamSpace) this.state.linkTeamProject(teamSpace.id, project.id);
         const targetTitle = targetChat.title || String(targetChat.chatId);
         const topicTitle = targetTopic.name || String(targetTopic.topicId);
         await this.reply(
@@ -1624,7 +2001,8 @@ export class SummingRuntime {
           );
         }
         const bound = this.state.bind(chatId, topicId, project.id, workspace.id);
-        this.unboundTopicMessages.delete(this.unboundTopicKey(chatId, topicId));
+        const teamSpace = this.state.teamSpaceForProvider("telegram", String(chatId));
+        if (teamSpace) this.state.linkTeamProject(teamSpace.id, project.id);
         await this.reply(
           chatId,
           topicId,

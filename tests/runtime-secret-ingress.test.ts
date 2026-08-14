@@ -91,11 +91,6 @@ test("silently deletes and audits credential-like chatter in an unbound topic", 
   const handleMessage = (
     runtime as unknown as { handleMessage(message: TelegramObject): Promise<void> }
   ).handleMessage.bind(runtime);
-  const unboundTopicContext = (
-    runtime as unknown as {
-      unboundTopicContext(chatId: number, topicId: number): Array<{ text: string }>;
-    }
-  ).unboundTopicContext.bind(runtime);
   try {
     await handleMessage({
       message_id: 18,
@@ -106,7 +101,7 @@ test("silently deletes and audits credential-like chatter in an unbound topic", 
     });
     assert.deepEqual(deleted, [[-500, 18]]);
     assert.deepEqual(replies, []);
-    assert.deepEqual(unboundTopicContext(-500, 7), []);
+    assert.equal(runtime.state.teamSpaceForProvider("telegram", "-500"), null);
     assert.equal(runtime.state.securityEventCount(), 1);
 
     runtime.telegram.deleteMessage = async () => {

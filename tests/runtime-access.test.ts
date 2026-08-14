@@ -110,10 +110,10 @@ test("owners control projects while group participants get read-only Q&A", async
 
     const handleChatMemberUpdate = (
       runtime as unknown as {
-        handleChatMemberUpdate(update: TelegramObject): void;
+        handleChatMemberUpdate(update: TelegramObject): Promise<void>;
       }
     ).handleChatMemberUpdate.bind(runtime);
-    handleChatMemberUpdate({
+    await handleChatMemberUpdate({
       date: 1_700_000_000,
       from: { id: 1, first_name: "Admin" },
       chat: {
@@ -127,6 +127,9 @@ test("owners control projects while group participants get read-only Q&A", async
     });
     assert.equal(runtime.state.telegramChat(-300)?.addedByUserId, 1);
     assert.equal(runtime.state.telegramChat(-300)?.botStatus, "administrator");
+    const engineeringSpace = runtime.state.teamSpaceForProvider("telegram", "-300")!;
+    assert.equal(engineeringSpace.announcedAt !== null, true);
+    assert.equal(runtime.state.teamEventCount(engineeringSpace.id), 1);
     await send(1, "/topics", 1, "private");
     assert.match(replies.at(-1) ?? "", /Engineering/);
     assert.match(replies.at(-1) ?? "", /топики пока не обнаружены/);
@@ -215,7 +218,7 @@ test("owners control projects while group participants get read-only Q&A", async
     assert.equal(unboundQuestions[0]?.senderId, 999);
     assert.deepEqual(
       unboundQuestions[0]?.context.map((item) => item.text),
-      ["Всем привет", "Обсудим планы на вечер"],
+      ["Всем привет", "Обсудим планы на вечер", "@summing_bot"],
     );
     for (let index = 0; index < 25; index += 1) {
       await send(999, `Контекст ${index}`, -100, "supergroup", 6);
@@ -243,13 +246,22 @@ test("owners control projects while group participants get read-only Q&A", async
     for (let topic = 1; topic <= 101; topic += 1) {
       await send(777, `Фоновый контекст ${topic}`, -400, "supergroup", topic);
     }
-    const unboundRuntime = runtime as unknown as {
-      unboundTopicMessages: Map<string, unknown>;
-      unboundTopicContext(chatId: number, topicId: number): Array<{ text: string }>;
-    };
-    assert.equal(unboundRuntime.unboundTopicMessages.size, 100);
-    assert.deepEqual(unboundRuntime.unboundTopicContext(-400, 1), []);
-    assert.equal(unboundRuntime.unboundTopicContext(-400, 101)[0]?.text, "Фоновый контекст 101");
+    const observedSpace = runtime.state.teamSpaceForProvider("telegram", "-400")!;
+    assert.equal(runtime.state.teamEventCount(observedSpace.id), 101);
+    const firstSource = runtime.state.teamSourceForProvider("telegram", "-400", "1")!;
+    const lastSource = runtime.state.teamSourceForProvider("telegram", "-400", "101")!;
+    assert.equal(runtime.state.recentTeamEvents(observedSpace.id, firstSource.id)[0]?.text, "Фоновый контекст 1");
+    assert.equal(runtime.state.recentTeamEvents(observedSpace.id, lastSource.id)[0]?.text, "Фоновый контекст 101");
+    await send(777, "/memory_forget_me", -400, "supergroup", 101);
+    assert.equal(
+      runtime.state.teamEventCountForIdentity(observedSpace.id, "telegram", "777"),
+      0,
+    );
+    await send(777, "Не сохраняй это", -400, "supergroup", 101);
+    assert.equal(runtime.state.teamEventCount(observedSpace.id), 0);
+    await send(777, "/memory_resume_me", -400, "supergroup", 101);
+    await send(777, "Снова сохраняй", -400, "supergroup", 101);
+    assert.equal(runtime.state.teamEventCount(observedSpace.id), 1);
 
     await send(999, "Как устроена авторизация?", -100, "supergroup", 5);
     const bound = runtime.state.byTopic(-100, 5)!;

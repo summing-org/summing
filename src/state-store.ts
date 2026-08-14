@@ -77,6 +77,135 @@ export interface TelegramTopicRecord {
   updatedAt: number;
 }
 
+export type TeamSpacePhase = "observing" | "orienting" | "active" | "paused";
+export type TeamKnowledgeKind =
+  | "episode"
+  | "fact"
+  | "decision"
+  | "task"
+  | "question"
+  | "risk"
+  | "term"
+  | "person"
+  | "hypothesis";
+export type TeamKnowledgeStatus = "active" | "resolved" | "superseded" | "needs-review";
+export type TeamKnowledgeVisibility = "space" | "source" | "person";
+
+export interface TeamSpace {
+  id: string;
+  name: string;
+  administratorUserId: number;
+  phase: TeamSpacePhase;
+  summary: string;
+  announcedAt: number | null;
+  orientedAt: number | null;
+  lastInterventionAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface TeamSource {
+  id: string;
+  spaceId: string;
+  provider: string;
+  externalSpaceId: string;
+  externalThreadId: string;
+  title: string;
+  joinedAt: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface TeamEventAttachment {
+  kind: string;
+  fileName: string;
+  mimeType: string;
+  size: number;
+  providerFileId?: string;
+}
+
+export interface TeamEventInput {
+  provider: string;
+  externalSpaceId: string;
+  externalThreadId: string;
+  spaceName: string;
+  sourceTitle: string;
+  externalEventId: string;
+  eventKind: string;
+  senderExternalId: string;
+  senderDisplayName: string;
+  text: string;
+  replyToExternalEventId?: string;
+  attachments?: TeamEventAttachment[];
+  occurredAt: number;
+  observedAt?: number;
+  administratorUserId: number;
+}
+
+export interface TeamEvent {
+  id: number;
+  spaceId: string;
+  sourceId: string;
+  personId: string;
+  provider: string;
+  externalEventId: string;
+  eventKind: string;
+  senderExternalId: string;
+  senderDisplayName: string;
+  text: string;
+  replyToExternalEventId: string;
+  attachments: TeamEventAttachment[];
+  occurredAt: number;
+  observedAt: number;
+  synthesisState: "pending" | "synthesized" | "redacted";
+  redactedAt: number | null;
+}
+
+export interface TeamKnowledgeInput {
+  kind: TeamKnowledgeKind;
+  subject: string;
+  statement: string;
+  confidence: number;
+  status: TeamKnowledgeStatus;
+  visibility: TeamKnowledgeVisibility;
+  visibilityRef: string;
+  evidenceEventIds: number[];
+  supersedesKnowledgeIds: number[];
+  validFrom?: number | null;
+  validTo?: number | null;
+}
+
+export interface TeamKnowledgeItem extends TeamKnowledgeInput {
+  id: number;
+  spaceId: string;
+  fingerprint: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface TeamSynthesisResult {
+  summary: string;
+  knowledge: TeamKnowledgeInput[];
+  orientationReady: boolean;
+  orientationMessage: string;
+  clarificationQuestions: string[];
+  proactiveReplyEventId: number | null;
+  proactiveMessage: string;
+}
+
+export interface TeamIntervention {
+  id: number;
+  spaceId: string;
+  sourceId: string;
+  kind: "admission" | "orientation" | "proactive";
+  reason: string;
+  text: string;
+  replyToExternalEventId: string;
+  providerMessageId: string;
+  createdAt: number;
+  sentAt: number | null;
+}
+
 export interface SecurityEvent {
   eventType: string;
   chatId: number;
@@ -243,6 +372,141 @@ export class StateStore {
           ON telegram_chats(updated_at DESC, chat_id);
         CREATE INDEX IF NOT EXISTS telegram_topics_updated
           ON telegram_topics(chat_id, updated_at DESC, topic_id);
+        CREATE TABLE IF NOT EXISTS team_spaces (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          administrator_user_id INTEGER NOT NULL,
+          phase TEXT NOT NULL DEFAULT 'observing'
+            CHECK(phase IN ('observing', 'orienting', 'active', 'paused')),
+          summary TEXT NOT NULL DEFAULT '',
+          announced_at REAL,
+          oriented_at REAL,
+          last_intervention_at REAL,
+          created_at REAL NOT NULL,
+          updated_at REAL NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS team_sources (
+          id TEXT PRIMARY KEY,
+          space_id TEXT NOT NULL REFERENCES team_spaces(id) ON DELETE CASCADE,
+          provider TEXT NOT NULL,
+          external_space_id TEXT NOT NULL,
+          external_thread_id TEXT NOT NULL,
+          title TEXT NOT NULL DEFAULT '',
+          joined_at REAL NOT NULL,
+          created_at REAL NOT NULL,
+          updated_at REAL NOT NULL,
+          UNIQUE(provider, external_space_id, external_thread_id)
+        );
+        CREATE INDEX IF NOT EXISTS team_sources_space
+          ON team_sources(space_id, provider, external_thread_id);
+        CREATE TABLE IF NOT EXISTS team_people (
+          id TEXT PRIMARY KEY,
+          space_id TEXT NOT NULL REFERENCES team_spaces(id) ON DELETE CASCADE,
+          display_name TEXT NOT NULL,
+          created_at REAL NOT NULL,
+          updated_at REAL NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS team_identities (
+          space_id TEXT NOT NULL REFERENCES team_spaces(id) ON DELETE CASCADE,
+          provider TEXT NOT NULL,
+          external_user_id TEXT NOT NULL,
+          person_id TEXT NOT NULL REFERENCES team_people(id) ON DELETE CASCADE,
+          display_name TEXT NOT NULL,
+          observation_enabled INTEGER NOT NULL DEFAULT 1
+            CHECK(observation_enabled IN (0, 1)),
+          first_seen_at REAL NOT NULL,
+          last_seen_at REAL NOT NULL,
+          PRIMARY KEY(space_id, provider, external_user_id)
+        );
+        CREATE TABLE IF NOT EXISTS team_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          space_id TEXT NOT NULL REFERENCES team_spaces(id) ON DELETE CASCADE,
+          source_id TEXT NOT NULL REFERENCES team_sources(id) ON DELETE CASCADE,
+          person_id TEXT NOT NULL REFERENCES team_people(id),
+          provider TEXT NOT NULL,
+          external_event_id TEXT NOT NULL,
+          event_kind TEXT NOT NULL,
+          sender_external_id TEXT NOT NULL,
+          sender_display_name TEXT NOT NULL,
+          text TEXT NOT NULL,
+          reply_to_external_event_id TEXT NOT NULL DEFAULT '',
+          attachments_json TEXT NOT NULL DEFAULT '[]',
+          occurred_at REAL NOT NULL,
+          observed_at REAL NOT NULL,
+          synthesis_state TEXT NOT NULL DEFAULT 'pending'
+            CHECK(synthesis_state IN ('pending', 'synthesized', 'redacted')),
+          redacted_at REAL,
+          UNIQUE(source_id, event_kind, external_event_id)
+        );
+        CREATE INDEX IF NOT EXISTS team_events_synthesis
+          ON team_events(space_id, synthesis_state, occurred_at, id);
+        CREATE INDEX IF NOT EXISTS team_events_person
+          ON team_events(space_id, person_id, occurred_at, id);
+        CREATE TABLE IF NOT EXISTS team_knowledge (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          space_id TEXT NOT NULL REFERENCES team_spaces(id) ON DELETE CASCADE,
+          fingerprint TEXT NOT NULL,
+          kind TEXT NOT NULL CHECK(kind IN
+            ('episode', 'fact', 'decision', 'task', 'question', 'risk', 'term', 'person',
+             'hypothesis')),
+          subject TEXT NOT NULL DEFAULT '',
+          statement TEXT NOT NULL,
+          confidence REAL NOT NULL CHECK(confidence >= 0 AND confidence <= 1),
+          status TEXT NOT NULL DEFAULT 'active'
+            CHECK(status IN ('active', 'resolved', 'superseded', 'needs-review')),
+          visibility TEXT NOT NULL DEFAULT 'space'
+            CHECK(visibility IN ('space', 'source', 'person')),
+          visibility_ref TEXT NOT NULL DEFAULT '',
+          valid_from REAL,
+          valid_to REAL,
+          created_at REAL NOT NULL,
+          updated_at REAL NOT NULL,
+          UNIQUE(space_id, fingerprint)
+        );
+        CREATE INDEX IF NOT EXISTS team_knowledge_space
+          ON team_knowledge(space_id, status, kind, updated_at DESC, id DESC);
+        CREATE TABLE IF NOT EXISTS team_knowledge_evidence (
+          knowledge_id INTEGER NOT NULL REFERENCES team_knowledge(id) ON DELETE CASCADE,
+          event_id INTEGER NOT NULL REFERENCES team_events(id),
+          PRIMARY KEY(knowledge_id, event_id)
+        );
+        CREATE TABLE IF NOT EXISTS team_knowledge_supersessions (
+          old_knowledge_id INTEGER NOT NULL REFERENCES team_knowledge(id) ON DELETE CASCADE,
+          new_knowledge_id INTEGER NOT NULL REFERENCES team_knowledge(id) ON DELETE CASCADE,
+          PRIMARY KEY(old_knowledge_id, new_knowledge_id)
+        );
+        CREATE TABLE IF NOT EXISTS team_synthesis_runs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          space_id TEXT NOT NULL REFERENCES team_spaces(id) ON DELETE CASCADE,
+          status TEXT NOT NULL CHECK(status IN ('completed', 'failed')),
+          event_ids_json TEXT NOT NULL,
+          response_json TEXT NOT NULL DEFAULT '',
+          error TEXT,
+          started_at REAL NOT NULL,
+          completed_at REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS team_synthesis_runs_space
+          ON team_synthesis_runs(space_id, completed_at DESC, id DESC);
+        CREATE TABLE IF NOT EXISTS team_interventions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          space_id TEXT NOT NULL REFERENCES team_spaces(id) ON DELETE CASCADE,
+          source_id TEXT NOT NULL REFERENCES team_sources(id),
+          kind TEXT NOT NULL CHECK(kind IN ('admission', 'orientation', 'proactive')),
+          reason TEXT NOT NULL,
+          text TEXT NOT NULL,
+          reply_to_external_event_id TEXT NOT NULL DEFAULT '',
+          provider_message_id TEXT NOT NULL DEFAULT '',
+          created_at REAL NOT NULL,
+          sent_at REAL
+        );
+        CREATE INDEX IF NOT EXISTS team_interventions_space
+          ON team_interventions(space_id, created_at DESC, id DESC);
+        CREATE TABLE IF NOT EXISTS team_space_projects (
+          space_id TEXT NOT NULL REFERENCES team_spaces(id) ON DELETE CASCADE,
+          project_id TEXT NOT NULL,
+          linked_at REAL NOT NULL,
+          PRIMARY KEY(space_id, project_id)
+        );
         CREATE TABLE IF NOT EXISTS security_events (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           event_type TEXT NOT NULL,
@@ -516,6 +780,780 @@ export class StateStore {
       firstSeenAt: Number(row.first_seen_at),
       updatedAt: Number(row.updated_at),
     };
+  }
+
+  static teamSpaceId(provider: string, externalSpaceId: string): string {
+    const digest = createHash("sha256")
+      .update(`${provider}:${externalSpaceId}`)
+      .digest("hex")
+      .slice(0, 20);
+    return `team-${digest}`;
+  }
+
+  static teamSourceId(
+    provider: string,
+    externalSpaceId: string,
+    externalThreadId: string,
+  ): string {
+    const digest = createHash("sha256")
+      .update(`${provider}:${externalSpaceId}:${externalThreadId}`)
+      .digest("hex")
+      .slice(0, 20);
+    return `source-${digest}`;
+  }
+
+  private static teamPersonId(spaceId: string, provider: string, externalUserId: string): string {
+    const digest = createHash("sha256")
+      .update(`${spaceId}:${provider}:${externalUserId}`)
+      .digest("hex")
+      .slice(0, 20);
+    return `person-${digest}`;
+  }
+
+  ensureTeamSource(input: {
+    provider: string;
+    externalSpaceId: string;
+    externalThreadId: string;
+    spaceName: string;
+    sourceTitle: string;
+    administratorUserId: number;
+    joinedAt?: number;
+  }): { space: TeamSpace; source: TeamSource; created: boolean } {
+    const now = input.joinedAt ?? Date.now() / 1_000;
+    const spaceId = StateStore.teamSpaceId(input.provider, input.externalSpaceId);
+    const sourceId = StateStore.teamSourceId(
+      input.provider,
+      input.externalSpaceId,
+      input.externalThreadId,
+    );
+    let created = false;
+    this.transaction(() => {
+      const existing = this.db.prepare("SELECT id FROM team_spaces WHERE id = ?").get(spaceId);
+      created = !existing;
+      this.db.prepare(`
+        INSERT INTO team_spaces
+          (id, name, administrator_user_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          name = CASE WHEN excluded.name <> '' THEN excluded.name ELSE name END,
+          updated_at = excluded.updated_at
+      `).run(
+        spaceId,
+        input.spaceName || `${input.provider}:${input.externalSpaceId}`,
+        input.administratorUserId,
+        now,
+        now,
+      );
+      this.db.prepare(`
+        INSERT INTO team_sources
+          (id, space_id, provider, external_space_id, external_thread_id, title,
+           joined_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(provider, external_space_id, external_thread_id) DO UPDATE SET
+          title = CASE WHEN excluded.title <> '' THEN excluded.title ELSE title END,
+          updated_at = excluded.updated_at
+      `).run(
+        sourceId,
+        spaceId,
+        input.provider,
+        input.externalSpaceId,
+        input.externalThreadId,
+        input.sourceTitle,
+        now,
+        now,
+        now,
+      );
+    });
+    return {
+      space: this.teamSpace(spaceId)!,
+      source: this.teamSource(sourceId)!,
+      created,
+    };
+  }
+
+  teamSpace(spaceId: string): TeamSpace | null {
+    const row = this.db.prepare("SELECT * FROM team_spaces WHERE id = ?").get(spaceId) as
+      | Row
+      | undefined;
+    return row ? this.toTeamSpace(row) : null;
+  }
+
+  teamSpaceForProvider(provider: string, externalSpaceId: string): TeamSpace | null {
+    return this.teamSpace(StateStore.teamSpaceId(provider, externalSpaceId));
+  }
+
+  listTeamSpaces(): TeamSpace[] {
+    return (this.db.prepare("SELECT * FROM team_spaces ORDER BY updated_at DESC, id").all() as Row[])
+      .map((row) => this.toTeamSpace(row));
+  }
+
+  private toTeamSpace(row: Row): TeamSpace {
+    return {
+      id: String(row.id),
+      name: String(row.name),
+      administratorUserId: Number(row.administrator_user_id),
+      phase: String(row.phase) as TeamSpacePhase,
+      summary: String(row.summary),
+      announcedAt: row.announced_at === null ? null : Number(row.announced_at),
+      orientedAt: row.oriented_at === null ? null : Number(row.oriented_at),
+      lastInterventionAt:
+        row.last_intervention_at === null ? null : Number(row.last_intervention_at),
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
+    };
+  }
+
+  teamSource(sourceId: string): TeamSource | null {
+    const row = this.db.prepare("SELECT * FROM team_sources WHERE id = ?").get(sourceId) as
+      | Row
+      | undefined;
+    return row ? this.toTeamSource(row) : null;
+  }
+
+  teamSourceForProvider(
+    provider: string,
+    externalSpaceId: string,
+    externalThreadId: string,
+  ): TeamSource | null {
+    const row = this.db.prepare(`
+      SELECT * FROM team_sources
+      WHERE provider = ? AND external_space_id = ? AND external_thread_id = ?
+    `).get(provider, externalSpaceId, externalThreadId) as Row | undefined;
+    return row ? this.toTeamSource(row) : null;
+  }
+
+  private toTeamSource(row: Row): TeamSource {
+    return {
+      id: String(row.id),
+      spaceId: String(row.space_id),
+      provider: String(row.provider),
+      externalSpaceId: String(row.external_space_id),
+      externalThreadId: String(row.external_thread_id),
+      title: String(row.title),
+      joinedAt: Number(row.joined_at),
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
+    };
+  }
+
+  recordTeamEvent(input: TeamEventInput): TeamEvent | null {
+    const observedAt = input.observedAt ?? Date.now() / 1_000;
+    const { space, source } = this.ensureTeamSource({
+      provider: input.provider,
+      externalSpaceId: input.externalSpaceId,
+      externalThreadId: input.externalThreadId,
+      spaceName: input.spaceName,
+      sourceTitle: input.sourceTitle,
+      administratorUserId: input.administratorUserId,
+      joinedAt: observedAt,
+    });
+    if (space.phase === "paused") return null;
+    const personId = StateStore.teamPersonId(
+      space.id,
+      input.provider,
+      input.senderExternalId,
+    );
+    let eventId = 0;
+    this.transaction(() => {
+      const identity = this.db.prepare(`
+        SELECT observation_enabled FROM team_identities
+        WHERE space_id = ? AND provider = ? AND external_user_id = ?
+      `).get(space.id, input.provider, input.senderExternalId) as Row | undefined;
+      if (identity && Number(identity.observation_enabled) !== 1) return;
+      this.db.prepare(`
+        INSERT INTO team_people (id, space_id, display_name, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          display_name = CASE WHEN excluded.display_name <> '' THEN excluded.display_name
+            ELSE display_name END,
+          updated_at = excluded.updated_at
+      `).run(personId, space.id, input.senderDisplayName, observedAt, observedAt);
+      this.db.prepare(`
+        INSERT INTO team_identities
+          (space_id, provider, external_user_id, person_id, display_name,
+           first_seen_at, last_seen_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(space_id, provider, external_user_id) DO UPDATE SET
+          display_name = CASE WHEN excluded.display_name <> '' THEN excluded.display_name
+            ELSE display_name END,
+          last_seen_at = excluded.last_seen_at
+      `).run(
+        space.id,
+        input.provider,
+        input.senderExternalId,
+        personId,
+        input.senderDisplayName,
+        input.occurredAt,
+        input.occurredAt,
+      );
+      this.db.prepare(`
+        INSERT OR IGNORE INTO team_events
+          (space_id, source_id, person_id, provider, external_event_id, event_kind,
+           sender_external_id, sender_display_name, text, reply_to_external_event_id,
+           attachments_json, occurred_at, observed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        space.id,
+        source.id,
+        personId,
+        input.provider,
+        input.externalEventId,
+        input.eventKind,
+        input.senderExternalId,
+        input.senderDisplayName,
+        input.text,
+        input.replyToExternalEventId ?? "",
+        JSON.stringify(input.attachments ?? []),
+        input.occurredAt,
+        observedAt,
+      );
+      const row = this.db.prepare(`
+        SELECT id FROM team_events
+        WHERE source_id = ? AND event_kind = ? AND external_event_id = ?
+      `).get(source.id, input.eventKind, input.externalEventId) as Row | undefined;
+      eventId = row ? Number(row.id) : 0;
+      if (eventId && (input.eventKind === "edit" || input.eventKind === "deletion")) {
+        const originalExternalId = input.externalEventId.split(":", 1)[0] ?? "";
+        const original = this.db.prepare(`
+          SELECT id FROM team_events
+          WHERE source_id = ? AND event_kind IN ('message', 'command', 'service')
+            AND external_event_id = ?
+        `).get(source.id, originalExternalId) as Row | undefined;
+        if (original) {
+          this.db.prepare(`
+            UPDATE team_knowledge SET status = 'needs-review', updated_at = ?
+            WHERE id IN (
+              SELECT knowledge_id FROM team_knowledge_evidence WHERE event_id = ?
+            )
+          `).run(observedAt, Number(original.id));
+        }
+      }
+    });
+    return eventId ? this.teamEvent(eventId) : null;
+  }
+
+  teamEvent(eventId: number): TeamEvent | null {
+    const row = this.db.prepare("SELECT * FROM team_events WHERE id = ?").get(eventId) as
+      | Row
+      | undefined;
+    return row ? this.toTeamEvent(row) : null;
+  }
+
+  enrichTeamEvent(eventId: number, text: string): void {
+    const addition = text.trim();
+    if (!addition) return;
+    this.transaction(() => {
+      this.db.prepare(`
+        UPDATE team_events SET
+          text = CASE WHEN text = '' THEN ? ELSE text || '\n\n' || ? END,
+          synthesis_state = 'pending'
+        WHERE id = ? AND redacted_at IS NULL
+      `).run(addition, addition, eventId);
+    });
+  }
+
+  redactTeamEvent(eventId: number, redactedAt = Date.now() / 1_000): void {
+    this.transaction(() => {
+      this.db.prepare(`
+        UPDATE team_knowledge SET status = 'needs-review', updated_at = ?
+        WHERE id IN (
+          SELECT knowledge_id FROM team_knowledge_evidence WHERE event_id = ?
+        )
+      `).run(redactedAt, eventId);
+      this.db.prepare(`
+        UPDATE team_events SET text = '', attachments_json = '[]',
+          synthesis_state = 'redacted', redacted_at = ? WHERE id = ?
+      `).run(redactedAt, eventId);
+    });
+  }
+
+  private toTeamEvent(row: Row): TeamEvent {
+    let attachments: TeamEventAttachment[] = [];
+    try {
+      const parsed = JSON.parse(String(row.attachments_json ?? "[]"));
+      if (Array.isArray(parsed)) attachments = parsed as TeamEventAttachment[];
+    } catch {
+      attachments = [];
+    }
+    return {
+      id: Number(row.id),
+      spaceId: String(row.space_id),
+      sourceId: String(row.source_id),
+      personId: String(row.person_id),
+      provider: String(row.provider),
+      externalEventId: String(row.external_event_id),
+      eventKind: String(row.event_kind),
+      senderExternalId: String(row.sender_external_id),
+      senderDisplayName: String(row.sender_display_name),
+      text: String(row.text),
+      replyToExternalEventId: String(row.reply_to_external_event_id),
+      attachments,
+      occurredAt: Number(row.occurred_at),
+      observedAt: Number(row.observed_at),
+      synthesisState: String(row.synthesis_state) as TeamEvent["synthesisState"],
+      redactedAt: row.redacted_at === null ? null : Number(row.redacted_at),
+    };
+  }
+
+  pendingTeamEvents(spaceId: string, limit = 100): TeamEvent[] {
+    return (this.db.prepare(`
+      SELECT * FROM team_events
+      WHERE space_id = ? AND synthesis_state = 'pending'
+      ORDER BY occurred_at, id LIMIT ?
+    `).all(spaceId, limit) as Row[]).map((row) => this.toTeamEvent(row));
+  }
+
+  recentTeamEvents(spaceId: string, sourceId: string, limit = 40): TeamEvent[] {
+    return (this.db.prepare(`
+      SELECT * FROM (
+        SELECT * FROM team_events
+        WHERE space_id = ? AND source_id = ? AND synthesis_state <> 'redacted'
+        ORDER BY occurred_at DESC, id DESC LIMIT ?
+      ) ORDER BY occurred_at, id
+    `).all(spaceId, sourceId, limit) as Row[]).map((row) => this.toTeamEvent(row));
+  }
+
+  teamEventCount(spaceId: string): number {
+    const row = this.db.prepare(
+      "SELECT COUNT(*) AS count FROM team_events WHERE space_id = ? AND synthesis_state <> 'redacted'",
+    ).get(spaceId) as Row;
+    return Number(row.count);
+  }
+
+  pendingTeamEventCount(spaceId: string): number {
+    const row = this.db.prepare(
+      "SELECT COUNT(*) AS count FROM team_events WHERE space_id = ? AND synthesis_state = 'pending'",
+    ).get(spaceId) as Row;
+    return Number(row.count);
+  }
+
+  teamEventCountForIdentity(spaceId: string, provider: string, externalUserId: string): number {
+    const row = this.db.prepare(`
+      SELECT COUNT(*) AS count FROM team_events
+      WHERE space_id = ? AND provider = ? AND sender_external_id = ?
+        AND synthesis_state <> 'redacted'
+    `).get(spaceId, provider, externalUserId) as Row;
+    return Number(row.count);
+  }
+
+  teamKnowledgeForIdentity(
+    spaceId: string,
+    provider: string,
+    externalUserId: string,
+    limit = 100,
+  ): TeamKnowledgeItem[] {
+    const rows = this.db.prepare(`
+      SELECT k.*, group_concat(all_evidence.event_id) AS evidence_ids,
+        (SELECT group_concat(s.old_knowledge_id)
+         FROM team_knowledge_supersessions s
+         WHERE s.new_knowledge_id = k.id) AS supersedes_ids
+      FROM team_knowledge k
+      JOIN team_knowledge_evidence own_evidence ON own_evidence.knowledge_id = k.id
+      JOIN team_events own_event ON own_event.id = own_evidence.event_id
+      LEFT JOIN team_knowledge_evidence all_evidence ON all_evidence.knowledge_id = k.id
+      WHERE k.space_id = ? AND own_event.provider = ? AND own_event.sender_external_id = ?
+        AND own_event.synthesis_state <> 'redacted'
+      GROUP BY k.id
+      ORDER BY k.updated_at DESC, k.id DESC LIMIT ?
+    `).all(spaceId, provider, externalUserId, limit) as Row[];
+    return rows.map((row) => this.toTeamKnowledge(row));
+  }
+
+  spacesWithPendingTeamEvents(): string[] {
+    return (this.db.prepare(`
+      SELECT DISTINCT space_id FROM team_events
+      WHERE synthesis_state = 'pending' ORDER BY space_id
+    `).all() as Row[]).map((row) => String(row.space_id));
+  }
+
+  teamKnowledge(spaceId: string, limit = 100): TeamKnowledgeItem[] {
+    const rows = this.db.prepare(`
+      SELECT k.*, group_concat(e.event_id) AS evidence_ids,
+        (SELECT group_concat(s.old_knowledge_id)
+         FROM team_knowledge_supersessions s
+         WHERE s.new_knowledge_id = k.id) AS supersedes_ids
+      FROM team_knowledge k
+      LEFT JOIN team_knowledge_evidence e ON e.knowledge_id = k.id
+      WHERE k.space_id = ?
+      GROUP BY k.id
+      ORDER BY CASE k.status WHEN 'active' THEN 0 WHEN 'needs-review' THEN 1 ELSE 2 END,
+               k.updated_at DESC, k.id DESC
+      LIMIT ?
+    `).all(spaceId, limit) as Row[];
+    return rows.map((row) => this.toTeamKnowledge(row));
+  }
+
+  teamPersonIdForIdentity(
+    spaceId: string,
+    provider: string,
+    externalUserId: string,
+  ): string | null {
+    const row = this.db.prepare(`
+      SELECT person_id FROM team_identities
+      WHERE space_id = ? AND provider = ? AND external_user_id = ?
+    `).get(spaceId, provider, externalUserId) as Row | undefined;
+    return row ? String(row.person_id) : null;
+  }
+
+  teamKnowledgeVisibleTo(
+    spaceId: string,
+    sourceId: string,
+    personId: string,
+    limit = 100,
+  ): TeamKnowledgeItem[] {
+    const rows = this.db.prepare(`
+      SELECT k.*, group_concat(e.event_id) AS evidence_ids,
+        (SELECT group_concat(s.old_knowledge_id)
+         FROM team_knowledge_supersessions s
+         WHERE s.new_knowledge_id = k.id) AS supersedes_ids
+      FROM team_knowledge k
+      LEFT JOIN team_knowledge_evidence e ON e.knowledge_id = k.id
+      WHERE k.space_id = ? AND (
+        k.visibility = 'space' OR
+        (k.visibility = 'source' AND k.visibility_ref = ?) OR
+        (k.visibility = 'person' AND k.visibility_ref = ?)
+      )
+      GROUP BY k.id
+      ORDER BY CASE k.status WHEN 'active' THEN 0 WHEN 'needs-review' THEN 1 ELSE 2 END,
+               k.updated_at DESC, k.id DESC
+      LIMIT ?
+    `).all(spaceId, sourceId, personId, limit) as Row[];
+    return rows.map((row) => this.toTeamKnowledge(row));
+  }
+
+  private toTeamKnowledge(row: Row): TeamKnowledgeItem {
+    const evidenceEventIds = [...new Set(
+      String(row.evidence_ids ?? "")
+        .split(",")
+        .filter(Boolean)
+        .map(Number)
+        .filter(Number.isSafeInteger),
+    )];
+    const supersedesKnowledgeIds = [...new Set(
+      String(row.supersedes_ids ?? "")
+        .split(",")
+        .filter(Boolean)
+        .map(Number)
+        .filter(Number.isSafeInteger),
+    )];
+    return {
+      id: Number(row.id),
+      spaceId: String(row.space_id),
+      fingerprint: String(row.fingerprint),
+      kind: String(row.kind) as TeamKnowledgeKind,
+      subject: String(row.subject),
+      statement: String(row.statement),
+      confidence: Number(row.confidence),
+      status: String(row.status) as TeamKnowledgeStatus,
+      visibility: String(row.visibility) as TeamKnowledgeVisibility,
+      visibilityRef: String(row.visibility_ref),
+      evidenceEventIds,
+      supersedesKnowledgeIds,
+      validFrom: row.valid_from === null ? null : Number(row.valid_from),
+      validTo: row.valid_to === null ? null : Number(row.valid_to),
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
+    };
+  }
+
+  applyTeamSynthesis(
+    spaceId: string,
+    eventIds: number[],
+    result: TeamSynthesisResult,
+    startedAt: number,
+  ): void {
+    if (eventIds.length === 0) return;
+    const eventSet = new Set(eventIds);
+    for (const item of result.knowledge) {
+      if (item.evidenceEventIds.length === 0) {
+        throw new Error("team knowledge requires evidence");
+      }
+      if (item.evidenceEventIds.some((eventId) => !eventSet.has(eventId))) {
+        throw new Error("team knowledge cites evidence outside the synthesis batch");
+      }
+      if (item.visibility !== "space" && !item.visibilityRef) {
+        throw new Error("restricted team knowledge requires a visibility reference");
+      }
+    }
+    const now = Date.now() / 1_000;
+    this.transaction(() => {
+      const placeholders = eventIds.map(() => "?").join(",");
+      const countRow = this.db.prepare(`
+        SELECT COUNT(*) AS count FROM team_events
+        WHERE space_id = ? AND id IN (${placeholders}) AND synthesis_state = 'pending'
+      `).get(spaceId, ...eventIds) as Row;
+      if (Number(countRow.count) !== eventIds.length) {
+        throw new Error("team synthesis batch no longer matches pending evidence");
+      }
+      for (const item of result.knowledge) {
+        for (const supersededId of item.supersedesKnowledgeIds) {
+          const existing = this.db.prepare(`
+            SELECT id FROM team_knowledge WHERE id = ? AND space_id = ?
+          `).get(supersededId, spaceId);
+          if (!existing) throw new Error("team knowledge supersession crosses its Team Space");
+        }
+        const normalized = `${item.kind}\n${item.visibility}\n${item.visibilityRef}\n` +
+          `${item.subject.trim().toLowerCase()}\n${item.statement.trim().toLowerCase()}`;
+        const fingerprint = createHash("sha256").update(normalized).digest("hex");
+        this.db.prepare(`
+          INSERT INTO team_knowledge
+            (space_id, fingerprint, kind, subject, statement, confidence, status,
+             visibility, visibility_ref, valid_from, valid_to, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(space_id, fingerprint) DO UPDATE SET
+            confidence = excluded.confidence,
+            status = excluded.status,
+            visibility = excluded.visibility,
+            visibility_ref = excluded.visibility_ref,
+            valid_from = COALESCE(excluded.valid_from, valid_from),
+            valid_to = excluded.valid_to,
+            updated_at = excluded.updated_at
+        `).run(
+          spaceId,
+          fingerprint,
+          item.kind,
+          item.subject.trim(),
+          item.statement.trim(),
+          item.confidence,
+          item.status,
+          item.visibility,
+          item.visibilityRef,
+          item.validFrom ?? null,
+          item.validTo ?? null,
+          now,
+          now,
+        );
+        const knowledgeRow = this.db.prepare(`
+          SELECT id FROM team_knowledge WHERE space_id = ? AND fingerprint = ?
+        `).get(spaceId, fingerprint) as Row;
+        const knowledgeId = Number(knowledgeRow.id);
+        for (const eventId of item.evidenceEventIds) {
+          this.db.prepare(`
+            INSERT OR IGNORE INTO team_knowledge_evidence (knowledge_id, event_id)
+            VALUES (?, ?)
+          `).run(knowledgeId, eventId);
+        }
+        for (const supersededId of item.supersedesKnowledgeIds) {
+          if (supersededId === knowledgeId) continue;
+          this.db.prepare(`
+            UPDATE team_knowledge SET status = 'superseded', valid_to = COALESCE(valid_to, ?),
+              updated_at = ? WHERE id = ? AND space_id = ?
+          `).run(now, now, supersededId, spaceId);
+          this.db.prepare(`
+            INSERT OR IGNORE INTO team_knowledge_supersessions
+              (old_knowledge_id, new_knowledge_id) VALUES (?, ?)
+          `).run(supersededId, knowledgeId);
+        }
+      }
+      this.db.prepare(`
+        UPDATE team_events SET synthesis_state = 'synthesized'
+        WHERE space_id = ? AND id IN (${placeholders})
+      `).run(spaceId, ...eventIds);
+      this.db.prepare(`
+        UPDATE team_spaces SET
+          summary = ?,
+          phase = CASE
+            WHEN phase = 'paused' THEN phase
+            WHEN oriented_at IS NOT NULL THEN 'active'
+            WHEN ? THEN 'orienting'
+            ELSE 'observing'
+          END,
+          updated_at = ?
+        WHERE id = ?
+      `).run(result.summary.trim(), result.orientationReady ? 1 : 0, now, spaceId);
+      this.db.prepare(`
+        INSERT INTO team_synthesis_runs
+          (space_id, status, event_ids_json, response_json, started_at, completed_at)
+        VALUES (?, 'completed', ?, ?, ?, ?)
+      `).run(spaceId, JSON.stringify(eventIds), JSON.stringify(result), startedAt, now);
+    });
+  }
+
+  recordTeamSynthesisFailure(
+    spaceId: string,
+    eventIds: number[],
+    error: string,
+    startedAt: number,
+  ): void {
+    const now = Date.now() / 1_000;
+    this.transaction(() => {
+      this.db.prepare(`
+        INSERT INTO team_synthesis_runs
+          (space_id, status, event_ids_json, error, started_at, completed_at)
+        VALUES (?, 'failed', ?, ?, ?, ?)
+      `).run(spaceId, JSON.stringify(eventIds), error, startedAt, now);
+    });
+  }
+
+  linkTeamProject(spaceId: string, projectId: string): void {
+    this.transaction(() => {
+      this.db.prepare(`
+        INSERT OR IGNORE INTO team_space_projects (space_id, project_id, linked_at)
+        VALUES (?, ?, ?)
+      `).run(spaceId, projectId, Date.now() / 1_000);
+    });
+  }
+
+  markTeamSpaceAnnounced(spaceId: string, announcedAt = Date.now() / 1_000): void {
+    this.transaction(() => {
+      this.db.prepare(`
+        UPDATE team_spaces SET announced_at = COALESCE(announced_at, ?), updated_at = ?
+        WHERE id = ?
+      `).run(announcedAt, announcedAt, spaceId);
+    });
+  }
+
+  markTeamSpaceOriented(spaceId: string, orientedAt = Date.now() / 1_000): void {
+    this.transaction(() => {
+      this.db.prepare(`
+        UPDATE team_spaces SET oriented_at = COALESCE(oriented_at, ?), phase = 'active',
+          last_intervention_at = ?, updated_at = ?
+        WHERE id = ?
+      `).run(orientedAt, orientedAt, orientedAt, spaceId);
+    });
+  }
+
+  setTeamSpacePhase(spaceId: string, phase: TeamSpacePhase): void {
+    this.transaction(() => {
+      this.db.prepare("UPDATE team_spaces SET phase = ?, updated_at = ? WHERE id = ?")
+        .run(phase, Date.now() / 1_000, spaceId);
+    });
+  }
+
+  recordTeamIntervention(input: Omit<TeamIntervention, "id" | "createdAt" | "sentAt">): number {
+    return this.transaction(() => {
+      const result = this.db.prepare(`
+        INSERT INTO team_interventions
+          (space_id, source_id, kind, reason, text, reply_to_external_event_id, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        input.spaceId,
+        input.sourceId,
+        input.kind,
+        input.reason,
+        input.text,
+        input.replyToExternalEventId,
+        Date.now() / 1_000,
+      );
+      return Number(result.lastInsertRowid);
+    });
+  }
+
+  markTeamInterventionSent(
+    interventionId: number,
+    providerMessageId: string,
+    sentAt = Date.now() / 1_000,
+  ): void {
+    this.transaction(() => {
+      const row = this.db.prepare(
+        "SELECT space_id FROM team_interventions WHERE id = ?",
+      ).get(interventionId) as Row | undefined;
+      if (!row) throw new Error(`unknown team intervention: ${interventionId}`);
+      this.db.prepare(`
+        UPDATE team_interventions SET provider_message_id = ?, sent_at = ? WHERE id = ?
+      `).run(providerMessageId, sentAt, interventionId);
+      this.db.prepare(`
+        UPDATE team_spaces SET last_intervention_at = ?, updated_at = ? WHERE id = ?
+      `).run(sentAt, sentAt, String(row.space_id));
+    });
+  }
+
+  setTeamIdentityObservation(
+    spaceId: string,
+    provider: string,
+    externalUserId: string,
+    enabled: boolean,
+  ): void {
+    this.transaction(() => {
+      const result = this.db.prepare(`
+        UPDATE team_identities SET observation_enabled = ?, last_seen_at = ?
+        WHERE space_id = ? AND provider = ? AND external_user_id = ?
+      `).run(enabled ? 1 : 0, Date.now() / 1_000, spaceId, provider, externalUserId);
+      if (Number(result.changes) === 0) {
+        const personId = StateStore.teamPersonId(spaceId, provider, externalUserId);
+        const now = Date.now() / 1_000;
+        this.db.prepare(`
+          INSERT OR IGNORE INTO team_people (id, space_id, display_name, created_at, updated_at)
+          VALUES (?, ?, '', ?, ?)
+        `).run(personId, spaceId, now, now);
+        this.db.prepare(`
+          INSERT INTO team_identities
+            (space_id, provider, external_user_id, person_id, display_name,
+             observation_enabled, first_seen_at, last_seen_at)
+          VALUES (?, ?, ?, ?, '', ?, ?, ?)
+        `).run(spaceId, provider, externalUserId, personId, enabled ? 1 : 0, now, now);
+      }
+    });
+  }
+
+  forgetTeamIdentity(spaceId: string, provider: string, externalUserId: string): number {
+    const now = Date.now() / 1_000;
+    return this.transaction(() => {
+      const identity = this.db.prepare(`
+        SELECT person_id FROM team_identities
+        WHERE space_id = ? AND provider = ? AND external_user_id = ?
+      `).get(spaceId, provider, externalUserId) as Row | undefined;
+      this.setTeamIdentityObservationInTransaction(spaceId, provider, externalUserId, false, now);
+      if (!identity) return 0;
+      const eventRows = this.db.prepare(`
+        SELECT id FROM team_events
+        WHERE space_id = ? AND person_id = ? AND synthesis_state <> 'redacted'
+      `).all(spaceId, String(identity.person_id)) as Row[];
+      const eventIds = eventRows.map((row) => Number(row.id));
+      if (eventIds.length === 0) return 0;
+      const placeholders = eventIds.map(() => "?").join(",");
+      this.db.prepare(`
+        UPDATE team_knowledge SET status = 'needs-review', updated_at = ?
+        WHERE id IN (
+          SELECT knowledge_id FROM team_knowledge_evidence
+          WHERE event_id IN (${placeholders})
+        )
+      `).run(now, ...eventIds);
+      this.db.prepare(`
+        UPDATE team_events SET text = '', attachments_json = '[]',
+          synthesis_state = 'redacted', redacted_at = ?
+        WHERE id IN (${placeholders})
+      `).run(now, ...eventIds);
+      return eventIds.length;
+    });
+  }
+
+  private setTeamIdentityObservationInTransaction(
+    spaceId: string,
+    provider: string,
+    externalUserId: string,
+    enabled: boolean,
+    now: number,
+  ): void {
+    const result = this.db.prepare(`
+      UPDATE team_identities SET observation_enabled = ?, last_seen_at = ?
+      WHERE space_id = ? AND provider = ? AND external_user_id = ?
+    `).run(enabled ? 1 : 0, now, spaceId, provider, externalUserId);
+    if (Number(result.changes) > 0) return;
+    const personId = StateStore.teamPersonId(spaceId, provider, externalUserId);
+    this.db.prepare(`
+      INSERT OR IGNORE INTO team_people (id, space_id, display_name, created_at, updated_at)
+      VALUES (?, ?, '', ?, ?)
+    `).run(personId, spaceId, now, now);
+    this.db.prepare(`
+      INSERT INTO team_identities
+        (space_id, provider, external_user_id, person_id, display_name,
+         observation_enabled, first_seen_at, last_seen_at)
+      VALUES (?, ?, ?, ?, '', ?, ?, ?)
+    `).run(spaceId, provider, externalUserId, personId, enabled ? 1 : 0, now, now);
+  }
+
+  purgeExpiredTeamEvidence(retentionDays: number, now = Date.now() / 1_000): number {
+    if (retentionDays <= 0) return 0;
+    const cutoff = now - retentionDays * 86_400;
+    return this.transaction(() => {
+      const result = this.db.prepare(`
+        UPDATE team_events SET text = '', attachments_json = '[]',
+          synthesis_state = 'redacted', redacted_at = ?
+        WHERE occurred_at < ? AND synthesis_state <> 'redacted' AND redacted_at IS NULL
+      `).run(now, cutoff);
+      return Number(result.changes);
+    });
   }
 
   private recoverAfterRestart(): void {
@@ -858,7 +1896,15 @@ export class StateStore {
     });
   }
 
-  counts(): { conversations: number; active: number; pending: number } {
+  counts(): {
+    conversations: number;
+    active: number;
+    pending: number;
+    team_spaces: number;
+    team_events: number;
+    team_events_pending: number;
+    team_knowledge: number;
+  } {
     const scalar = (sql: string): number => {
       const row = this.db.prepare(sql).get() as { "COUNT(*)": number };
       return Number(row["COUNT(*)"]);
@@ -867,6 +1913,12 @@ export class StateStore {
       conversations: scalar("SELECT COUNT(*) FROM conversations"),
       active: scalar("SELECT COUNT(*) FROM conversations WHERE active_turn_id IS NOT NULL"),
       pending: scalar("SELECT COUNT(*) FROM pending_inputs WHERE state = 'pending'"),
+      team_spaces: scalar("SELECT COUNT(*) FROM team_spaces"),
+      team_events: scalar("SELECT COUNT(*) FROM team_events"),
+      team_events_pending: scalar(
+        "SELECT COUNT(*) FROM team_events WHERE synthesis_state = 'pending'",
+      ),
+      team_knowledge: scalar("SELECT COUNT(*) FROM team_knowledge"),
     };
   }
 }

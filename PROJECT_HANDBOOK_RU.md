@@ -20,17 +20,20 @@ SUMMING — постоянно работающий агент с одним а�
 account администратора.
 
 SUMMING не реализует собственную LLM, набор shell-инструментов или очередной
-универсальный agent framework. Его задача значительно уже:
+универсальный agent framework. Его задача:
 
-1. связать Telegram topic с проектом и локальной рабочей областью;
-2. сохранить отдельный контекст каждого диалога;
-3. запустить и продолжить Codex thread;
-4. передавать новые указания в активный turn или ставить их следом;
-5. стримить ответ обратно в Telegram;
-6. развести параллельные диалоги по отдельным Git worktree;
-7. хранить минимальную общую память проекта;
-8. разделить рабочий доступ владельцев и read-only Q&A участников group topic;
-9. дать администратору простое операционное управление.
+1. создать Team Space сразу после admission командного источника;
+2. долговременно принять доступные сообщения и социальные события до решения
+   отвечать или молчать;
+3. хранить provenance-ready модель people, sources, evidence и knowledge;
+4. отдельно связать topic с Project и локальной рабочей областью;
+5. сохранить отдельный контекст каждого диалога;
+6. запустить и продолжить Codex thread;
+7. передавать новые указания в активный turn или ставить их следом;
+8. стримить ответ обратно в Telegram;
+9. развести параллельные диалоги по отдельным Git worktree;
+10. разделить понимание команды, Project memory и полномочия на действия;
+11. дать участникам прозрачное управление собственными данными.
 
 В результате граница ответственности выглядит так:
 
@@ -39,6 +42,7 @@ Telegram и SUMMING                  Codex App Server
 ---------------------------------  ---------------------------------
 администратор/owner/participant     модель и agent loop
 binding topic → project             editor/read-only Codex threads
+Team Space event journal            explicit model boundary only
 очередь access/steer/follow-up      sandboxed inspection or project work
 SQLite-состояние                    sandbox конкретного turn
 стрим Telegram                      persistent Codex thread
@@ -80,7 +84,20 @@ health port, процесс не имитирует успешный запус�
 
 ## 3. Продуктовая модель
 
-### 3.1. Project
+### 3.1. Team Space
+
+Team Space создаётся при первом membership event или сообщении доступного
+командного источника. Telegram chat соответствует Space, а каждый topic — Source.
+Space хранит людей, provider identities, event journal, производные знания,
+interventions и связи с Projects. Подробный контракт находится в
+[TEAM_MEMORY_RU.md](TEAM_MEMORY_RU.md).
+
+Admission и Project binding независимы. Непривязанный topic уже является Source
+с долговременным evidence journal, но не получает Project/files/tools/network или
+agency. `/bind` лишь связывает Project с существующим Space и не стирает ранее
+наблюдавшуюся историю.
+
+### 3.2. Project
 
 Project объединяет несколько диалогов, одну долговременную память и одну или
 несколько локальных рабочих областей.
@@ -109,7 +126,7 @@ Project: Secret Cloud
 привязанного group topic могут задавать вопросы о текущем Project, но не получают
 команд или write-доступа. Перезапуск после создания не нужен.
 
-### 3.2. Workspace
+### 3.3. Workspace
 
 Workspace — именованный абсолютный путь к локальному каталогу:
 
@@ -136,7 +153,7 @@ credentials и правила push принадлежат локальному G
 встраивать в Git URL: для приватного remote следует настроить SSH или credential
 helper пользователя systemd `summing`.
 
-### 3.3. Conversation
+### 3.4. Conversation
 
 Conversation — один Telegram topic:
 
@@ -176,43 +193,53 @@ forum group либо иметь отключённый Privacy Mode. Во вто
 одной Conversation. Для нескольких параллельных контекстов предназначена
 Telegram forum group.
 
-Непривязанный group topic намеренно не является Conversation. Каждое обычное
-сообщение по-прежнему проходит transport-наблюдение и позволяет обнаружить chat/topic,
-но не создаёт pending input, таймер, Run или Telegram-ответ. Runtime хранит только
-volatile ring последних 20 текстовых сообщений, ограниченный также 12 000 символов;
-LRU-кэш содержит не более 100 топиков и очищается для привязанного топика или вышедшей
-из группы копии бота. Секретоподобный текст в ring не попадает, а после рестарта он
-исчезает.
+Непривязанный group topic не является Project Conversation и не создаёт Project
+pending input, Run или Telegram-ответ. Однако он является Team Source: каждое
+доступное сообщение долговременно попадает в `team_events` до participant rate
+limit и до решения об ответе. Event journal переживает рестарт, не ограничен
+старым 20-message RAM ring и не очищается при `/bind`.
 
 Явное `@mention` или reply на сообщение бота в непривязанном топике создаёт свежий
 projectless read-only Codex thread с `ephemeral = true` и `environments = []`; после
 ответа runtime вызывает `thread/unsubscribe`. В prompt попадают прямой вопрос,
-ограниченный ring этого топика и текст ответа бота при reply на него. Одно лишь
-`@mention` без вопроса обрабатывается локально подсказкой и не попадает в quota, ring,
-очередь или Codex. CWD — отдельный
+последние 20 видимых evidence events этого Source и текст ответа бота при reply
+на него. Это explicitly requested Q&A boundary, а не автоматический background
+synthesis. Одно лишь `@mention` без вопроса обрабатывается локально подсказкой,
+но само сообщение остаётся evidence. CWD — отдельный
 пустой runtime-каталог; доступ к Project/Workspace,
 project memory, editor/read-only thread привязанных топиков, сети и внешним интеграциям
 отсутствует. Встроенный shell остаётся доступен только для read-only
 inspection отдельного пустого CWD и не открывает Project. Вложения не скачиваются.
-Credential-подобный текст удаляется и аудитируется; при успешном удалении предупреждение
+Credential-подобный текст перехватывается до Team Space journal, удаляется и
+аудитируется; при успешном удалении предупреждение
 отправляется только на явное обращение, а при ошибке удаления — всегда, чтобы участник
 удалил credential вручную. Такой ответ rate-limited для обычных участников, имеет
 отдельный single-worker queue с общим потолком в четыре активных/ожидающих вопроса и
-двухминутный timeout с `turn/interrupt`. Он не превращает топик в binding; последующая
-фоновая беседа снова остаётся тихой.
+двухминутный timeout с `turn/interrupt`. Он не превращает топик в binding;
+последующая фоновая беседа остаётся тихой, но продолжает пополнять локальный
+evidence journal.
 
-Runtime запрашивает Telegram updates типов `message` и `my_chat_member`. Из
+Runtime запрашивает Telegram updates типов `message`, `edited_message`,
+`channel_post`, `edited_channel_post`, `message_reaction`,
+`message_reaction_count`, `my_chat_member` и `chat_member`. Из
 `my_chat_member` он сохраняет chat metadata, текущий статус бота, добавившего
-пользователя, время присоединения и последний исходный membership event. Telegram
+пользователя, время присоединения и последний исходный membership event, а также
+создаёт Team Space и публикует прозрачное admission notice. Telegram
 не передаёт в этом событии список уже существующих forum topics, поэтому
 `topic_id` и доступное название регистрируются по первому увиденному сообщению,
 `forum_topic_created` или `forum_topic_edited`. Администратор просматривает реестр
 командой `/topics` и привязывает обнаруженный топик командой `/bind_topic` в
 личном чате с ботом. Существующие bindings автоматически попадают в реестр при
 миграции SQLite, хотя название старого чата или топика может оставаться неизвестным
-до следующего Telegram update.
+до следующего Telegram update. Edit и erasure переводят зависимые knowledge
+items в `needs-review`; provider redelivery идемпотентна.
 
-### 3.4. Run
+Автоматический semantic synthesis всего Team Space не выводится из факта
+локального хранения. Он требует отдельного operator consent на model egress,
+описанного в `TEAM_MEMORY_RU.md`. Без него pending evidence остаётся локальным и
+не передаётся фоновым Codex turns.
+
+### 3.5. Run
 
 Run — один пользовательский turn внутри Conversation. Каждый Run имеет
 `access_mode`: `write` для администратора/owner или `read-only` для участника, а
@@ -245,9 +272,10 @@ read-only thread: запускать команды или изменять Proj
 
 Для непривязанного топика те же признаки direct (`@mention` или reply боту) не
 попадают в Project routing: они запускают отдельный fresh projectless Q&A, описанный
-в разделе 3. Обычное сообщение там только пополняет ограниченный volatile ring и
-никогда не получает `response_mode=ambient`, потому что ambient-анализ разрешён лишь
-в Conversation уже привязанного Project.
+в разделе 3. Обычное сообщение там пополняет долговечный локальный Team Space journal
+и никогда не получает `response_mode=ambient`: автоматическая передача этого journal
+модели требует отдельного согласия оператора, а ambient-анализ пока разрешён лишь в
+Conversation уже привязанного Project.
 
 ### 4.2. Фоновый смысловой анализ
 
@@ -765,6 +793,11 @@ worktree. `run` требует чистый committed `HEAD`. Периодиче
 | `/cancel` | Прервать активный turn topic. |
 | `/new` | Начать новый Codex thread в topic. |
 | `/remember <факт>` | Добавить факт в Project memory. |
+| `/memory`, `/memory_status` | Показать видимое состояние Team Space. |
+| `/memory_me` | Показать собственные evidence и связанные knowledge items. |
+| `/memory_forget_me` | Redact собственных events и остановить будущий ingest. |
+| `/memory_resume_me` | Возобновить будущий ingest без восстановления удалённого. |
+| `/memory_pause`, `/memory_resume` | Приостановить/возобновить Space; только администратор. |
 | `/review` | Follow-up с просьбой проверить незакоммиченные изменения и не менять файлы. |
 | `/restart` | Выйти с кодом 42; только администратор, systemd перезапустит. |
 | `/panic` | Только администратор; немедленно выйти с кодом 99 без acknowledgement и автоматического рестарта. |
@@ -818,6 +851,10 @@ SQLite хранит:
 - историю Run: access/response mode, prompt, response, status, error и timestamps;
 - управляемые Projects, Workspaces и Telegram owner id;
 - обнаруженные Telegram chats/topics и последний membership event бота;
+- Team Spaces, Sources, People и не объединяемые автоматически provider identities;
+- event journal с replies, edits, reactions, membership и attachment metadata;
+- knowledge с confidence, visibility, temporal validity, evidence и supersession;
+- synthesis/intervention audit и opt-out/retention state;
 - последний подтверждённый Telegram update offset.
 
 Основные таблицы:
@@ -832,6 +869,12 @@ SQLite хранит:
 | `managed_workspaces` | Абсолютные пути управляемых repositories. |
 | `telegram_chats` | Метаданные чата, membership status бота и последний membership event. |
 | `telegram_topics` | Обнаруженные topic id, доступные названия и timestamps. |
+| `team_spaces`, `team_sources` | Durable boundary команды и transport sources. |
+| `team_people`, `team_identities` | Люди и provider identities с observation preference. |
+| `team_events` | Нормализованный evidence journal и redaction state. |
+| `team_knowledge`, `team_knowledge_evidence`, `team_knowledge_supersessions` | Производные выводы, provenance и исправления. |
+| `team_synthesis_runs`, `team_interventions` | Audit фонового понимания и проактивных сообщений. |
+| `team_space_projects` | Отдельно подтверждённые связи Space с Project. |
 
 WAL сохраняет совместимость с существующей базой и допускает независимое чтение
 диагностическими инструментами. В самом runtime короткие синхронные SQLite-запросы
@@ -855,6 +898,9 @@ Telegram-проекты находятся в SQLite и не записываю�
 | `agent.participant_rate_limit_messages` | Сообщений одного участника на окно. | 12 |
 | `agent.participant_rate_limit_window_sec` | Длина rate-limit окна. | 60 |
 | `agent.network_access` | Сеть внутри Codex sandbox. | true |
+| `team_memory.enabled` | Локальный Team Space journal и privacy commands. | true |
+| `team_memory.raw_retention_days` | Дни хранения raw evidence; 0 = бессрочно. | 365 |
+| `team_memory.announce_on_join` | Admission notice при добавлении в группу. | true |
 | `codex_usage.profile_enabled` | Обновлять short description Telegram-бота. | true |
 | `codex_usage.refresh_interval_sec` | Интервал перечитывания App Server limits. | 900 |
 | `codex_usage.timezone` | IANA timezone для времени сброса. | `Europe/Moscow` |
@@ -1416,6 +1462,7 @@ src/
 ├── index.ts                # signals и process entry
 ├── config.ts               # TOML/env validation
 ├── attachment-service.ts   # Telegram spool + OpenAI/Groq transcription boundary
+├── team-memory.ts          # provider-neutral Team Space event normalization and views
 ├── runtime.ts              # Telegram ↔ Conversation ↔ Codex orchestration
 ├── async-primitives.ts     # semaphore и deferred completion
 ├── telegram-api.ts         # минимальный Bot API client на fetch
@@ -1446,6 +1493,7 @@ tests/
 ├── state-store.test.ts
 ├── codex-app-server.test.ts
 ├── telegram-api.test.ts
+├── team-memory.test.ts
 └── workspace-manager.test.ts
 
 deploy/

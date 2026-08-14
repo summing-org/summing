@@ -73,6 +73,9 @@ export class RuntimeConfig {
     readonly codexLimitsProfileEnabled = true,
     readonly codexLimitsRefreshIntervalSeconds = 900,
     readonly codexLimitsTimeZone = "Europe/Moscow",
+    readonly teamMemoryEnabled = true,
+    readonly teamRawRetentionDays = 365,
+    readonly teamAnnounceOnJoin = true,
   ) {}
 
   project(projectId: string): ProjectConfig {
@@ -226,6 +229,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig 
   const agent = table(raw.agent) ?? {};
   const transcription = table(raw.transcription) ?? {};
   const codexUsage = table(raw.codex_usage) ?? {};
+  const teamMemory = table(raw.team_memory) ?? {};
   const health = table(raw.health) ?? {};
   const viewer = table(raw.viewer) ?? {};
   const codexHome = expandPath(env.CODEX_HOME || `${dataDir}/codex`, "CODEX_HOME");
@@ -348,5 +352,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig 
       true,
     ),
     timeZone(codexUsage.timezone ?? "Europe/Moscow", "codex_usage.timezone"),
+    Boolean(teamMemory.enabled ?? true),
+    boundedNumber(
+      teamMemory.raw_retention_days ?? 365,
+      "team_memory.raw_retention_days",
+      0,
+      3_650,
+      true,
+    ),
+    Boolean(teamMemory.announce_on_join ?? true),
   );
 }

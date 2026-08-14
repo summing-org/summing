@@ -59,7 +59,7 @@ test("sendChatAction targets the active Telegram topic", async () => {
   }
 });
 
-test("getUpdates subscribes to messages and bot membership changes", async () => {
+test("getUpdates subscribes to the complete Team Space event surface", async () => {
   const api = new TelegramAPI("token");
   let payload: Record<string, unknown> = {};
   api.call = async (method, input) => {
@@ -70,7 +70,16 @@ test("getUpdates subscribes to messages and bot membership changes", async () =>
 
   try {
     assert.deepEqual(await api.getUpdates(25), []);
-    assert.deepEqual(payload.allowed_updates, ["message", "my_chat_member"]);
+    assert.deepEqual(payload.allowed_updates, [
+      "message",
+      "edited_message",
+      "channel_post",
+      "edited_channel_post",
+      "message_reaction",
+      "message_reaction_count",
+      "my_chat_member",
+      "chat_member",
+    ]);
     assert.equal(payload.offset, 25);
   } finally {
     await api.close();

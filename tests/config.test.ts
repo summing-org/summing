@@ -20,6 +20,11 @@ participant_batch_sec = 25
 participant_rate_limit_messages = 8
 participant_rate_limit_window_sec = 90
 
+[team_memory]
+enabled = true
+raw_retention_days = 180
+announce_on_join = false
+
 [codex_usage]
 profile_enabled = false
 refresh_interval_sec = 600
@@ -61,6 +66,9 @@ test("loads the explicit project model", () => {
     assert.equal(config.participantBatchSeconds, 25);
     assert.equal(config.participantMessagesPerWindow, 8);
     assert.equal(config.participantRateLimitWindowSeconds, 90);
+    assert.equal(config.teamMemoryEnabled, true);
+    assert.equal(config.teamRawRetentionDays, 180);
+    assert.equal(config.teamAnnounceOnJoin, false);
     assert.equal(config.codexLimitsProfileEnabled, false);
     assert.equal(config.codexLimitsRefreshIntervalSeconds, 600);
     assert.equal(config.codexLimitsTimeZone, "UTC");

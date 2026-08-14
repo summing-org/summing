@@ -48,6 +48,13 @@ export function helpMessage(isAdministrator: boolean): string {
     command("/new", "начать новый контекст в topic"),
     command("/remember <факт>", "сохранить факт в общей памяти проекта"),
     example("/remember Все даты в API передаём в UTC"),
+    command("/memory", "показать состояние и знания текущего Team Space"),
+    command("/memory_me", "показать сохранённые обо мне события и выводы"),
+    command(
+      "/memory_forget_me",
+      "удалить содержимое моих событий и остановить дальнейшее наблюдение",
+    ),
+    command("/memory_resume_me", "снова разрешить сохранять мои будущие сообщения"),
     command("/review", "проверить текущие незакоммиченные изменения без их исправления"),
   ];
 
@@ -60,6 +67,8 @@ export function helpMessage(isAdministrator: boolean): string {
       command("/login", "войти в ChatGPT через device code в личном чате"),
       command("/limits", "показать 5-часовой и недельный Codex limits этого VPS"),
       command("/topics", "показать обнаруженные Telegram группы, топики и привязки"),
+      command("/memory_pause", "приостановить наблюдение текущего Team Space"),
+      command("/memory_resume", "возобновить наблюдение текущего Team Space"),
       command(
         "/bind_topic <chat_id> <topic_id> <project> [workspace]",
         "привязать топик из личного чата",

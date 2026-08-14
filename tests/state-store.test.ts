@@ -56,12 +56,28 @@ test("binding, input queues, and Telegram offset", () => {
         [viewerId, "read-only", 55, "ambient", ["source.zip"]],
       ],
     );
-    assert.deepEqual(store.counts(), { conversations: 1, active: 1, pending: 3 });
+    assert.deepEqual(store.counts(), {
+      conversations: 1,
+      active: 1,
+      pending: 3,
+      team_spaces: 0,
+      team_events: 0,
+      team_events_pending: 0,
+      team_knowledge: 0,
+    });
     store.setTelegramOffset(123);
     assert.equal(store.telegramOffset(), 123);
     store.consume([steerId, followId, viewerId]);
     store.clearActive(conversation.id);
-    assert.deepEqual(store.counts(), { conversations: 1, active: 0, pending: 0 });
+    assert.deepEqual(store.counts(), {
+      conversations: 1,
+      active: 0,
+      pending: 0,
+      team_spaces: 0,
+      team_events: 0,
+      team_events_pending: 0,
+      team_knowledge: 0,
+    });
   } finally {
     store.close();
     rmSync(root, { recursive: true, force: true });
@@ -128,6 +144,204 @@ test("persists Telegram memberships and discovered topics", () => {
     assert.equal(reopened.telegramTopic(-100600, 23)?.name, "");
   } finally {
     reopened.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Team Space journals evidence, preserves provenance, and honors erasure", () => {
+  const { root, path, store } = tempStore();
+  try {
+    const first = store.recordTeamEvent({
+      provider: "telegram",
+      externalSpaceId: "-100500",
+      externalThreadId: "17",
+      spaceName: "Engineering",
+      sourceTitle: "Backend",
+      externalEventId: "101",
+      eventKind: "message",
+      senderExternalId: "42",
+      senderDisplayName: "Маша",
+      text: "Релиз переносим на пятницу из-за миграции.",
+      occurredAt: 1_700_000_100,
+      observedAt: 1_700_000_101,
+      administratorUserId: 1,
+    })!;
+    const second = store.recordTeamEvent({
+      provider: "telegram",
+      externalSpaceId: "-100500",
+      externalThreadId: "17",
+      spaceName: "Engineering",
+      sourceTitle: "Backend",
+      externalEventId: "102",
+      eventKind: "message",
+      senderExternalId: "77",
+      senderDisplayName: "Иван",
+      text: "Я закончу миграцию к четвергу.",
+      replyToExternalEventId: "101",
+      attachments: [{
+        kind: "document",
+        fileName: "plan.txt",
+        mimeType: "text/plain",
+        size: 12,
+        providerFileId: "file-1",
+      }],
+      occurredAt: 1_700_000_110,
+      observedAt: 1_700_000_111,
+      administratorUserId: 1,
+    })!;
+    const duplicate = store.recordTeamEvent({
+      provider: "telegram",
+      externalSpaceId: "-100500",
+      externalThreadId: "17",
+      spaceName: "Engineering",
+      sourceTitle: "Backend",
+      externalEventId: "102",
+      eventKind: "message",
+      senderExternalId: "77",
+      senderDisplayName: "Иван",
+      text: "duplicate delivery",
+      occurredAt: 1_700_000_110,
+      administratorUserId: 1,
+    })!;
+    assert.equal(duplicate.id, second.id);
+    const space = store.teamSpaceForProvider("telegram", "-100500")!;
+    assert.equal(store.teamEventCount(space.id), 2);
+    assert.deepEqual(
+      store.pendingTeamEvents(space.id).map((event) => [
+        event.id,
+        event.senderDisplayName,
+        event.text,
+        event.replyToExternalEventId,
+      ]),
+      [
+        [first.id, "Маша", "Релиз переносим на пятницу из-за миграции.", ""],
+        [second.id, "Иван", "Я закончу миграцию к четвергу.", "101"],
+      ],
+    );
+    store.applyTeamSynthesis(space.id, [first.id, second.id], {
+      summary: "Команда готовит миграцию перед релизом.",
+      knowledge: [{
+        kind: "decision",
+        subject: "релиз",
+        statement: "Релиз перенесён на пятницу.",
+        confidence: 0.98,
+        status: "active",
+        visibility: "space",
+        visibilityRef: "",
+        evidenceEventIds: [first.id],
+        supersedesKnowledgeIds: [],
+        validFrom: 1_700_000_100,
+        validTo: null,
+      }, {
+        kind: "task",
+        subject: "Иван",
+        statement: "Завершить миграцию к четвергу.",
+        confidence: 0.95,
+        status: "active",
+        visibility: "space",
+        visibilityRef: "",
+        evidenceEventIds: [second.id],
+        supersedesKnowledgeIds: [],
+        validFrom: 1_700_000_110,
+        validTo: null,
+      }],
+      orientationReady: false,
+      orientationMessage: "",
+      clarificationQuestions: [],
+      proactiveReplyEventId: null,
+      proactiveMessage: "",
+    }, 1_700_000_120);
+    assert.equal(store.pendingTeamEventCount(space.id), 0);
+    assert.equal(store.teamSpace(space.id)?.summary, "Команда готовит миграцию перед релизом.");
+    assert.deepEqual(
+      store.teamKnowledge(space.id).map((item) => [
+        item.kind,
+        item.statement,
+        item.evidenceEventIds,
+      ]).sort((left, right) => String(left[0]).localeCompare(String(right[0]))),
+      [
+        ["decision", "Релиз перенесён на пятницу.", [first.id]],
+        ["task", "Завершить миграцию к четвергу.", [second.id]],
+      ],
+    );
+    assert.equal(
+      store.teamKnowledgeForIdentity(space.id, "telegram", "42")[0]?.kind,
+      "decision",
+    );
+    assert.equal(store.forgetTeamIdentity(space.id, "telegram", "42"), 1);
+    assert.equal(store.teamEvent(first.id)?.synthesisState, "redacted");
+    assert.equal(store.teamEvent(first.id)?.text, "");
+    assert.equal(store.teamKnowledge(space.id).find((item) => item.kind === "decision")?.status, "needs-review");
+    assert.equal(store.recordTeamEvent({
+      provider: "telegram",
+      externalSpaceId: "-100500",
+      externalThreadId: "17",
+      spaceName: "Engineering",
+      sourceTitle: "Backend",
+      externalEventId: "103",
+      eventKind: "message",
+      senderExternalId: "42",
+      senderDisplayName: "Маша",
+      text: "Это больше не должно сохраняться.",
+      occurredAt: 1_700_000_130,
+      administratorUserId: 1,
+    }), null);
+    store.close();
+    const reopened = new StateStore(path);
+    try {
+      assert.equal(reopened.teamEventCount(space.id), 1);
+      assert.equal(reopened.teamKnowledge(space.id).length, 2);
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    try {
+      store.close();
+    } catch {
+      // The persistence assertion already closed this handle.
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Team Space pause and retention prevent covert indefinite collection", () => {
+  const { root, store } = tempStore();
+  try {
+    const event = store.recordTeamEvent({
+      provider: "telegram",
+      externalSpaceId: "-900",
+      externalThreadId: "0",
+      spaceName: "Privacy",
+      sourceTitle: "general",
+      externalEventId: "1",
+      eventKind: "message",
+      senderExternalId: "42",
+      senderDisplayName: "User",
+      text: "old evidence",
+      occurredAt: 1_000,
+      administratorUserId: 1,
+    })!;
+    const space = store.teamSpaceForProvider("telegram", "-900")!;
+    assert.equal(store.purgeExpiredTeamEvidence(30, 1_000 + 31 * 86_400), 1);
+    assert.equal(store.teamEvent(event.id)?.synthesisState, "redacted");
+    store.setTeamSpacePhase(space.id, "paused");
+    assert.equal(store.recordTeamEvent({
+      provider: "telegram",
+      externalSpaceId: "-900",
+      externalThreadId: "0",
+      spaceName: "Privacy",
+      sourceTitle: "general",
+      externalEventId: "2",
+      eventKind: "message",
+      senderExternalId: "42",
+      senderDisplayName: "User",
+      text: "must not persist",
+      occurredAt: 2_000,
+      administratorUserId: 1,
+    }), null);
+    assert.equal(store.teamEventCount(space.id), 0);
+  } finally {
+    store.close();
     rmSync(root, { recursive: true, force: true });
   }
 });

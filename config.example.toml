@@ -12,6 +12,15 @@ participant_rate_limit_window_sec = 60
 # Required for git fetch/push and dependency downloads inside a Codex turn.
 network_access = true
 
+[team_memory]
+# Persist every authorized team message before reply/rate-limit decisions.
+enabled = true
+# Raw text is redacted after this many days; 0 keeps it indefinitely. Knowledge
+# and source references remain so corrections stay explainable.
+raw_retention_days = 365
+# Transparently announce durable observation when the bot joins a group.
+announce_on_join = true
+
 [codex_usage]
 # Publish the VPS account's weekly remaining usage in the bot profile.
 profile_enabled = true

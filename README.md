@@ -8,13 +8,18 @@ forum topics и исполняет их через общий официальн
 ## Модель
 
 ```text
-Project
-  ├── Owner: Telegram user ID
-  ├── Workspace: local Git repository
-  └── Conversation: Telegram topic
-        ├── Editor Codex thread: administrator / Project owner
-        ├── Read-only Codex thread: other group participants
-        └── Active run: 0..1
+Team Space: создаётся при подключении командного источника
+  ├── Sources / topics
+  ├── People + provider identities
+  ├── Durable event journal
+  ├── Evidence-backed knowledge
+  └── Linked Projects
+        ├── Owner: Telegram user ID
+        ├── Workspace: local Git repository
+        └── Conversation: source topic
+              ├── Editor Codex thread: administrator / Project owner
+              ├── Read-only Codex thread: other group participants
+              └── Active run: 0..1
 ```
 
 - разные Telegram topics выполняются параллельно;
@@ -30,10 +35,16 @@ Project
 - `@mention` или reply на сообщение бота гарантированно ставит вопрос в
   приоритетную очередь; остальные сообщения анализируются пакетами раз в 20
   секунд, и бот отвечает только когда видит существенную пользу для обсуждения;
-- в непривязанном group topic обычные сообщения не запускают Codex и не вызывают
-  ответов; runtime держит только небольшой непостоянный контекст последних сообщений,
-  а `@mention` или reply запускает свежий projectless read-only ответ без доступа к
-  файлам, памяти и истории любого Project;
+- приглашение в группу сразу создаёт Team Space; доступные Bot API messages,
+  edits, reactions и membership events долговременно фиксируются до rate limit и
+  решения об ответе, даже если topic ещё не привязан к Project;
+- bind связывает Project с уже накопленным Team Space и не уничтожает evidence;
+- автоматическая отправка всей фоновой переписки в Codex для semantic synthesis
+  требует отдельного явного operator consent; без него journal остаётся локальным;
+- `@mention` или reply в projectless source запускает прежний bounded read-only
+  ответ без доступа к файлам, памяти и истории любого Project;
+- `/memory`, `/memory_me`, `/memory_forget_me` и `/memory_resume_me` делают
+  наблюдение прозрачным и управляемым для участников;
 - один участник по умолчанию может передать в анализ до 12 сообщений за 60
   секунд; лишний фоновый шум отбрасывается без ответа;
 - `/limits` показывает 5-часовой и недельный остаток именно VPS-аккаунта Codex,
@@ -205,10 +216,9 @@ Codex-turn получает roots своего conversation worktree. Write-run 
 с read-only filesystem, выключенной сетью и `approvalPolicy = "never"`. Все
 slash-команды гостя блокируются runtime до обращения к Codex.
 
-Непривязанный group topic не становится Conversation. Обычная беседа в нём лишь
-обновляет реестр топиков и ограниченное оперативное окно (до 20 сообщений и 12 000
-символов на топик, не более 100 LRU-топиков), не запускает Codex и не порождает
-служебное сообщение о `/bind`. Если
+Непривязанный group topic не становится Conversation, но сразу становится источником
+Team Space. Обычная беседа в нём пополняет локальный долговечный журнал evidence,
+не запускает Codex и не порождает служебное сообщение о `/bind`. Если
 участник явно упомянул `@username_бота` или ответил на сообщение бота, SUMMING
 запускает свежий общий Q&A без Project/Workspace, файлов, project memory, сети и
 внешних интеграций. Встроенная shell-команда технически остаётся доступна только для
@@ -217,10 +227,11 @@ read-only inspection отдельного пустого CWD; Project через
 Codex thread, не расходует participant quota и не добавляет такой ping в контекст.
 Для содержательного вопроса thread создаётся как ephemeral, App Server environments
 отключаются, а runtime отписывается после ответа,
-поэтому не сохраняет orphaned history или подписку. Вопрос получает контекст из этого
-ограниченного окна, а reply также включает текст ответа бота, на который ссылается
-пользователь; вложения в непривязанном топике не скачиваются. После перезапуска окно не
-восстанавливается. Credential-подобный текст удаляется и аудитируется даже в фоновой
+поэтому не сохраняет orphaned history или подписку. Вопрос получает контекст из
+последних двадцати видимых отправителю записей журнала, а reply также включает текст
+ответа бота, на который ссылается пользователь; вложения в непривязанном топике не
+скачиваются. Журнал переживает перезапуск. Credential-подобный текст удаляется и
+аудитируется даже в фоновой
 беседе; при успешном удалении бот молчит, а при ошибке просит удалить его вручную.
 Projectless Q&A имеет отдельную от Project Conversation очередь: один активный ответ и
 не более четырёх активных/ожидающих вопросов суммарно. Зависший turn прерывается через
@@ -286,6 +297,10 @@ Runtime сохраняет событие `my_chat_member`, поэтому до�
 | `/cancel` | Прервать активный turn topic. |
 | `/new` | Начать новый Codex thread в topic. |
 | `/remember` | Добавить факт в общую память проекта. |
+| `/memory`, `/memory_status` | Показать состояние и видимые знания Team Space. |
+| `/memory_me` | Показать собственные сохранённые события и связанные выводы. |
+| `/memory_forget_me`, `/memory_resume_me` | Удалить свои данные и остановить/возобновить будущий ingest. |
+| `/memory_pause`, `/memory_resume` | Приостановить/возобновить Team Space; только администратор. |
 | `/review` | Один review текущих изменений. |
 | `/restart` | Завершиться с кодом 42; только администратор. |
 | `/panic` | Полностью остановиться с кодом 99; только администратор. |
@@ -307,6 +322,7 @@ $SUMMING_DATA_DIR/
 
 Полная архитектура и VPS runbook: [PROJECT_HANDBOOK_RU.md](PROJECT_HANDBOOK_RU.md).
 Конституционные принципы: [BIBLE.md](BIBLE.md).
+Team Space, evidence и privacy lifecycle: [TEAM_MEMORY_RU.md](TEAM_MEMORY_RU.md).
 Project `.env`, шифрование и runtime injection: [ENVIRONMENTS_RU.md](ENVIRONMENTS_RU.md).
 
 ## Project Viewer и runner
