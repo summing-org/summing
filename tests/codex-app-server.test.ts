@@ -118,13 +118,13 @@ test("thread and turn requests use official v2 shapes", async (context) => {
           ":minimal": "read",
           ":workspace_roots": {
             ".": "read",
-            workspace: "write",
-            ".git": "read",
-            "workspace/.summing-runtime": "read",
-            "workspace/.summing-runtime/memory": "write",
-            "workspace/.summing-runtime/tmp": "write",
-            "workspace/.summing-runtime/attachments": "read",
           },
+          "/tmp/project/workspace": "write",
+          "/tmp/project/workspace/.git": "read",
+          "/tmp/project/workspace/.summing-runtime": "read",
+          "/tmp/project/workspace/.summing-runtime/memory": "write",
+          "/tmp/project/workspace/.summing-runtime/tmp": "write",
+          "/tmp/project/workspace/.summing-runtime/attachments": "read",
           "/tmp/project-git": "write",
           [canonicalReleaseBin]: "read",
         },
@@ -198,11 +198,11 @@ test("thread and turn requests use official v2 shapes", async (context) => {
           ":minimal": "read",
           ":workspace_roots": {
             ".": "read",
-            ".git": "deny",
-            "workspace/.summing-runtime": "deny",
-            "workspace/.summing-runtime/attachments": "read",
-            "workspace/deep/secrets/.env": "deny",
           },
+          "/tmp/project/.git": "deny",
+          "/tmp/project/workspace/.summing-runtime": "deny",
+          "/tmp/project/workspace/.summing-runtime/attachments": "read",
+          "/tmp/project/workspace/deep/secrets/.env": "deny",
           [canonicalReleaseBin]: "read",
         },
         network: { enabled: false },
@@ -257,13 +257,22 @@ test("thread and turn requests use official v2 shapes", async (context) => {
   const emptyFilesystem = emptyProfile.filesystem as JsonRecord;
   const emptyWorkspaceRules = emptyFilesystem[":workspace_roots"] as JsonRecord;
   assert.deepEqual(emptyWorkspaceRules, {
-    ".": "write",
-    ".git": "read",
-    ".summing-runtime": "read",
-    ".summing-runtime/memory": "write",
-    ".summing-runtime/tmp": "write",
-    ".summing-runtime/attachments": "read",
+    ".": "read",
   });
+  assert.equal(emptyFilesystem["/tmp/empty-project"], "write");
+  assert.equal(emptyFilesystem["/tmp/empty-project/.git"], "read");
+  assert.equal(emptyFilesystem["/tmp/empty-project/.summing-runtime"], "read");
+  assert.equal(emptyFilesystem["/tmp/empty-project/.summing-runtime/memory"], "write");
+  assert.equal(emptyFilesystem["/tmp/empty-project/.summing-runtime/tmp"], "write");
+  assert.equal(emptyFilesystem["/tmp/empty-project/.summing-runtime/attachments"], "read");
+  const writeProfile = ((threadParams.config as JsonRecord).permissions as JsonRecord)[
+    "summing-project"
+  ] as JsonRecord;
+  const writeFilesystem = writeProfile.filesystem as JsonRecord;
+  assert.equal(
+    Object.keys(writeFilesystem).some((path) => path.startsWith("/tmp/project-git/")),
+    false,
+  );
 
   await client.unsubscribeThread("thread-1");
   assert.deepEqual(client.calls.at(-1), ["thread/unsubscribe", { threadId: "thread-1" }]);

@@ -397,38 +397,13 @@ export class CodexAppServer extends EventEmitter {
         `Codex cwd must be inside its readable project root: ${cwd} is outside ${readableRoot}`,
       );
     }
-    const runtimeSubpath =
-      writableSubpath === "."
-        ? ".summing-runtime"
-        : `${writableSubpath}/.summing-runtime`;
+    const workspacePath = resolve(cwd);
+    const gitPointerPath = resolve(cwd, ".git");
+    const runtimePath = resolve(cwd, ".summing-runtime");
+    const runtimeMemoryPath = resolve(runtimePath, "memory");
     const runtimeTempPath = resolve(cwd, ".summing-runtime", "tmp");
-    const runtimeAttachmentsSubpath = `${runtimeSubpath}/attachments`;
+    const runtimeAttachmentsPath = resolve(runtimePath, "attachments");
     const workspaceRoots: JsonRecord = { ".": "read" };
-    if (!options.readOnly) {
-      workspaceRoots[writableSubpath] = "write";
-      workspaceRoots[".git"] = "read";
-      workspaceRoots[runtimeSubpath] = "read";
-      // Keep write grants directory-scoped: older App Server builds probe writable
-      // paths for project metadata and cannot probe through a regular file.
-      workspaceRoots[`${runtimeSubpath}/memory`] = "write";
-      workspaceRoots[`${runtimeSubpath}/tmp`] = "write";
-      workspaceRoots[runtimeAttachmentsSubpath] = "read";
-    } else {
-      workspaceRoots[".git"] = "deny";
-      workspaceRoots[runtimeSubpath] = "deny";
-      workspaceRoots[runtimeAttachmentsSubpath] = "read";
-      for (const deniedPath of options.deniedPaths ?? []) {
-        if (
-          deniedPath &&
-          deniedPath !== "." &&
-          deniedPath !== ".." &&
-          !deniedPath.startsWith("../") &&
-          !deniedPath.startsWith("/")
-        ) {
-          workspaceRoots[deniedPath] = "deny";
-        }
-      }
-    }
     const projects: JsonRecord = {};
     for (const root of new Set([readableRoot, resolve(cwd)])) {
       projects[root] = { trust_level: "untrusted" };
@@ -441,6 +416,35 @@ export class CodexAppServer extends EventEmitter {
       ":minimal": "read",
       ":workspace_roots": workspaceRoots,
     };
+    // Relative workspace-root rules are expanded for every runtimeWorkspaceRoot.
+    // Keep only the common read baseline relative; all worktree-specific grants
+    // must be absolute so the App Server cannot synthesize paths such as
+    // <common-git-dir>/.summing-runtime when Git metadata is a second root.
+    if (!options.readOnly) {
+      filesystem[workspacePath] = "write";
+      filesystem[gitPointerPath] = "read";
+      filesystem[runtimePath] = "read";
+      // Keep write grants directory-scoped: older App Server builds probe writable
+      // paths for project metadata and cannot probe through a regular file.
+      filesystem[runtimeMemoryPath] = "write";
+      filesystem[runtimeTempPath] = "write";
+      filesystem[runtimeAttachmentsPath] = "read";
+    } else {
+      filesystem[resolve(readableRoot, ".git")] = "deny";
+      filesystem[runtimePath] = "deny";
+      filesystem[runtimeAttachmentsPath] = "read";
+      for (const deniedPath of options.deniedPaths ?? []) {
+        if (
+          deniedPath &&
+          deniedPath !== "." &&
+          deniedPath !== ".." &&
+          !deniedPath.startsWith("../") &&
+          !deniedPath.startsWith("/")
+        ) {
+          filesystem[resolve(readableRoot, deniedPath)] = "deny";
+        }
+      }
+    }
     // Standalone installs resolve /usr/local/bin/codex into a versioned release
     // under CODEX_HOME. Codex re-executes that binary when it launches a Linux
     // sandbox command, so the containing bin directory must remain readable

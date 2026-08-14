@@ -37,6 +37,12 @@ SUMMING interprets that evidence asynchronously and intervenes only when its con
 is materially useful; observation never grants agency, and noisy sources must not turn
 observation into an unbounded execution queue.
 
+Editor authority does not make every editor sentence an instruction. When an administrator
+or Project owner explicitly addresses or replies to another human in a group source, the
+message is ambient evidence and must not start or steer a write-capable turn. SUMMING stays
+silent by default and may later ask one concise question only when the human conversation
+contains a material ambiguity, contradiction, blocker, risk, or unresolved decision.
+
 A source that admits SUMMING creates or joins a Team Space immediately. The Team Space is
 the durable boundary for people, sources, evidence, derived knowledge, uncertainty, and
 interventions. It is not a Project and grants no access to files, Project memory, editor

@@ -57,6 +57,7 @@ test("owners control projects while group participants get read-only Q&A", async
     replyToBot = false,
     chatTitle = "",
     repliedText = "",
+    replyToUserId = 0,
   ): Promise<void> => {
     messageId += 1;
     await handleMessage({
@@ -69,11 +70,13 @@ test("owners control projects while group participants get read-only Q&A", async
         type: chatType,
         ...(chatTitle ? { title: chatTitle, is_forum: true } : {}),
       },
-      ...(replyToBot
+      ...(replyToBot || replyToUserId
         ? {
             reply_to_message: {
               message_id: 500,
-              from: { id: 500, is_bot: true, username: "summing_bot" },
+              from: replyToBot
+                ? { id: 500, is_bot: true, username: "summing_bot" }
+                : { id: replyToUserId, is_bot: false, username: "teammate" },
               ...(repliedText ? { text: repliedText } : {}),
             },
           }
@@ -198,6 +201,66 @@ test("owners control projects while group participants get read-only Q&A", async
       },
     });
 
+    const bound = runtime.state.byTopic(-100, 5)!;
+    await send(
+      42,
+      "@TON1K_01 текущий топик настроен на проект summing",
+      -100,
+      "supergroup",
+      5,
+    );
+    await send(
+      42,
+      "тебя там владельцем поставим",
+      -100,
+      "supergroup",
+      5,
+      false,
+      "",
+      "",
+      42,
+    );
+    assert.equal(startedConversation, "");
+    assert.deepEqual(
+      runtime.state.pendingAll(bound.id).map((item) => [
+        item.access,
+        item.responseMode,
+        item.senderId,
+      ]),
+      [
+        ["read-only", "ambient", 42],
+        ["read-only", "ambient", 42],
+      ],
+    );
+    runtime.state.consume(runtime.state.pendingAll(bound.id).map((item) => item.id));
+    (
+      runtime as unknown as { clearAmbientTimers(): void }
+    ).clearAmbientTimers();
+
+    await send(
+      42,
+      "@TON1K_01, @summing_bot уточни риск",
+      -100,
+      "supergroup",
+      5,
+    );
+    assert.equal(startedConversation, bound.id);
+    assert.deepEqual(
+      runtime.state.pendingAll(bound.id).map((item) => [item.access, item.responseMode]),
+      [["write", "direct"]],
+    );
+    runtime.state.consume(runtime.state.pendingAll(bound.id).map((item) => item.id));
+    startedConversation = "";
+
+    await send(42, "проверь текущий статус проекта", -100, "supergroup", 5);
+    assert.equal(startedConversation, bound.id);
+    assert.deepEqual(
+      runtime.state.pendingAll(bound.id).map((item) => [item.access, item.responseMode]),
+      [["write", "direct"]],
+    );
+    runtime.state.consume(runtime.state.pendingAll(bound.id).map((item) => item.id));
+    startedConversation = "";
+
     const beforeUnboundReplies = replies.length;
     await send(999, "Всем привет", -100, "supergroup", 6);
     await send(42, "Обсудим планы на вечер", -100, "supergroup", 6);
@@ -264,7 +327,6 @@ test("owners control projects while group participants get read-only Q&A", async
     assert.equal(runtime.state.teamEventCount(observedSpace.id), 1);
 
     await send(999, "Как устроена авторизация?", -100, "supergroup", 5);
-    const bound = runtime.state.byTopic(-100, 5)!;
     assert.equal(startedConversation, "");
     assert.deepEqual(
       runtime.state.pendingAll(bound.id).map((item) => [
@@ -297,6 +359,17 @@ test("owners control projects while group participants get read-only Q&A", async
     assert.match(replies.at(-1) ?? "", /Слишком много сообщений/);
     await send(888, "@summing_bot ещё раз", -100, "supergroup", 5);
     assert.equal(replies.length, beforeNotice + 1);
+
+    const ambientPrompt = (
+      runtime as unknown as {
+        ambientPrompt(items: ReturnType<typeof runtime.state.pendingAll>): string;
+      }
+    ).ambientPrompt.bind(runtime);
+    const renderedAmbientPrompt = ambientPrompt(
+      runtime.state.pendingAll(bound.id).filter((item) => item.responseMode === "ambient"),
+    );
+    assert.match(renderedAmbientPrompt, /Silence is the default for human-to-human conversation/);
+    assert.match(renderedAmbientPrompt, /Never echo, confirm, paraphrase/);
 
     const parseAmbientDecision = (
       runtime as unknown as {
