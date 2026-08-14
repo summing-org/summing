@@ -39,6 +39,27 @@ test("sendMessage forwards parse mode and Mini App markup", async () => {
   }
 });
 
+test("sendMessage supports HTML mentions in a Telegram topic", async () => {
+  const api = new TelegramAPI("token");
+  let payload: Record<string, unknown> = {};
+  api.call = async (method, input) => {
+    assert.equal(method, "sendMessage");
+    payload = input;
+    return { message_id: 18 };
+  };
+
+  try {
+    await api.sendMessage(-10042, '<a href="tg://user?id=42">Мария</a>', {
+      topicId: 17,
+      parseMode: "HTML",
+    });
+    assert.equal(payload.parse_mode, "HTML");
+    assert.equal(payload.message_thread_id, 17);
+  } finally {
+    await api.close();
+  }
+});
+
 test("sendChatAction targets the active Telegram topic", async () => {
   const api = new TelegramAPI("token");
   let payload: Record<string, unknown> = {};

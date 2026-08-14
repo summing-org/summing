@@ -10,6 +10,7 @@ test("administrator Mini App exposes project creation and topic binding UI", () 
   assert.match(ADMIN_HTML, /id="userCount"/);
   assert.match(ADMIN_HTML, /Привязки топиков/);
   assert.match(ADMIN_HTML, /Telegram Bot API не отдаёт полный список/);
+  assert.match(ADMIN_HTML, /уведомит владельца проекта прямо в выбранном топике/);
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/projects/);
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/bindings/);
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/users/);

@@ -36,10 +36,12 @@ test("owners control projects while group participants get read-only Q&A", async
   );
   const runtime = new SummingRuntime(config);
   const replies: string[] = [];
-  const replyOptions: Array<{ parseMode?: string }> = [];
+  const replyChats: number[] = [];
+  const replyOptions: Array<{ topicId?: number; parseMode?: string }> = [];
   let replyId = 100;
-  runtime.telegram.sendMessage = async (_chatId, text, options) => {
+  runtime.telegram.sendMessage = async (chatId, text, options) => {
     replies.push(text);
+    replyChats.push(chatId);
     replyOptions.push(options ?? {});
     replyId += 1;
     return replyId;
@@ -198,6 +200,22 @@ test("owners control projects while group participants get read-only Q&A", async
 
     await send(42, "/bind alpha", -100, "supergroup", 5);
     assert.equal(runtime.state.byTopic(-100, 5)?.projectId, "alpha");
+    const ownerNotice = replies.findIndex((reply) =>
+      reply.includes("проекту <b>alpha</b>, где вы назначены владельцем")
+    );
+    assert.notEqual(ownerNotice, -1);
+    assert.equal(replyChats[ownerNotice], -100);
+    assert.match(replies[ownerNotice] ?? "", /tg:\/\/user\?id=42/);
+    assert.match(replies[ownerNotice] ?? "", /Repository: <code>repo<\/code>/);
+    assert.deepEqual(replyOptions[ownerNotice], { topicId: 5, parseMode: "HTML" });
+    const ownerNoticeCount = replies.filter((reply) =>
+      reply.includes("где вы назначены владельцем")
+    ).length;
+    await send(42, "/bind alpha", -100, "supergroup", 5);
+    assert.equal(
+      replies.filter((reply) => reply.includes("где вы назначены владельцем")).length,
+      ownerNoticeCount,
+    );
     await send(77, "/bind beta", -100, "supergroup", 5);
     assert.equal(runtime.state.byTopic(-100, 5)?.projectId, "alpha");
     assert.match(replies.at(-1) ?? "", /гостевом режиме команды отключены/);

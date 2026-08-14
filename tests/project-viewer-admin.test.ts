@@ -77,7 +77,15 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
     port,
   );
   const projects = new ProjectCatalog(config, state);
-  const viewer = new ProjectViewerServer(config, state, projects);
+  const bindingNotifications: Array<[number, number]> = [];
+  const viewer = new ProjectViewerServer(
+    config,
+    state,
+    projects,
+    undefined,
+    () => false,
+    (chatId, topicId) => bindingNotifications.push([chatId, topicId]),
+  );
   const endpoint = `http://127.0.0.1:${port}`;
   const auth = (userId: number): Record<string, string> => ({
     "x-telegram-init-data": signedInitData("bot-token", userId),
@@ -216,6 +224,21 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
     assert.equal(bound.status, 200, await bound.text());
     const conversation = state.byTopic(-300, 44)!;
     assert.equal(conversation.projectId, "client");
+    assert.deepEqual(bindingNotifications, [[-300, 44]]);
+
+    const unchanged = await fetch(`${endpoint}/api/viewer/admin/bindings`, {
+      method: "POST",
+      headers: { ...auth(1), "content-type": "application/json" },
+      body: JSON.stringify({
+        chatId: -300,
+        topicId: 44,
+        projectId: "client",
+        workspaceId: "backend",
+      }),
+    });
+    assert.equal(unchanged.status, 200, await unchanged.text());
+    assert.deepEqual(bindingNotifications, [[-300, 44]]);
+
     state.setThread(conversation.id, "thread-client");
     state.setActive(conversation.id, "turn-active", null);
 
@@ -246,6 +269,7 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
     assert.equal(rebound.status, 200, await rebound.text());
     assert.equal(state.byTopic(-300, 44)?.projectId, "summing");
     assert.equal(state.byTopic(-300, 44)?.codexThreadId, null);
+    assert.deepEqual(bindingNotifications, [[-300, 44], [-300, 44]]);
 
     const final = await fetch(`${endpoint}/api/viewer/admin`, { headers: auth(1) });
     const finalPayload = await final.json() as {

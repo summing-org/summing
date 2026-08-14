@@ -145,7 +145,7 @@ export class TelegramAPI {
     options: {
       topicId?: number;
       replyTo?: number;
-      parseMode?: "MarkdownV2";
+      parseMode?: "HTML" | "MarkdownV2";
       replyMarkup?: TelegramObject;
     } = {},
   ): Promise<number> {

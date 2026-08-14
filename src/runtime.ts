@@ -74,6 +74,14 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function telegramHtml(value: string): string {
+  return value.replace(/[&<>]/g, (character) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+  })[character]!);
+}
+
 function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, milliseconds));
 }
@@ -363,6 +371,7 @@ export class SummingRuntime {
       this.projects,
       undefined,
       (conversation) => this.processors.has(conversation.id),
+      (chatId, topicId) => this.afterTopicBindingChanged(chatId, topicId),
     );
     this.semaphore = new Semaphore(config.maxParallelConversations);
   }
@@ -2382,9 +2391,16 @@ export class SummingRuntime {
       try {
         const project = this.projects.project(parts[2]!);
         const workspace = project.workspace(parts[3] ?? "");
+        const bindingChanged =
+          !targetConversation ||
+          targetConversation.projectId !== project.id ||
+          targetConversation.workspaceId !== workspace.id;
         const bound = this.state.bind(targetChatId, targetTopicId, project.id, workspace.id);
         const teamSpace = this.state.teamSpaceForProvider("telegram", String(targetChatId));
         if (teamSpace) this.state.linkTeamProject(teamSpace.id, project.id);
+        if (bindingChanged) {
+          this.queueProjectOwnerBindingNotification(targetChatId, targetTopicId);
+        }
         const targetTitle = targetChat.title || String(targetChat.chatId);
         const topicTitle = targetTopic.name || String(targetTopic.topicId);
         await this.reply(
@@ -2442,6 +2458,10 @@ export class SummingRuntime {
           return;
         }
         const workspace = project.workspace(parts[1] ?? "");
+        const bindingChanged =
+          !conversation ||
+          conversation.projectId !== project.id ||
+          conversation.workspaceId !== workspace.id;
         if (
           conversation &&
           (conversation.projectId !== project.id || conversation.workspaceId !== workspace.id)
@@ -2453,6 +2473,9 @@ export class SummingRuntime {
         const bound = this.state.bind(chatId, topicId, project.id, workspace.id);
         const teamSpace = this.state.teamSpaceForProvider("telegram", String(chatId));
         if (teamSpace) this.state.linkTeamProject(teamSpace.id, project.id);
+        if (bindingChanged && chatType === "supergroup") {
+          this.queueProjectOwnerBindingNotification(chatId, topicId);
+        }
         await this.reply(
           chatId,
           topicId,
@@ -2716,6 +2739,46 @@ export class SummingRuntime {
 
   private adminViewerUrl(): string {
     return `${this.config.viewerPublicUrl}/admin`;
+  }
+
+  private afterTopicBindingChanged(chatId: number, topicId: number): void {
+    const conversation = this.state.byTopic(chatId, topicId);
+    if (!conversation) return;
+    const teamSpace = this.state.teamSpaceForProvider("telegram", String(chatId));
+    if (teamSpace) this.state.linkTeamProject(teamSpace.id, conversation.projectId);
+    this.queueProjectOwnerBindingNotification(chatId, topicId);
+  }
+
+  private queueProjectOwnerBindingNotification(chatId: number, topicId: number): void {
+    void this.notifyProjectOwnerBinding(chatId, topicId).catch((error) => {
+      console.warn("could not notify project owner about topic binding", errorText(error));
+    });
+  }
+
+  private async notifyProjectOwnerBinding(chatId: number, topicId: number): Promise<void> {
+    const conversation = this.state.byTopic(chatId, topicId);
+    if (!conversation) return;
+    const project = this.projects.project(conversation.projectId);
+    const ownerId = this.projects.owner(project.id);
+    const profile = this.state.listTelegramChatUsers(chatId)
+      .find((user) => user.userId === ownerId);
+    const profileName = [profile?.firstName, profile?.lastName]
+      .filter((part): part is string => Boolean(part))
+      .join(" ")
+      .trim();
+    const ownerLabel = profileName || (profile?.username ? `@${profile.username}` : `ID ${ownerId}`);
+    const mention = `<a href="tg://user?id=${ownerId}">${telegramHtml(ownerLabel)}</a>`;
+    await this.telegram.sendMessage(
+      chatId,
+      [
+        `👤 ${mention}, этот топик подключён к проекту ` +
+          `<b>${telegramHtml(project.name)}</b>, где вы назначены владельцем.`,
+        `Project: <code>${telegramHtml(project.id)}</code>`,
+        `Repository: <code>${telegramHtml(conversation.workspaceId)}</code>`,
+        "Теперь рабочие запросы в этом топике относятся к этому проекту.",
+      ].join("\n"),
+      { topicId, parseMode: "HTML" },
+    );
   }
 
   private async sendAdminButton(chatId: number, replyTo: number): Promise<void> {

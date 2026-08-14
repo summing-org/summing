@@ -58,7 +58,7 @@ export const ADMIN_HTML = `<!doctype html>
         <div><span class="eyebrow">TELEGRAM ROUTING</span><h2 id="bindingsTitle">Привязки топиков</h2></div>
         <label class="search"><span>⌕</span><input id="topicSearch" placeholder="Найти группу или топик" autocomplete="off"></label>
       </div>
-      <p class="section-note">SUMMING видит топик и пользователя после первого доступного боту сообщения. Telegram Bot API не отдаёт полный список молчащих участников. Перепривязка сбрасывает Codex-контекст топика и доступна только без активных задач.</p>
+      <p class="section-note">SUMMING видит топик и пользователя после первого доступного боту сообщения. После новой привязки бот уведомит владельца проекта прямо в выбранном топике. Telegram Bot API не отдаёт полный список молчащих участников. Перепривязка сбрасывает Codex-контекст топика и доступна только без активных задач.</p>
       <div id="chats" class="chat-list"><div class="empty">Загрузка Telegram-топиков…</div></div>
     </section>
   </main>
