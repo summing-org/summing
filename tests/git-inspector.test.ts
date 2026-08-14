@@ -239,3 +239,52 @@ test("publishes and fast-forwards the current branch without force or automatic 
     rmSync(fixture, { recursive: true, force: true });
   }
 });
+
+test("verifies read and write without creating refs, migrates legacy SSH, and safely changes origin", async () => {
+  const fixture = mkdtempSync(join(tmpdir(), "summing-inspector-access-"));
+  const local = join(fixture, "local");
+  const firstRemote = join(local, ".git", "first.git");
+  const secondRemote = join(local, ".git", "second.git");
+  try {
+    execFileSync("git", ["init", "--initial-branch=main", local]);
+    execFileSync("git", ["init", "--bare", "--initial-branch=main", firstRemote]);
+    execFileSync("git", ["init", "--bare", "--initial-branch=main", secondRemote]);
+    execFileSync("git", ["-C", local, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", local, "config", "user.email", "test@example.test"]);
+    writeFileSync(join(local, "README.md"), "initial\n");
+    execFileSync("git", ["-C", local, "add", "README.md"]);
+    execFileSync("git", ["-C", local, "commit", "-m", "initial"]);
+    execFileSync("git", ["-C", local, "remote", "add", "origin", firstRemote]);
+
+    const credential = {
+      identityFile: join(fixture, "managed-key"),
+      knownHostsFile: join(fixture, "known-hosts"),
+    };
+    const inspector = new GitInspector(local, credential);
+    const verification = await inspector.verifyRepositoryAccess();
+    assert.equal(verification.read, true);
+    assert.equal(verification.write, true);
+    assert.equal(verification.emptyRemote, true);
+    assert.equal(verification.code, "ok");
+    assert.equal(gitOutput(firstRemote, "for-each-ref", "--format=%(refname)"), "");
+
+    execFileSync("git", ["-C", local, "config", "core.sshCommand", "legacy-key-command"]);
+    const managedStatus = await inspector.repositoryStatus(false);
+    assert.notEqual(managedStatus.state, "error");
+    assert.equal(managedStatus.legacySshCommand, true);
+    assert.equal(managedStatus.errorCode, "legacy-ssh-command");
+    assert.equal(await inspector.removeLegacySshCommand(), true);
+    assert.equal(await inspector.legacySshCommandPresent(), false);
+
+    const next = await inspector.verifyRepositoryAccess(secondRemote);
+    assert.equal(next.read, true);
+    assert.equal(next.write, true);
+    const changed = await inspector.changeOrigin(firstRemote, secondRemote);
+    assert.equal(changed.remote, secondRemote);
+    const restored = await inspector.changeOrigin(secondRemote, firstRemote);
+    assert.equal(restored.remote, firstRemote);
+    assert.equal(gitOutput(secondRemote, "for-each-ref", "--format=%(refname)"), "");
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});

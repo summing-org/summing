@@ -59,9 +59,11 @@ test("repository tab gives the project owner and administrator safe push and pul
   const root = mkdtempSync(join(tmpdir(), "summing-viewer-repository-"));
   const workspace = join(root, "workspace");
   const remote = join(workspace, ".git", "origin.git");
+  const replacementRemote = join(workspace, ".git", "replacement.git");
   const updater = join(root, "updater");
   initializeRepository(workspace);
   execFileSync("git", ["init", "--bare", "--initial-branch=main", remote]);
+  execFileSync("git", ["init", "--bare", "--initial-branch=main", replacementRemote]);
   git(workspace, "remote", "add", "origin", remote);
   git(workspace, "push", "origin", "main");
   writeFileSync(join(workspace, "LOCAL.md"), "local\n");
@@ -112,6 +114,14 @@ test("repository tab gives the project owner and administrator safe push and pul
   const auth = (userId: number): Record<string, string> => ({
     "x-telegram-init-data": signedInitData("bot-token", userId),
   });
+  const repositoryPost = (action: string, extra: Record<string, unknown> = {}) => fetch(
+    `${endpoint}/api/viewer/repository`,
+    {
+      method: "POST",
+      headers: { ...auth(42), "content-type": "application/json" },
+      body: JSON.stringify({ conversation: conversation.id, action, ...extra }),
+    },
+  );
   try {
     await viewer.start();
 
@@ -190,6 +200,84 @@ test("repository tab gives the project owner and administrator safe push and pul
     });
     assert.equal(pulled.status, 200);
     assert.equal(git(workspace, "show", "HEAD:REMOTE.md"), "remote");
+
+    const verified = await repositoryPost("verify");
+    assert.equal(verified.status, 200);
+    const verifiedBody = await verified.json() as {
+      experience: {
+        verification: { read: boolean; write: boolean; checkedAt: string; code: string };
+        audit: Array<{ action: string }>;
+      };
+    };
+    assert.equal(verifiedBody.experience.verification.read, true);
+    assert.equal(verifiedBody.experience.verification.write, true);
+    assert.equal(verifiedBody.experience.verification.code, "ok");
+    assert.match(verifiedBody.experience.verification.checkedAt, /^\d{4}-\d{2}-\d{2}T/);
+    assert.equal(git(remote, "for-each-ref", "--format=%(refname)", "refs/heads/summing"), "");
+
+    const preview = await repositoryPost("preview-origin", { remoteUrl: replacementRemote });
+    assert.equal(preview.status, 200);
+    const previewBody = await preview.json() as { preview: { read: boolean; write: boolean } };
+    assert.equal(previewBody.preview.read, true);
+    assert.equal(previewBody.preview.write, true);
+    const changed = await repositoryPost("change-origin", {
+      remoteUrl: replacementRemote,
+      expectedRemote: remote,
+      confirmed: true,
+    });
+    assert.equal(changed.status, 200);
+    const changedBody = await changed.json() as {
+      repository: { remote: string };
+      experience: { previousRemote: { previous: string; replacement: string } };
+    };
+    assert.equal(changedBody.repository.remote, replacementRemote);
+    assert.equal(changedBody.experience.previousRemote.previous, remote);
+    assert.equal(git(workspace, "remote", "get-url", "origin"), replacementRemote);
+    const rolledBack = await repositoryPost("rollback-origin");
+    assert.equal(rolledBack.status, 200);
+    assert.equal(git(workspace, "remote", "get-url", "origin"), remote);
+
+    const activeCredential = await viewer.repositoryCredentials.ensure("client", "repo");
+    git(workspace, "config", "core.sshCommand", "ssh -i /old/key");
+    const legacyStatus = await fetch(
+      `${endpoint}/api/viewer/repository?conversation=${conversation.id}`,
+      { headers: auth(42) },
+    );
+    const legacyBody = await legacyStatus.json() as {
+      repository: { state: string; legacySshCommand: boolean };
+    };
+    assert.notEqual(legacyBody.repository.state, "error");
+    assert.equal(legacyBody.repository.legacySshCommand, true);
+    const migrated = await repositoryPost("migrate-legacy");
+    assert.equal(migrated.status, 200);
+    assert.throws(() => git(workspace, "config", "--get", "core.sshCommand"));
+
+    const prepared = await repositoryPost("prepare-rotation");
+    assert.equal(prepared.status, 200);
+    const preparedBody = await prepared.json() as {
+      connection: { rotation: { fingerprint: string; publicKey: string } };
+    };
+    assert.match(preparedBody.connection.rotation.publicKey, /^ssh-ed25519 /);
+    assert.notEqual(preparedBody.connection.rotation.fingerprint, activeCredential.fingerprint);
+    const rotationVerified = await repositoryPost("verify-rotation");
+    assert.equal(rotationVerified.status, 200);
+    const rotationVerifiedBody = await rotationVerified.json() as {
+      experience: { rotationVerification: { read: boolean; write: boolean } };
+    };
+    assert.equal(rotationVerifiedBody.experience.rotationVerification.read, true);
+    assert.equal(rotationVerifiedBody.experience.rotationVerification.write, true);
+    const activated = await repositoryPost("activate-rotation");
+    assert.equal(activated.status, 200);
+    const activatedBody = await activated.json() as {
+      connection: { fingerprint: string; rotation: null };
+      experience: { audit: Array<{ action: string; actor: number; head: string }> };
+    };
+    assert.equal(activatedBody.connection.fingerprint, preparedBody.connection.rotation.fingerprint);
+    assert.equal(activatedBody.connection.rotation, null);
+    assert.ok(activatedBody.experience.audit.some((entry) => entry.action === "change-origin"));
+    assert.ok(activatedBody.experience.audit.some((entry) => entry.action === "migrate-legacy"));
+    assert.equal(activatedBody.experience.audit[0]?.actor, 42);
+    assert.match(activatedBody.experience.audit[0]?.head ?? "", /^[0-9a-f]{40}$/);
   } finally {
     await viewer.close();
     state.close();
@@ -202,10 +290,20 @@ test("repository controls are present in the Mini App", () => {
   assert.match(VIEWER_HTML, /id="repositoryUrl"/);
   assert.match(VIEWER_HTML, /id="repositoryPublicKey"/);
   assert.match(VIEWER_HTML, /id="verifyRepository"/);
+  assert.match(VIEWER_HTML, /id="repositoryReadAccess"/);
+  assert.match(VIEWER_HTML, /id="repositoryWriteAccess"/);
+  assert.match(VIEWER_HTML, /id="repositoryNewUrl"/);
+  assert.match(VIEWER_HTML, /id="rollbackOrigin"/);
+  assert.match(VIEWER_HTML, /id="migrateLegacy"/);
+  assert.match(VIEWER_HTML, /id="prepareRotation"/);
+  assert.match(VIEWER_HTML, /id="repositoryAudit"/);
   assert.match(VIEWER_HTML, /id="pullRepository"/);
   assert.match(VIEWER_HTML, /id="pushRepository"/);
-  assert.match(VIEWER_JS, /action:"connect"/);
-  assert.match(VIEWER_JS, /copyRepositoryKey/);
+  assert.match(VIEWER_JS, /postRepository\("connect"/);
+  assert.match(VIEWER_JS, /copyFrom\("repositoryPublicKey"/);
+  assert.match(VIEWER_JS, /postRepository\("verify"\)/);
+  assert.match(VIEWER_JS, /postRepository\("preview-origin"/);
+  assert.match(VIEWER_JS, /rotationAction\("activate-rotation"\)/);
   assert.match(VIEWER_JS, /syncRepository\("pull"\)/);
   assert.match(VIEWER_JS, /syncRepository\("push"\)/);
 });

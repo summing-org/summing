@@ -2,7 +2,10 @@ import { spawn } from "node:child_process";
 import { lstat, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve, sep } from "node:path";
-import type { RepositorySshCredential } from "./repository-credentials.js";
+import type {
+  RepositoryDiagnosticCode,
+  RepositorySshCredential,
+} from "./repository-credentials.js";
 
 const MAX_GIT_OUTPUT = 4_000_000;
 const MAX_ARCHIVE_BYTES = 50_000_000;
@@ -20,6 +23,7 @@ interface CommandResult {
   code: number;
   stdout: Buffer;
   stderr: string;
+  timedOut: boolean;
 }
 
 export interface TreeEntry {
@@ -57,6 +61,20 @@ export interface RepositorySyncStatus extends RepositorySummary {
   message: string;
   canPush: boolean;
   canPull: boolean;
+  errorCode: RepositoryDiagnosticCode;
+  legacySshCommand: boolean;
+}
+
+export interface RepositoryAccessVerification {
+  remote: string;
+  head: string;
+  read: boolean;
+  write: boolean;
+  emptyRemote: boolean;
+  checkedAt: string;
+  code: RepositoryDiagnosticCode;
+  message: string;
+  legacySshCommand: boolean;
 }
 
 export interface CommitSummary {
@@ -67,7 +85,11 @@ export interface CommitSummary {
   subject: string;
 }
 
-export class GitInspectorError extends Error {}
+export class GitInspectorError extends Error {
+  constructor(message: string, readonly code: RepositoryDiagnosticCode = "unknown") {
+    super(message);
+  }
+}
 
 function command(
   executable: string,
@@ -86,7 +108,11 @@ function command(
     let stdoutBytes = 0;
     let stderr = "";
     let killedForSize = false;
-    const timer = setTimeout(() => child.kill("SIGKILL"), 60_000);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, 60_000);
     child.stdout.on("data", (chunk: Buffer) => {
       stdoutBytes += chunk.length;
       if (stdoutBytes > maximumBytes) {
@@ -107,7 +133,7 @@ function command(
         reject(new GitInspectorError(`command output exceeds ${maximumBytes} bytes`));
         return;
       }
-      resolveCommand({ code: code ?? 1, stdout: Buffer.concat(stdout), stderr });
+      resolveCommand({ code: code ?? 1, stdout: Buffer.concat(stdout), stderr, timedOut });
     });
   });
 }
@@ -197,6 +223,61 @@ function gitFailure(result: CommandResult, remote: string): string {
   return withoutRemote.replace(/(https?:\/\/)[^\s/@]+@/gi, "$1");
 }
 
+function gitDiagnostic(
+  result: Pick<CommandResult, "stderr" | "timedOut">,
+  operation: "read" | "write",
+): { code: RepositoryDiagnosticCode; message: string } {
+  const detail = result.stderr.toLowerCase();
+  if (result.timedOut) {
+    return { code: "timeout", message: "Git-сервис не ответил за 60 секунд." };
+  }
+  if (/remote host identification has changed|host key verification failed/.test(detail)) {
+    return {
+      code: "host-key-changed",
+      message: "SSH host key изменился или не прошёл проверку. Проверьте адрес origin и сервер Git.",
+    };
+  }
+  if (/could not resolve hostname|could not resolve host|name or service not known/.test(detail)) {
+    return { code: "dns-failure", message: "Имя Git-сервера не разрешается через DNS." };
+  }
+  if (/connection refused|connection timed out|no route to host|network is unreachable/.test(detail)) {
+    return { code: "network-failure", message: "Нет сетевого соединения с Git-сервисом." };
+  }
+  if (/repository not found|does not appear to be a git repository/.test(detail)) {
+    return {
+      code: "repository-not-found",
+      message: "Репозиторий не найден: проверьте URL и доступ deploy key.",
+    };
+  }
+  if (/protected branch|pre-receive hook declined|protected ref/.test(detail)) {
+    return {
+      code: "protected-branch",
+      message: "Git-сервис отклонил запись из-за правил защищённых веток или refs.",
+    };
+  }
+  if (
+    operation === "write" &&
+    /write access|permission.*denied|denied to|not allowed to push|insufficient permission/.test(detail)
+  ) {
+    return {
+      code: "write-denied",
+      message: "Чтение доступно, но Git-сервис не разрешает запись этим deploy key.",
+    };
+  }
+  if (/permission denied \(publickey\)|authentication failed|could not read from remote repository/.test(detail)) {
+    return {
+      code: "authentication-failed",
+      message: "SSH-ключ не принят Git-сервисом. Добавьте показанный deploy key и разрешите запись.",
+    };
+  }
+  return {
+    code: "unknown",
+    message: operation === "write"
+      ? "Git-сервис отклонил проверку записи."
+      : "Не удалось прочитать данные origin.",
+  };
+}
+
 export class GitInspector {
   constructor(
     readonly root: string,
@@ -265,6 +346,8 @@ export class GitInspector {
       message: "Origin не настроен.",
       canPush: false,
       canPull: false,
+      errorCode: "missing-origin",
+      legacySshCommand: false,
     };
     if (!remote) return base;
     if (summary.branch === "detached") {
@@ -279,8 +362,10 @@ export class GitInspector {
         ...base,
         state: "error",
         message: error instanceof Error ? error.message : "Небезопасная конфигурация origin.",
+        errorCode: error instanceof GitInspectorError ? error.code : "unsafe-config",
       };
     }
+    const legacySshCommand = await this.legacySshCommandPresent();
 
     if (refresh) {
       const fetched = await this.git(
@@ -294,10 +379,13 @@ export class GitInspector {
         { allowFailure: true, env: this.repositoryEnvironment() },
       );
       if (fetched.code !== 0) {
+        const diagnostic = gitDiagnostic(fetched, "read");
         return {
           ...base,
           state: "error",
-          message: `Не удалось получить данные origin: ${gitFailure(fetched, remote)}`,
+          message: diagnostic.message,
+          errorCode: diagnostic.code,
+          legacySshCommand,
         };
       }
     }
@@ -367,6 +455,90 @@ export class GitInspector {
       message,
       canPush: !published || (ahead > 0 && behind === 0),
       canPull: !summary.dirty && Boolean(pullSource) && ahead === 0 && behind > 0,
+      errorCode: legacySshCommand ? "legacy-ssh-command" : "ok",
+      legacySshCommand,
+    };
+  }
+
+  async verifyRepositoryAccess(remoteOverride = ""): Promise<RepositoryAccessVerification> {
+    const summary = await this.summary();
+    const legacySshCommand = await this.legacySshCommandPresent();
+    let fetch: string;
+    let push: string;
+    if (remoteOverride) {
+      if (remoteOverride !== remoteOverride.trim() || remoteOverride.length > 2_048) {
+        throw new GitInspectorError("укажите корректный URL репозитория");
+      }
+      await this.validateRemoteEndpoint(remoteOverride);
+      fetch = remoteOverride;
+      push = remoteOverride;
+      await this.rejectUnsafeRepositoryConfig("--local");
+      await this.rejectUnsafeRepositoryConfig("--worktree");
+    } else {
+      if (!summary.remote) {
+        return {
+          remote: "",
+          head: summary.head,
+          read: false,
+          write: false,
+          emptyRemote: false,
+          checkedAt: new Date().toISOString(),
+          code: "missing-origin",
+          message: "Origin не настроен.",
+          legacySshCommand,
+        };
+      }
+      ({ fetch, push } = await this.repositoryEndpoints());
+    }
+    const checkedAt = new Date().toISOString();
+    const read = await this.git(["ls-remote", "--heads", "--", fetch], {
+      allowFailure: true,
+      env: this.repositoryEnvironment(),
+    });
+    if (read.code !== 0) {
+      const diagnostic = gitDiagnostic(read, "read");
+      return {
+        remote: safeRemoteUrl(fetch),
+        head: summary.head,
+        read: false,
+        write: false,
+        emptyRemote: false,
+        checkedAt,
+        ...diagnostic,
+        legacySshCommand,
+      };
+    }
+    const emptyRemote = text(read).trim() === "";
+    const verificationRef = `refs/heads/summing/access-check-${summary.shortHead}`;
+    const write = await this.git(
+      ["push", "--dry-run", "--porcelain", "--", push, `${summary.head}:${verificationRef}`],
+      { allowFailure: true, env: this.repositoryEnvironment() },
+    );
+    if (write.code !== 0) {
+      const diagnostic = gitDiagnostic(write, "write");
+      return {
+        remote: safeRemoteUrl(push),
+        head: summary.head,
+        read: true,
+        write: false,
+        emptyRemote,
+        checkedAt,
+        ...diagnostic,
+        legacySshCommand,
+      };
+    }
+    return {
+      remote: safeRemoteUrl(push),
+      head: summary.head,
+      read: true,
+      write: true,
+      emptyRemote,
+      checkedAt,
+      code: legacySshCommand ? "legacy-ssh-command" : "ok",
+      message: emptyRemote
+        ? "Чтение и запись подтверждены. В origin пока нет веток."
+        : "Чтение и запись в origin подтверждены.",
+      legacySshCommand,
     };
   }
 
@@ -440,6 +612,93 @@ export class GitInspector {
     return this.repositoryStatus(false);
   }
 
+  async changeOrigin(
+    expectedRemote: string,
+    replacement: string,
+  ): Promise<RepositorySyncStatus> {
+    const currentResult = await this.git(["remote", "get-url", "origin"], { allowFailure: true });
+    if (currentResult.code !== 0) throw new GitInspectorError("origin не настроен", "missing-origin");
+    const current = text(currentResult).trim();
+    const currentPushResult = await this.git(["remote", "get-url", "--push", "origin"]);
+    const currentPush = text(currentPushResult).trim();
+    if (!expectedRemote || safeRemoteUrl(current) !== expectedRemote) {
+      throw new GitInspectorError(
+        "origin изменился после отображения; обновите состояние и попробуйте снова",
+      );
+    }
+    if (!replacement || replacement !== replacement.trim() || replacement.length > 2_048) {
+      throw new GitInspectorError("укажите корректный URL репозитория");
+    }
+    await this.validateRemoteEndpoint(replacement);
+    if (safeRemoteUrl(currentPush) !== expectedRemote) {
+      throw new GitInspectorError(
+        "Для origin настроен отдельный push URL; измените его вручную перед сменой origin.",
+      );
+    }
+    await this.rejectUnsafeRepositoryConfig("--local");
+    await this.rejectUnsafeRepositoryConfig("--worktree");
+    const changed = await this.git(["remote", "set-url", "origin", replacement], {
+      allowFailure: true,
+    });
+    if (changed.code !== 0) {
+      throw new GitInspectorError(`Не удалось изменить origin: ${gitFailure(changed, replacement)}`);
+    }
+    const changedPush = await this.git(
+      ["remote", "set-url", "--push", "origin", replacement],
+      { allowFailure: true },
+    );
+    if (changedPush.code !== 0) {
+      await this.git(["remote", "set-url", "origin", current], { allowFailure: true });
+      throw new GitInspectorError(
+        `Не удалось изменить push URL; прежний origin восстановлен: ${gitFailure(changedPush, replacement)}`,
+      );
+    }
+    const status = await this.repositoryStatus(true);
+    if (status.state !== "error") return status;
+    const restored = await this.git(["remote", "set-url", "origin", current], {
+      allowFailure: true,
+    });
+    const restoredPush = await this.git(
+      ["remote", "set-url", "--push", "origin", currentPush],
+      { allowFailure: true },
+    );
+    if (restored.code !== 0 || restoredPush.code !== 0) {
+      throw new GitInspectorError(
+        "Новый origin недоступен, а автоматический откат URL не удался. Проверьте Git config вручную.",
+      );
+    }
+    throw new GitInspectorError(`Новый origin недоступен; прежний URL восстановлен. ${status.message}`);
+  }
+
+  async legacySshCommandPresent(): Promise<boolean> {
+    const values = await Promise.all([
+      this.git(["config", "--local", "--get", "core.sshCommand"], { allowFailure: true }),
+      this.git(["config", "--worktree", "--get", "core.sshCommand"], { allowFailure: true }),
+    ]);
+    return values.some((result) => result.code === 0 && Boolean(text(result).trim()));
+  }
+
+  async removeLegacySshCommand(): Promise<boolean> {
+    if (!this.repositoryCredential) {
+      throw new GitInspectorError("для миграции сначала создайте управляемый deploy key");
+    }
+    let removed = false;
+    for (const scope of ["--local", "--worktree"] as const) {
+      const current = await this.git(["config", scope, "--get", "core.sshCommand"], {
+        allowFailure: true,
+      });
+      if (current.code !== 0 || !text(current).trim()) continue;
+      const unset = await this.git(["config", scope, "--unset-all", "core.sshCommand"], {
+        allowFailure: true,
+      });
+      if (unset.code !== 0) {
+        throw new GitInspectorError("не удалось удалить старый core.sshCommand");
+      }
+      removed = true;
+    }
+    return removed;
+  }
+
   private verifyExpectedHead(status: RepositorySyncStatus, expectedHead: string): void {
     if (!/^[0-9a-f]{40}$/.test(expectedHead) || expectedHead !== status.head) {
       throw new GitInspectorError(
@@ -506,7 +765,7 @@ export class GitInspector {
     if (result.code !== 0) return;
     const unsafe = text(result).split(/\r?\n/).map((key) => key.trim().toLowerCase()).find((key) =>
       key === "core.askpass" ||
-      key === "core.sshcommand" ||
+      (key === "core.sshcommand" && !this.repositoryCredential) ||
       key.startsWith("include.") ||
       key.startsWith("includeif.") ||
       (key.startsWith("url.") && key.endsWith(".insteadof")) ||
@@ -518,6 +777,7 @@ export class GitInspector {
     if (unsafe) {
       throw new GitInspectorError(
         `Синхронизация отключена: небезопасная project-local Git настройка ${unsafe}.`,
+        "unsafe-config",
       );
     }
   }

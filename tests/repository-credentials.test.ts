@@ -61,3 +61,59 @@ test("refuses invalid identifiers and symlinked credential directories", async (
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("rotates deploy keys in two phases and persists bounded verification and audit state", async () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-repository-rotation-"));
+  try {
+    const dataDir = join(root, "data");
+    mkdirSync(dataDir, { recursive: true });
+    const store = new RepositoryCredentialStore(dataDir);
+    const active = await store.ensure("client", "repo");
+    const candidate = await store.prepareRotation("client", "repo");
+    assert.notEqual(candidate.fingerprint, active.fingerprint);
+    assert.equal((await store.prepareRotation("client", "repo")).fingerprint, candidate.fingerprint);
+
+    await store.setVerification("client", "repo", {
+      remote: "git@example.test:owner/repo.git",
+      head: "a".repeat(40),
+      read: true,
+      write: true,
+      emptyRemote: false,
+      checkedAt: "2026-08-14T12:00:00.000Z",
+      code: "ok",
+      message: "ok",
+      fingerprint: active.fingerprint,
+    });
+    for (let index = 0; index < 205; index += 1) {
+      await store.appendAudit("client", "repo", {
+        at: new Date(1_700_000_000_000 + index).toISOString(),
+        actor: 42,
+        action: "verify",
+        outcome: "success",
+        remote: "git@example.test:owner/repo.git",
+        previousRemote: "",
+        branch: "main",
+        head: "a".repeat(40),
+        code: "ok",
+        message: `entry ${index}`,
+      });
+    }
+    const state = await store.state("client", "repo");
+    assert.equal(state.verification?.fingerprint, active.fingerprint);
+    assert.equal(state.audit.length, 200);
+    assert.equal(state.audit[0]?.message, "entry 5");
+    const statePath = join(dataDir, "repository-credentials", "client", "repo", "state.json");
+    assert.equal(statSync(statePath).mode & 0o777, 0o600);
+    assert.doesNotMatch(readFileSync(statePath, "utf8"), /BEGIN OPENSSH PRIVATE KEY/);
+
+    const activated = await store.activateRotation("client", "repo");
+    assert.equal(activated.fingerprint, candidate.fingerprint);
+    assert.equal(await store.inspectRotation("client", "repo"), null);
+    const cancelled = await store.prepareRotation("client", "repo");
+    assert.notEqual(cancelled.fingerprint, activated.fingerprint);
+    await store.cancelRotation("client", "repo");
+    assert.equal(await store.inspectRotation("client", "repo"), null);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

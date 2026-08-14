@@ -6,7 +6,12 @@ import {
   DeploymentControllerError,
   type DeploymentControl,
 } from "./deployment-controller.js";
-import { GitInspector, GitInspectorError } from "./git-inspector.js";
+import {
+  GitInspector,
+  GitInspectorError,
+  type RepositoryAccessVerification,
+  type RepositorySyncStatus,
+} from "./git-inspector.js";
 import { ProjectCatalogError, type ProjectCatalog } from "./project-catalog.js";
 import {
   ProjectRunnerClient,
@@ -16,6 +21,11 @@ import {
 import { RunArtifactStore } from "./run-artifacts.js";
 import {
   type ManagedRepositoryCredential,
+  type RepositoryAuditEntry,
+  type RepositoryDiagnosticCode,
+  type RepositoryExperienceState,
+  type RepositoryRotationCandidate,
+  type RepositoryVerificationRecord,
   RepositoryCredentialStore,
 } from "./repository-credentials.js";
 import type { Conversation, StateStore } from "./state-store.js";
@@ -34,7 +44,27 @@ interface ViewerRepositoryConnection {
   fingerprint: string;
   canCreateDeployKey: boolean;
   hostKeyPolicy: "" | "trust-on-first-use";
+  rotation: {
+    publicKey: string;
+    fingerprint: string;
+    preparedAt: string;
+  } | null;
 }
+
+const REPOSITORY_ACTIONS = new Set([
+  "pull",
+  "push",
+  "connect",
+  "verify",
+  "migrate-legacy",
+  "preview-origin",
+  "change-origin",
+  "rollback-origin",
+  "prepare-rotation",
+  "verify-rotation",
+  "activate-rotation",
+  "cancel-rotation",
+]);
 
 class ViewerHttpError extends Error {
   constructor(readonly status: number, message: string) {
@@ -301,31 +331,19 @@ export class ProjectViewerServer {
       const scope = await this.scope(conversationId, telegramUser);
       const activeRun = this.state.get(scope.conversation.id).activeTurnId !== null;
       const operationKey = await scope.inspector.commonDirectory();
-      const context = await this.repositoryContext(scope);
-      const repository = await this.withRepositoryOperation(operationKey, async () =>
-        context.inspector.repositoryStatus(!activeRun)
-      );
-      json(response, 200, {
-        repository: activeRun
-          ? {
-              ...repository,
-              canPush: false,
-              canPull: false,
-              message: `${repository.message} Дождитесь завершения активного Codex run.`,
-            }
-          : repository,
-        connection: this.repositoryConnection(repository, context.credential),
-        activeRun,
+      const payload = await this.withRepositoryOperation(operationKey, async () => {
+        const context = await this.repositoryContext(scope);
+        const repository = await context.inspector.repositoryStatus(!activeRun);
+        return this.repositoryPayload(scope, repository, context, activeRun);
       });
+      json(response, 200, payload);
       return;
     }
     if (request.method === "POST" && url.pathname === "/api/viewer/repository") {
       const body = await requestBody(request) as Record<string, unknown> | null;
       const requestedConversation = String(body?.conversation ?? "");
       const action = String(body?.action ?? "");
-      const expectedHead = String(body?.expectedHead ?? "");
-      const remoteUrl = String(body?.remoteUrl ?? "");
-      if (action !== "pull" && action !== "push" && action !== "connect") {
+      if (!REPOSITORY_ACTIONS.has(action)) {
         throw new ViewerHttpError(400, "неизвестное действие с репозиторием");
       }
       const scope = await this.scope(requestedConversation, telegramUser);
@@ -334,52 +352,9 @@ export class ProjectViewerServer {
         if (this.state.get(scope.conversation.id).activeTurnId !== null) {
           throw new ViewerHttpError(409, "дождитесь завершения активного Codex run");
         }
-        try {
-          if (action === "connect") {
-            const current = await scope.inspector.summary();
-            if (!current.remote && !remoteUrl) {
-              throw new ViewerHttpError(400, "укажите SSH URL репозитория");
-            }
-            if (current.remote && remoteUrl) {
-              throw new ViewerHttpError(409, "origin уже настроен; его замена через Mini App запрещена");
-            }
-            if (current.remote && !this.supportsManagedSsh(current.remote)) {
-              throw new ViewerHttpError(409, "deploy key можно подключить только к SSH origin");
-            }
-            if (!current.remote) await scope.inspector.validateManagedSshOrigin(remoteUrl);
-            const credential = await this.repositoryCredentials.ensure(
-              scope.project.id,
-              scope.project.workspace,
-            );
-            const inspector = new GitInspector(scope.inspector.root, credential);
-            const connected = current.remote
-              ? await inspector.repositoryStatus(false)
-              : await inspector.connectOrigin(remoteUrl);
-            const repository = {
-              ...connected,
-              canPush: false,
-              canPull: false,
-              message:
-                "Deploy key создан. Добавьте публичный ключ в Git-сервис с правом записи, затем проверьте доступ.",
-            };
-            return { repository, credential };
-          }
-          const context = await this.repositoryContext(scope);
-          const repository = action === "pull"
-            ? await context.inspector.pullCurrentBranch(expectedHead)
-            : await context.inspector.pushCurrentBranch(expectedHead);
-          return { repository, credential: context.credential };
-        } catch (error) {
-          if (error instanceof GitInspectorError) {
-            throw new ViewerHttpError(409, error.message);
-          }
-          throw error;
-        }
+        return this.repositoryAction(scope, telegramUser, action, body ?? {});
       });
-      json(response, 200, {
-        repository: result.repository,
-        connection: this.repositoryConnection(result.repository, result.credential),
-      });
+      json(response, 200, result);
       return;
     }
     if (request.method === "PUT" && url.pathname === "/api/viewer/environment") {
@@ -627,23 +602,387 @@ export class ProjectViewerServer {
     }
   }
 
+  private async repositoryAction(
+    scope: ViewerScope,
+    telegramUser: number,
+    action: string,
+    body: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const expectedHead = String(body.expectedHead ?? "");
+    const expectedRemote = String(body.expectedRemote ?? "");
+    const remoteUrl = String(body.remoteUrl ?? "");
+    let context = await this.repositoryContext(scope);
+    let summary = await context.inspector.summary();
+    let previousRemote = "";
+    try {
+      let repository: RepositorySyncStatus;
+      let preview: RepositoryAccessVerification | null = null;
+      let outcome: "success" | "error" = "success";
+      let code: RepositoryDiagnosticCode = "ok";
+      let message = "Операция выполнена.";
+
+      if (action === "connect") {
+        if (!summary.remote && !remoteUrl) {
+          throw new ViewerHttpError(400, "укажите SSH URL репозитория");
+        }
+        if (summary.remote && remoteUrl) {
+          throw new ViewerHttpError(409, "origin уже настроен; используйте безопасную смену URL");
+        }
+        if (summary.remote && !this.supportsManagedSsh(summary.remote)) {
+          throw new ViewerHttpError(409, "deploy key можно подключить только к SSH origin");
+        }
+        if (!summary.remote) await scope.inspector.validateManagedSshOrigin(remoteUrl);
+        const credential = await this.repositoryCredentials.ensure(
+          scope.project.id,
+          scope.project.workspace,
+        );
+        context = {
+          inspector: new GitInspector(scope.inspector.root, credential),
+          credential,
+          rotation: await this.repositoryCredentials.inspectRotation(
+            scope.project.id,
+            scope.project.workspace,
+          ),
+        };
+        repository = summary.remote
+          ? await context.inspector.repositoryStatus(false)
+          : await context.inspector.connectOrigin(remoteUrl);
+        await this.repositoryCredentials.setVerification(
+          scope.project.id,
+          scope.project.workspace,
+          null,
+        );
+        repository = {
+          ...repository,
+          canPush: false,
+          canPull: false,
+          message:
+            "Deploy key создан. Добавьте публичный ключ в Git-сервис с правом записи, затем проверьте доступ.",
+        };
+        message = "Создан управляемый deploy key.";
+      } else if (action === "verify") {
+        preview = await context.inspector.verifyRepositoryAccess();
+        await this.repositoryCredentials.setVerification(
+          scope.project.id,
+          scope.project.workspace,
+          this.verificationRecord(preview, context.credential?.fingerprint ?? ""),
+        );
+        repository = await context.inspector.repositoryStatus(preview.read);
+        outcome = preview.read && preview.write ? "success" : "error";
+        code = preview.code;
+        message = preview.message;
+      } else if (action === "migrate-legacy") {
+        if (!context.credential) throw new ViewerHttpError(409, "сначала создайте deploy key");
+        preview = await context.inspector.verifyRepositoryAccess();
+        if (!preview.read || !preview.write) {
+          await this.repositoryCredentials.setVerification(
+            scope.project.id,
+            scope.project.workspace,
+            this.verificationRecord(preview, context.credential.fingerprint),
+          );
+          throw new GitInspectorError(
+            `Старый SSH-параметр сохранён: ${preview.message}`,
+            preview.code,
+          );
+        }
+        const removed = await context.inspector.removeLegacySshCommand();
+        const migrated = {
+          ...preview,
+          code: "ok" as const,
+          message: removed
+            ? "Доступ подтверждён; старый core.sshCommand удалён."
+            : "Старый core.sshCommand уже отсутствует.",
+          legacySshCommand: false,
+        };
+        await this.repositoryCredentials.setVerification(
+          scope.project.id,
+          scope.project.workspace,
+          this.verificationRecord(migrated, context.credential.fingerprint),
+        );
+        repository = await context.inspector.repositoryStatus(true);
+        message = migrated.message;
+      } else if (action === "preview-origin") {
+        if (!summary.remote) throw new ViewerHttpError(409, "сначала подключите origin");
+        if (!remoteUrl || remoteUrl === summary.remote) {
+          throw new ViewerHttpError(400, "укажите новый URL origin");
+        }
+        preview = await context.inspector.verifyRepositoryAccess(remoteUrl);
+        repository = await context.inspector.repositoryStatus(false);
+        outcome = preview.read && preview.write ? "success" : "error";
+        code = preview.code;
+        message = preview.message;
+      } else if (action === "change-origin") {
+        if (body.confirmed !== true) {
+          throw new ViewerHttpError(400, "подтвердите смену origin");
+        }
+        if (!summary.remote || expectedRemote !== summary.remote) {
+          throw new ViewerHttpError(409, "origin изменился; обновите состояние");
+        }
+        preview = await context.inspector.verifyRepositoryAccess(remoteUrl);
+        if (!preview.read || !preview.write) {
+          throw new GitInspectorError(
+            `URL не изменён: ${preview.message}`,
+            preview.code,
+          );
+        }
+        previousRemote = summary.remote;
+        repository = await context.inspector.changeOrigin(expectedRemote, remoteUrl);
+        await this.repositoryCredentials.setPreviousRemote(
+          scope.project.id,
+          scope.project.workspace,
+          {
+            previous: previousRemote,
+            replacement: repository.remote,
+            changedAt: new Date().toISOString(),
+            changedBy: telegramUser,
+          },
+        );
+        await this.repositoryCredentials.setVerification(
+          scope.project.id,
+          scope.project.workspace,
+          this.verificationRecord(preview, context.credential?.fingerprint ?? ""),
+        );
+        message = "Origin изменён после успешной проверки чтения и записи.";
+      } else if (action === "rollback-origin") {
+        const experience = await this.repositoryCredentials.state(
+          scope.project.id,
+          scope.project.workspace,
+        );
+        const rollback = experience.previousRemote;
+        if (!rollback || summary.remote !== rollback.replacement) {
+          throw new ViewerHttpError(409, "нет доступной точки отката origin");
+        }
+        preview = await context.inspector.verifyRepositoryAccess(rollback.previous);
+        if (!preview.read || !preview.write) {
+          throw new GitInspectorError(
+            `Откат не выполнен: ${preview.message}`,
+            preview.code,
+          );
+        }
+        previousRemote = summary.remote;
+        repository = await context.inspector.changeOrigin(summary.remote, rollback.previous);
+        await this.repositoryCredentials.setPreviousRemote(
+          scope.project.id,
+          scope.project.workspace,
+          null,
+        );
+        await this.repositoryCredentials.setVerification(
+          scope.project.id,
+          scope.project.workspace,
+          this.verificationRecord(preview, context.credential?.fingerprint ?? ""),
+        );
+        message = "Прежний origin восстановлен.";
+      } else if (action === "prepare-rotation") {
+        if (!context.credential) {
+          throw new ViewerHttpError(409, "ротация доступна только для управляемого deploy key");
+        }
+        context.rotation = await this.repositoryCredentials.prepareRotation(
+          scope.project.id,
+          scope.project.workspace,
+        );
+        repository = await context.inspector.repositoryStatus(false);
+        message = "Новый deploy key создан; добавьте его в Git-сервис.";
+      } else if (action === "verify-rotation") {
+        if (!context.rotation) throw new ViewerHttpError(409, "сначала создайте новый ключ");
+        const candidateInspector = new GitInspector(scope.inspector.root, context.rotation);
+        preview = await candidateInspector.verifyRepositoryAccess();
+        await this.repositoryCredentials.setRotationVerification(
+          scope.project.id,
+          scope.project.workspace,
+          this.verificationRecord(preview, context.rotation.fingerprint),
+        );
+        repository = await context.inspector.repositoryStatus(false);
+        outcome = preview.read && preview.write ? "success" : "error";
+        code = preview.code;
+        message = preview.message;
+      } else if (action === "activate-rotation") {
+        if (!context.rotation) throw new ViewerHttpError(409, "новый ключ не подготовлен");
+        const candidateInspector = new GitInspector(scope.inspector.root, context.rotation);
+        preview = await candidateInspector.verifyRepositoryAccess();
+        if (!preview.read || !preview.write) {
+          await this.repositoryCredentials.setRotationVerification(
+            scope.project.id,
+            scope.project.workspace,
+            this.verificationRecord(preview, context.rotation.fingerprint),
+          );
+          throw new GitInspectorError(
+            `Новый ключ не активирован: ${preview.message}`,
+            preview.code,
+          );
+        }
+        const credential = await this.repositoryCredentials.activateRotation(
+          scope.project.id,
+          scope.project.workspace,
+        );
+        context = { inspector: new GitInspector(scope.inspector.root, credential), credential, rotation: null };
+        await this.repositoryCredentials.setVerification(
+          scope.project.id,
+          scope.project.workspace,
+          this.verificationRecord(preview, credential.fingerprint),
+        );
+        repository = await context.inspector.repositoryStatus(true);
+        message = "Новый deploy key активирован. Старый ключ можно удалить в Git-сервисе.";
+      } else if (action === "cancel-rotation") {
+        await this.repositoryCredentials.cancelRotation(scope.project.id, scope.project.workspace);
+        context.rotation = null;
+        repository = await context.inspector.repositoryStatus(false);
+        message = "Ротация ключа отменена.";
+      } else {
+        repository = action === "pull"
+          ? await context.inspector.pullCurrentBranch(expectedHead)
+          : await context.inspector.pushCurrentBranch(expectedHead);
+        message = action === "pull"
+          ? "Коммиты получены из origin."
+          : "Коммиты отправлены в origin.";
+      }
+
+      summary = repository;
+      await this.appendRepositoryAudit(
+        scope,
+        telegramUser,
+        action,
+        outcome,
+        summary,
+        code,
+        message,
+        previousRemote,
+      );
+      const payload = await this.repositoryPayload(scope, repository, context, false);
+      return preview ? { ...payload, preview } : payload;
+    } catch (error) {
+      const code = error instanceof GitInspectorError ? error.code : "unknown";
+      const message = error instanceof Error ? error.message : "Неизвестная ошибка.";
+      await this.appendRepositoryAudit(
+        scope,
+        telegramUser,
+        action,
+        "error",
+        summary,
+        code,
+        message,
+        previousRemote,
+      ).catch(() => undefined);
+      if (error instanceof GitInspectorError) {
+        throw new ViewerHttpError(409, error.message);
+      }
+      throw error;
+    }
+  }
+
+  private verificationRecord(
+    verification: RepositoryAccessVerification,
+    fingerprint: string,
+  ): RepositoryVerificationRecord {
+    return {
+      remote: verification.remote,
+      head: verification.head,
+      read: verification.read,
+      write: verification.write,
+      emptyRemote: verification.emptyRemote,
+      checkedAt: verification.checkedAt,
+      code: verification.code,
+      message: verification.message,
+      fingerprint,
+    };
+  }
+
+  private async appendRepositoryAudit(
+    scope: ViewerScope,
+    actor: number,
+    action: string,
+    outcome: "success" | "error",
+    repository: { remote: string; branch: string; head: string },
+    code: RepositoryDiagnosticCode,
+    message: string,
+    previousRemote = "",
+  ): Promise<void> {
+    const entry: RepositoryAuditEntry = {
+      at: new Date().toISOString(),
+      actor,
+      action,
+      outcome,
+      remote: repository.remote,
+      previousRemote,
+      branch: repository.branch,
+      head: repository.head,
+      code,
+      message,
+    };
+    await this.repositoryCredentials.appendAudit(scope.project.id, scope.project.workspace, entry);
+  }
+
+  private async repositoryPayload(
+    scope: ViewerScope,
+    repository: RepositorySyncStatus,
+    context: {
+      inspector: GitInspector;
+      credential: ManagedRepositoryCredential | null;
+      rotation: RepositoryRotationCandidate | null;
+    },
+    activeRun: boolean,
+  ): Promise<Record<string, unknown>> {
+    const experience = await this.repositoryCredentials.state(scope.project.id, scope.project.workspace);
+    const verification = this.currentVerification(repository, context.credential, experience);
+    const gated = activeRun
+      ? {
+          ...repository,
+          canPush: false,
+          canPull: false,
+          message: `${repository.message} Дождитесь завершения активного Codex run.`,
+        }
+      : verification
+        ? {
+            ...repository,
+            canPush: repository.canPush && verification.write,
+            canPull: repository.canPull && verification.read,
+          }
+        : context.credential
+          ? { ...repository, canPush: false, canPull: false }
+          : repository;
+    return {
+      repository: gated,
+      connection: this.repositoryConnection(repository, context.credential, context.rotation),
+      experience: {
+        verification: experience.verification,
+        rotationVerification: experience.rotationVerification,
+        previousRemote: experience.previousRemote,
+        audit: [...experience.audit].reverse().slice(0, 50),
+      },
+      activeRun,
+    };
+  }
+
+  private currentVerification(
+    repository: RepositorySyncStatus,
+    credential: ManagedRepositoryCredential | null,
+    experience: RepositoryExperienceState,
+  ): RepositoryVerificationRecord | null {
+    const verification = experience.verification;
+    if (!verification || verification.remote !== repository.remote) return null;
+    if (verification.fingerprint !== (credential?.fingerprint ?? "")) return null;
+    return verification;
+  }
+
   private async repositoryContext(scope: ViewerScope): Promise<{
     inspector: GitInspector;
     credential: ManagedRepositoryCredential | null;
+    rotation: RepositoryRotationCandidate | null;
   }> {
-    const credential = await this.repositoryCredentials.inspect(
-      scope.project.id,
-      scope.project.workspace,
-    );
+    const [credential, rotation] = await Promise.all([
+      this.repositoryCredentials.inspect(scope.project.id, scope.project.workspace),
+      this.repositoryCredentials.inspectRotation(scope.project.id, scope.project.workspace),
+    ]);
     return {
       inspector: credential ? new GitInspector(scope.inspector.root, credential) : scope.inspector,
       credential,
+      rotation,
     };
   }
 
   private repositoryConnection(
     repository: { remote: string },
     credential: ManagedRepositoryCredential | null,
+    rotation: RepositoryRotationCandidate | null,
   ): ViewerRepositoryConnection {
     return {
       mode: credential ? "managed-ssh" : repository.remote ? "external" : "none",
@@ -653,6 +992,13 @@ export class ProjectViewerServer {
         !repository.remote || this.supportsManagedSsh(repository.remote)
       ),
       hostKeyPolicy: credential ? "trust-on-first-use" : "",
+      rotation: rotation
+        ? {
+            publicKey: rotation.publicKey,
+            fingerprint: rotation.fingerprint,
+            preparedAt: rotation.preparedAt,
+          }
+        : null,
     };
   }
 
