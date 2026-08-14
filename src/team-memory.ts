@@ -318,6 +318,17 @@ function serviceSummary(message: TelegramObject): string {
   return "[Служебное событие Telegram]";
 }
 
+export function telegramExplicitReply(message: TelegramObject): TelegramObject | null {
+  const reply = record(message.reply_to_message);
+  if (!reply) return null;
+  const replyMessageId = Number(reply.message_id ?? 0);
+  const topicRootMessageId = Number(message.message_thread_id ?? 0);
+  // Telegram represents an ordinary forum-topic message as a reply to the
+  // topic's root service message. That transport link is not a human reply.
+  if (topicRootMessageId > 0 && replyMessageId === topicRootMessageId) return null;
+  return reply;
+}
+
 export function telegramTeamEventInput(
   message: TelegramObject,
   administratorUserId: number,
@@ -335,7 +346,7 @@ export function telegramTeamEventInput(
   const messageId = Number(message.message_id ?? 0);
   if (!senderId || !messageId) return null;
   const topicId = Number(message.message_thread_id ?? 0);
-  const reply = record(message.reply_to_message);
+  const reply = telegramExplicitReply(message);
   const text = String(message.text ?? message.caption ?? "").trim();
   const attachments = telegramEventAttachments(message);
   const kind = eventKind ?? (text.startsWith("/") ? "command" : text || attachments.length > 0 ? "message" : "service");

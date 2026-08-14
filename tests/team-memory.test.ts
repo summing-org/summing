@@ -4,6 +4,7 @@ import {
   parseTeamSynthesisResponse,
   TEAM_SYNTHESIS_OUTPUT_SCHEMA,
   telegramEventAttachments,
+  telegramExplicitReply,
   telegramTeamEventInput,
 } from "../src/team-memory.js";
 import type { TeamEvent } from "../src/state-store.js";
@@ -53,6 +54,16 @@ test("normalizes Telegram messages into provider-neutral Team Space evidence", (
     occurredAt: 1_700_000_000,
     administratorUserId: 1,
   });
+  const implicitTopicReply = {
+    ...message,
+    message_id: 56,
+    reply_to_message: { message_id: 7, text: "корень forum topic" },
+  };
+  assert.equal(telegramExplicitReply(implicitTopicReply), null);
+  assert.equal(
+    telegramTeamEventInput(implicitTopicReply, 1)?.replyToExternalEventId,
+    "",
+  );
 });
 
 test("normalizes service events without inventing participant intent", () => {

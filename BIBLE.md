@@ -42,6 +42,11 @@ or Project owner explicitly addresses or replies to another human in a group sou
 message is ambient evidence and must not start or steer a write-capable turn. SUMMING stays
 silent by default and may later ask one concise question only when the human conversation
 contains a material ambiguity, contradiction, blocker, risk, or unresolved decision.
+Provider transport structure is not conversational intent: an implicit forum-topic root
+link must never be mistaken for a reply to a person. A real reply remains an explicit,
+durable relationship to its quoted message and author across routing, restart, direct Q&A,
+and Team Space synthesis; a bare mention in such a reply means "attend to this context",
+not merely "announce your presence".
 
 A source that admits SUMMING creates or joins a Team Space immediately. The Team Space is
 the durable boundary for people, sources, evidence, derived knowledge, uncertainty, and

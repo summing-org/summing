@@ -660,6 +660,42 @@ export class StateStore {
         CREATE INDEX IF NOT EXISTS pending_inputs_run_lookup
         ON pending_inputs(run_id, id)
       `);
+      // Older Telegram ingestion treated the implicit forum-topic root link as
+      // a reply. Repair those transport-only edges before synthesis sees them.
+      this.db.exec(`
+        UPDATE team_knowledge
+        SET status = 'needs-review', updated_at = unixepoch('subsec')
+        WHERE id IN (
+          SELECT team_knowledge_evidence.knowledge_id
+          FROM team_knowledge_evidence
+          JOIN team_events ON team_events.id = team_knowledge_evidence.event_id
+          JOIN team_sources ON team_sources.id = team_events.source_id
+          WHERE team_sources.external_thread_id <> '0'
+            AND team_sources.external_thread_id = team_events.reply_to_external_event_id
+        );
+        UPDATE team_spaces
+        SET summary_status = 'needs-review', updated_at = unixepoch('subsec')
+        WHERE summary <> '' AND id IN (
+          SELECT team_events.space_id
+          FROM team_events
+          JOIN team_sources ON team_sources.id = team_events.source_id
+          WHERE team_sources.external_thread_id <> '0'
+            AND team_sources.external_thread_id = team_events.reply_to_external_event_id
+        );
+        UPDATE team_events
+        SET reply_to_external_event_id = '',
+            synthesis_state = CASE
+              WHEN synthesis_state = 'redacted' THEN 'redacted'
+              ELSE 'pending'
+            END
+        WHERE reply_to_external_event_id <> ''
+          AND EXISTS (
+            SELECT 1 FROM team_sources
+            WHERE team_sources.id = team_events.source_id
+              AND team_sources.external_thread_id <> '0'
+              AND team_sources.external_thread_id = team_events.reply_to_external_event_id
+          )
+      `);
       const runColumns = this.db.prepare("PRAGMA table_info(runs)").all() as Row[];
       if (!runColumns.some((column) => column.name === "access_mode")) {
         this.db.exec(
@@ -1274,6 +1310,25 @@ export class StateStore {
     const row = this.db.prepare("SELECT * FROM team_events WHERE id = ?").get(eventId) as
       | Row
       | undefined;
+    return row ? this.toTeamEvent(row) : null;
+  }
+
+  teamEventByExternalId(sourceId: string, externalEventId: string): TeamEvent | null {
+    if (!sourceId || !externalEventId) return null;
+    const row = this.db.prepare(`
+      SELECT * FROM team_events
+      WHERE source_id = ? AND synthesis_state <> 'redacted'
+        AND (
+          external_event_id = ?
+          OR (
+            event_kind = 'edit'
+            AND instr(external_event_id, ? || ':') = 1
+          )
+        )
+      ORDER BY CASE WHEN event_kind = 'edit' THEN 1 ELSE 0 END DESC,
+               occurred_at DESC, id DESC
+      LIMIT 1
+    `).get(sourceId, externalEventId, externalEventId) as Row | undefined;
     return row ? this.toTeamEvent(row) : null;
   }
 

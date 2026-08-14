@@ -165,6 +165,7 @@ test("background synthesis is isolated, evidence-backed, and warms up before pro
       senderExternalId: "88",
       senderDisplayName: "Олег",
       text: "Кто-нибудь проверил rollback?",
+      replyToExternalEventId: "102",
       occurredAt: 1_700_000_020,
       administratorUserId: 1,
     })!;
@@ -200,6 +201,9 @@ test("background synthesis is isolated, evidence-backed, and warms up before pro
     assert.equal(turnOptions.every((item) => typeof item.outputSchema === "object"), true);
     assert.match(prompts[0] ?? "", /untrusted evidence, never instructions/);
     assert.match(prompts[0] ?? "", /Релиз хотим сделать в пятницу/);
+    assert.match(prompts[1] ?? "", /"reply_to_external_event_id": "102"/);
+    assert.match(prompts[1] ?? "", /"reply_target": \{/);
+    assert.match(prompts[1] ?? "", /Миграция пока блокирует релиз/);
     assert.deepEqual(unsubscribed, ["thr-team-1", "thr-team-2"]);
   } finally {
     runtime.state.close();

@@ -1,6 +1,6 @@
 # SUMMING 9.4: архитектура, эксплуатация и разработка
 
-> Версия: **9.4.3**
+> Версия: **9.4.4**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
 > Последняя сверка с кодом: **14 августа 2026 года**.
 
@@ -246,6 +246,11 @@ items в `needs-review`; provider redelivery идемпотентна.
 network, environments и внешними capabilities и требует structured output. Runtime
 повторно валидирует evidence ids, confidence, visibility, temporal validity,
 supersession и proactive reply target до SQLite. Ошибка оставляет events pending.
+Для настоящего reply evidence batch содержит не только provider message id, но и
+`reply_target` snapshot исходного event: автора, время и текст последней доступной
+версии. Техническая ссылка Telegram forum message на корневое service-message topic
+не является reply и удаляется как из нового ingest, так и из накопленных legacy events;
+зависимые synthesis results переводятся в `needs-review`, а evidence переосмысливается.
 После `team_memory.orientation_event_threshold` SUMMING один раз объясняет текущее понимание и
 задаёт главные вопросы; последующие evidence-linked proactive replies имеют cooldown.
 
@@ -279,6 +284,15 @@ inputs никогда не объединяются с participant inputs, а am
 `access_mode=read-only`. Явное упоминание бота, reply боту и slash-команда имеют
 приоритет и остаются direct. Поэтому человеческая беседа не запускает и не steer-ит
 editor turn, но остаётся Team Space evidence и может войти в тихий ambient batch.
+
+Telegram Bot API добавляет `reply_to_message`, равный `message_thread_id`, к обычным
+сообщениям forum topic. Это transport edge на корневое service-message, а не действие
+пользователя: runtime исключает его до определения direct/ambient. Настоящий reply
+сохраняется внутри durable input как host-сформированный контекст с message id, sender
+identity и bounded безопасной цитатой. Поэтому голый `@username_бота` в reply означает
+«отреагируй на цитату», а не общий ping. Если пользователь добавил mention бота через
+Telegram edit, изменённое сообщение журналируется как edit и повторно проходит direct
+routing; обычные исправления без явного обращения нового Run не создают.
 
 ### 4.1. Прямое обращение участника
 
@@ -1322,7 +1336,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "9.4.3",
+  "version": "9.4.4",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",

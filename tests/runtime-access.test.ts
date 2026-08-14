@@ -60,6 +60,7 @@ test("owners control projects while group participants get read-only Q&A", async
     chatTitle = "",
     repliedText = "",
     replyToUserId = 0,
+    replyMessageId = 500,
   ): Promise<void> => {
     messageId += 1;
     await handleMessage({
@@ -75,7 +76,7 @@ test("owners control projects while group participants get read-only Q&A", async
       ...(replyToBot || replyToUserId
         ? {
             reply_to_message: {
-              message_id: 500,
+              message_id: replyMessageId,
               from: replyToBot
                 ? { id: 500, is_bot: true, username: "summing_bot" }
                 : { id: replyToUserId, is_bot: false, username: "teammate" },
@@ -291,6 +292,86 @@ test("owners control projects while group participants get read-only Q&A", async
     runtime.state.consume(runtime.state.pendingAll(bound.id).map((item) => item.id));
     startedConversation = "";
 
+    await send(
+      42,
+      "подтянул, чекай",
+      -100,
+      "supergroup",
+      5,
+      false,
+      "",
+      "корень forum topic",
+      42,
+      5,
+    );
+    assert.equal(startedConversation, bound.id);
+    assert.deepEqual(
+      runtime.state.pendingAll(bound.id).map((item) => [
+        item.text,
+        item.access,
+        item.responseMode,
+      ]),
+      [["подтянул, чекай", "write", "direct"]],
+    );
+    runtime.state.consume(runtime.state.pendingAll(bound.id).map((item) => item.id));
+    startedConversation = "";
+
+    await send(
+      42,
+      "@summing_bot",
+      -100,
+      "supergroup",
+      5,
+      false,
+      "",
+      "подтянул, чекай",
+      42,
+      639,
+    );
+    assert.equal(startedConversation, bound.id);
+    const explicitReplyInput = runtime.state.pendingAll(bound.id)[0]!;
+    assert.equal(explicitReplyInput.access, "write");
+    assert.equal(explicitReplyInput.responseMode, "direct");
+    assert.match(explicitReplyInput.text, /SUMMING transport context/);
+    assert.match(explicitReplyInput.text, /"message_id": 639/);
+    assert.match(explicitReplyInput.text, /"text": "подтянул, чекай"/);
+    assert.match(explicitReplyInput.text, /respond to the quoted message/);
+    runtime.state.consume([explicitReplyInput.id]);
+    startedConversation = "";
+
+    const handleTeamEditedMessage = (
+      runtime as unknown as {
+        handleTeamEditedMessage(
+          message: TelegramObject,
+          providerUpdateId?: string,
+        ): Promise<void>;
+      }
+    ).handleTeamEditedMessage.bind(runtime);
+    await handleTeamEditedMessage({
+      message_id: 641,
+      message_thread_id: 5,
+      edit_date: 1_700_000_200,
+      text: "@summing_bot алё братело!",
+      from: { id: 42 },
+      chat: { id: -100, type: "supergroup", title: "dev", is_forum: true },
+      reply_to_message: {
+        message_id: 5,
+        from: { id: 42, is_bot: false },
+        text: "корень forum topic",
+      },
+    }, "edited-641");
+    assert.equal(startedConversation, bound.id);
+    assert.deepEqual(
+      runtime.state.pendingAll(bound.id).map((item) => [
+        item.text,
+        item.access,
+        item.responseMode,
+      ]),
+      [["@summing_bot алё братело!", "write", "direct"]],
+    );
+    runtime.state.consume(runtime.state.pendingAll(bound.id).map((item) => item.id));
+    startedConversation = "";
+
     await send(42, "проверь текущий статус проекта", -100, "supergroup", 5);
     assert.equal(startedConversation, bound.id);
     assert.deepEqual(
@@ -344,6 +425,20 @@ test("owners control projects while group participants get read-only Q&A", async
       unboundQuestions[2]?.context.at(-1)?.text,
       "Первый пункт: сроки. Второй пункт: риски.",
     );
+    await send(
+      999,
+      "@summing_bot",
+      -100,
+      "supergroup",
+      6,
+      false,
+      "",
+      "подтянул, чекай",
+      42,
+      638,
+    );
+    assert.match(unboundQuestions[3]?.text ?? "", /SUMMING transport context/);
+    assert.match(unboundQuestions[3]?.text ?? "", /"text": "подтянул, чекай"/);
 
     for (let topic = 1; topic <= 101; topic += 1) {
       await send(777, `Фоновый контекст ${topic}`, -400, "supergroup", topic);

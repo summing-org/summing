@@ -286,6 +286,10 @@ test("Team Space journals evidence, preserves provenance, and honors erasure", (
     assert.equal(duplicate.id, second.id);
     const space = store.teamSpaceForProvider("telegram", "-100500")!;
     assert.equal(store.teamEventCount(space.id), 2);
+    assert.equal(
+      store.teamEventByExternalId(second.sourceId, "101")?.id,
+      first.id,
+    );
     assert.deepEqual(
       store.pendingTeamEvents(space.id).map((event) => [
         event.id,
@@ -385,6 +389,63 @@ test("Team Space journals evidence, preserves provenance, and honors erasure", (
     } catch {
       // The persistence assertion already closed this handle.
     }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("repairs legacy forum-root reply edges", () => {
+  const { root, path, store } = tempStore();
+  try {
+    const event = store.recordTeamEvent({
+      provider: "telegram",
+      externalSpaceId: "-100500",
+      externalThreadId: "17",
+      spaceName: "Engineering",
+      sourceTitle: "Backend",
+      externalEventId: "101",
+      eventKind: "message",
+      senderExternalId: "42",
+      senderDisplayName: "Маша",
+      text: "Обычное сообщение внутри forum topic",
+      replyToExternalEventId: "17",
+      occurredAt: 1_700_000_100,
+      administratorUserId: 1,
+    })!;
+    assert.equal(store.teamEvent(event.id)?.replyToExternalEventId, "17");
+    store.applyTeamSynthesis(event.spaceId, [event.id], {
+      summary: "Legacy summary built from a transport-only edge.",
+      knowledge: [{
+        kind: "fact",
+        subject: "forum reply",
+        statement: "Сообщение якобы отвечало корню топика.",
+        confidence: 0.8,
+        status: "active",
+        visibility: "space",
+        visibilityRef: "",
+        evidenceEventIds: [event.id],
+        supersedesKnowledgeIds: [],
+        validFrom: 1_700_000_100,
+        validTo: null,
+      }],
+      orientationReady: false,
+      orientationMessage: "",
+      clarificationQuestions: [],
+      proactiveReplyEventId: null,
+      proactiveMessage: "",
+    }, 1_700_000_110);
+    assert.equal(store.teamEvent(event.id)?.synthesisState, "synthesized");
+    store.close();
+
+    const reopened = new StateStore(path);
+    try {
+      assert.equal(reopened.teamEvent(event.id)?.replyToExternalEventId, "");
+      assert.equal(reopened.teamEvent(event.id)?.synthesisState, "pending");
+      assert.equal(reopened.teamKnowledge(event.spaceId)[0]?.status, "needs-review");
+      assert.equal(reopened.teamSpace(event.spaceId)?.summaryStatus, "needs-review");
+    } finally {
+      reopened.close();
+    }
+  } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
