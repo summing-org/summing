@@ -140,7 +140,14 @@ test("owners control projects while group participants get read-only Q&A", async
       message_id: 999,
       message_thread_id: 44,
       date: 1_700_000_100,
-      from: { id: 1 },
+      from: {
+        id: 1,
+        username: "admin",
+        first_name: "Admin",
+        last_name: "Owner",
+        language_code: "ru",
+        is_premium: true,
+      },
       chat: {
         id: -300,
         type: "supergroup",
@@ -150,6 +157,20 @@ test("owners control projects while group participants get read-only Q&A", async
       forum_topic_created: { name: "Backend" },
     });
     assert.equal(runtime.state.telegramTopic(-300, 44)?.name, "Backend");
+    assert.equal(runtime.state.telegramTopicUserCount(-300, 44), 1);
+    assert.deepEqual(runtime.state.listTelegramTopicUsers(-300, 44)[0], {
+      userId: 1,
+      username: "admin",
+      firstName: "Admin",
+      lastName: "Owner",
+      isBot: false,
+      languageCode: "ru",
+      isPremium: true,
+      messageCount: 1,
+      topicCount: 1,
+      firstSeenAt: 1_700_000_100,
+      lastSeenAt: 1_700_000_100,
+    });
 
     await send(1, "/topics", 1, "private");
     assert.match(replies.at(-1) ?? "", /topic_id: 44 «Backend» → не привязан/);
@@ -315,16 +336,20 @@ test("owners control projects while group participants get read-only Q&A", async
     const lastSource = runtime.state.teamSourceForProvider("telegram", "-400", "101")!;
     assert.equal(runtime.state.recentTeamEvents(observedSpace.id, firstSource.id)[0]?.text, "Фоновый контекст 1");
     assert.equal(runtime.state.recentTeamEvents(observedSpace.id, lastSource.id)[0]?.text, "Фоновый контекст 101");
+    assert.equal(runtime.state.telegramChatUserCount(-400), 1);
     await send(777, "/memory_forget_me", -400, "supergroup", 101);
     assert.equal(
       runtime.state.teamEventCountForIdentity(observedSpace.id, "telegram", "777"),
       0,
     );
+    assert.equal(runtime.state.telegramChatUserCount(-400), 0);
     await send(777, "Не сохраняй это", -400, "supergroup", 101);
     assert.equal(runtime.state.teamEventCount(observedSpace.id), 0);
+    assert.equal(runtime.state.telegramChatUserCount(-400), 0);
     await send(777, "/memory_resume_me", -400, "supergroup", 101);
     await send(777, "Снова сохраняй", -400, "supergroup", 101);
     assert.equal(runtime.state.teamEventCount(observedSpace.id), 1);
+    assert.equal(runtime.state.telegramChatUserCount(-400), 1);
 
     await send(999, "Как устроена авторизация?", -100, "supergroup", 5);
     assert.equal(startedConversation, "");

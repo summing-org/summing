@@ -222,6 +222,38 @@ export class ProjectViewerServer {
       json(response, 200, this.adminOverview());
       return;
     }
+    if (request.method === "GET" && url.pathname === "/api/viewer/admin/users") {
+      this.requireAdminAccess(telegramUser);
+      const rawChatId = url.searchParams.get("chatId") ?? "";
+      const chatId = Number(rawChatId);
+      if (!rawChatId || !Number.isSafeInteger(chatId) || chatId === 0) {
+        throw new ViewerHttpError(400, "некорректный chatId");
+      }
+      const chat = this.state.telegramChat(chatId);
+      if (!chat) throw new ViewerHttpError(404, "Telegram-группа ещё не обнаружена SUMMING");
+      const rawTopicId = url.searchParams.get("topicId");
+      if (rawTopicId === null) {
+        json(response, 200, {
+          scope: "chat",
+          chat: { chatId: chat.chatId, title: chat.title, username: chat.username },
+          users: this.state.listTelegramChatUsers(chatId),
+        });
+        return;
+      }
+      const topicId = Number(rawTopicId);
+      if (!rawTopicId || !Number.isSafeInteger(topicId) || topicId < 0) {
+        throw new ViewerHttpError(400, "некорректный topicId");
+      }
+      const topic = this.state.telegramTopic(chatId, topicId);
+      if (!topic) throw new ViewerHttpError(404, "Telegram-топик ещё не обнаружен SUMMING");
+      json(response, 200, {
+        scope: "topic",
+        chat: { chatId: chat.chatId, title: chat.title, username: chat.username },
+        topic: { topicId: topic.topicId, name: topic.name },
+        users: this.state.listTelegramTopicUsers(chatId, topicId),
+      });
+      return;
+    }
     if (request.method === "POST" && url.pathname === "/api/viewer/admin/projects") {
       this.requireAdminAccess(telegramUser);
       const body = await requestBody(request) as Record<string, unknown> | null;
@@ -542,6 +574,7 @@ export class ProjectViewerServer {
       isForum: chat.isForum,
       botStatus: chat.botStatus,
       updatedAt: chat.updatedAt,
+      userCount: this.state.telegramChatUserCount(chat.chatId),
       topics: this.state.listTelegramTopics(chat.chatId).map((topic) => {
         topics += 1;
         const conversation = bindingsByTopic.get(`${topic.chatId}:${topic.topicId}`);
@@ -550,6 +583,7 @@ export class ProjectViewerServer {
           topicId: topic.topicId,
           name: topic.name,
           updatedAt: topic.updatedAt,
+          userCount: this.state.telegramTopicUserCount(topic.chatId, topic.topicId),
           binding: conversation
             ? {
                 conversationId: conversation.id,
@@ -566,7 +600,12 @@ export class ProjectViewerServer {
     }));
     return {
       administratorId: this.config.telegramOwnerId,
-      counts: { projects: projects.length, topics, bindings },
+      counts: {
+        projects: projects.length,
+        topics,
+        bindings,
+        users: this.state.telegramUserCount(),
+      },
       projects,
       chats,
     };

@@ -1,6 +1,6 @@
 # SUMMING 9.4: архитектура, эксплуатация и разработка
 
-> Версия: **9.4.1**
+> Версия: **9.4.2**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
 > Последняя сверка с кодом: **14 августа 2026 года**.
 
@@ -714,11 +714,22 @@ mobile-first интерфейс и JSON API показывают:
 Тот же server публикует отдельный администраторский Mini App на `/admin`, которому
 не нужна заранее созданная Conversation. Он показывает каталог статических и
 управляемых Project, обнаруженные Telegram supergroup/topics, их текущее binding и
-busy-состояние. Администратор может создать пустой managed Git Project или
+busy-состояние, а также число наблюдаемых пользователей в каждой группе и topic.
+По клику отдельный exact-admin API лениво возвращает карточки авторов: Telegram ID,
+актуальные доступные имя/username/language/bot/premium metadata, число сообщений,
+число затронутых topics и первое/последнее наблюдение в выбранном scope. Telegram
+Bot API не предоставляет полный список молчащих участников, поэтому эти данные —
+сводка авторов доступных боту сообщений, а не membership directory.
+
+Администратор может создать пустой managed Git Project или
 клонировать remote, выбрать Project/Workspace для топика и выполнить bind/rebind.
 Перепривязка отклоняется, пока у Conversation есть active turn, processor или
 pending input; успешная смена использует тот же `StateStore.bind`, сбрасывает оба
 Codex thread и worktree path и очищает непостоянный unbound-контекст топика.
+Карточки пользователей не входят в основной overview payload и загружаются только
+при раскрытии группы/topic. `/memory_forget_me` удаляет scoped activity автора из
+этой сводки и существующее Team Space opt-out блокирует повторное накопление до
+`/memory_resume_me`.
 
 HTTPS-запрос Mini App должен содержать Telegram `initData`. Backend заново
 проверяет HMAC, `auth_date`, Telegram user id и Project owner ACL; данные из
@@ -875,7 +886,8 @@ SQLite хранит:
   типизированными metadata вложений;
 - историю Run: access/response mode, prompt, response, status, error и timestamps;
 - управляемые Projects, Workspaces и Telegram owner id;
-- обнаруженные Telegram chats/topics и последний membership event бота;
+- обнаруженные Telegram chats/topics, наблюдаемые авторы и последний membership
+  event бота;
 - Team Spaces, Sources, People и не объединяемые автоматически provider identities;
 - event journal с replies, edits, reactions, membership и attachment metadata;
 - knowledge с confidence, visibility, temporal validity, evidence и supersession;
@@ -894,6 +906,8 @@ SQLite хранит:
 | `managed_workspaces` | Абсолютные пути управляемых repositories. |
 | `telegram_chats` | Метаданные чата, membership status бота и последний membership event. |
 | `telegram_topics` | Обнаруженные topic id, доступные названия и timestamps. |
+| `telegram_users` | Последние доступные Telegram profile metadata с устойчивым numeric user ID. |
+| `telegram_topic_users` | Activity по ключу `(chat_id, topic_id, user_id)`: счётчик сообщений и first/last seen. |
 | `team_spaces`, `team_sources` | Durable boundary команды и transport sources. |
 | `team_people`, `team_identities` | Люди и provider identities с observation preference. |
 | `team_events` | Нормализованный evidence journal и redaction state. |
@@ -1300,7 +1314,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "9.4.1",
+  "version": "9.4.2",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",

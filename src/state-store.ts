@@ -77,6 +77,31 @@ export interface TelegramTopicRecord {
   updatedAt: number;
 }
 
+export interface TelegramUserObservation {
+  userId: number;
+  username?: string;
+  firstName?: string;
+  lastName?: string;
+  isBot?: boolean;
+  languageCode?: string;
+  isPremium?: boolean;
+  observedAt?: number;
+}
+
+export interface TelegramObservedUserRecord {
+  userId: number;
+  username: string;
+  firstName: string;
+  lastName: string;
+  isBot: boolean;
+  languageCode: string;
+  isPremium: boolean;
+  messageCount: number;
+  topicCount: number;
+  firstSeenAt: number;
+  lastSeenAt: number;
+}
+
 export type TeamSpacePhase = "observing" | "orienting" | "active" | "paused";
 export type TeamKnowledgeKind =
   | "episode"
@@ -374,6 +399,32 @@ export class StateStore {
           ON telegram_chats(updated_at DESC, chat_id);
         CREATE INDEX IF NOT EXISTS telegram_topics_updated
           ON telegram_topics(chat_id, updated_at DESC, topic_id);
+        CREATE TABLE IF NOT EXISTS telegram_users (
+          user_id INTEGER PRIMARY KEY,
+          username TEXT NOT NULL DEFAULT '',
+          first_name TEXT NOT NULL DEFAULT '',
+          last_name TEXT NOT NULL DEFAULT '',
+          is_bot INTEGER NOT NULL DEFAULT 0 CHECK(is_bot IN (0, 1)),
+          language_code TEXT NOT NULL DEFAULT '',
+          is_premium INTEGER NOT NULL DEFAULT 0 CHECK(is_premium IN (0, 1)),
+          first_seen_at REAL NOT NULL,
+          updated_at REAL NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS telegram_topic_users (
+          chat_id INTEGER NOT NULL,
+          topic_id INTEGER NOT NULL,
+          user_id INTEGER NOT NULL REFERENCES telegram_users(user_id) ON DELETE CASCADE,
+          message_count INTEGER NOT NULL DEFAULT 0 CHECK(message_count >= 0),
+          first_seen_at REAL NOT NULL,
+          last_seen_at REAL NOT NULL,
+          PRIMARY KEY(chat_id, topic_id, user_id),
+          FOREIGN KEY(chat_id, topic_id)
+            REFERENCES telegram_topics(chat_id, topic_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS telegram_topic_users_chat
+          ON telegram_topic_users(chat_id, last_seen_at DESC, user_id);
+        CREATE INDEX IF NOT EXISTS telegram_topic_users_topic
+          ON telegram_topic_users(chat_id, topic_id, last_seen_at DESC, user_id);
         CREATE TABLE IF NOT EXISTS team_spaces (
           id TEXT PRIMARY KEY,
           name TEXT NOT NULL,
@@ -802,6 +853,126 @@ export class StateStore {
     return (rows as Row[]).map((row) => this.toTelegramTopic(row));
   }
 
+  recordTelegramTopicUser(
+    chatId: number,
+    topicId: number,
+    observation: TelegramUserObservation,
+  ): void {
+    const observedAt = observation.observedAt ?? Date.now() / 1000;
+    this.transaction(() => {
+      const current = this.db.prepare(
+        "SELECT * FROM telegram_users WHERE user_id = ?",
+      ).get(observation.userId) as Row | undefined;
+      const firstSeenAt = current ? Number(current.first_seen_at) : observedAt;
+      const username = observation.username ?? (current ? String(current.username) : "");
+      const firstName = observation.firstName ?? (current ? String(current.first_name) : "");
+      const lastName = observation.lastName ?? (current ? String(current.last_name) : "");
+      const isBot = observation.isBot ?? (current ? Number(current.is_bot) === 1 : false);
+      const languageCode = observation.languageCode ??
+        (current ? String(current.language_code) : "");
+      const isPremium = observation.isPremium ??
+        (current ? Number(current.is_premium) === 1 : false);
+      this.db.prepare(`
+        INSERT INTO telegram_users
+          (user_id, username, first_name, last_name, is_bot, language_code,
+           is_premium, first_seen_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+          username = excluded.username,
+          first_name = excluded.first_name,
+          last_name = excluded.last_name,
+          is_bot = excluded.is_bot,
+          language_code = excluded.language_code,
+          is_premium = excluded.is_premium,
+          updated_at = excluded.updated_at
+      `).run(
+        observation.userId,
+        username,
+        firstName,
+        lastName,
+        isBot ? 1 : 0,
+        languageCode,
+        isPremium ? 1 : 0,
+        firstSeenAt,
+        observedAt,
+      );
+      this.db.prepare(`
+        INSERT INTO telegram_topic_users
+          (chat_id, topic_id, user_id, message_count, first_seen_at, last_seen_at)
+        VALUES (?, ?, ?, 1, ?, ?)
+        ON CONFLICT(chat_id, topic_id, user_id) DO UPDATE SET
+          message_count = telegram_topic_users.message_count + 1,
+          last_seen_at = excluded.last_seen_at
+      `).run(chatId, topicId, observation.userId, observedAt, observedAt);
+    });
+  }
+
+  telegramUserCount(): number {
+    const row = this.db.prepare(
+      "SELECT COUNT(*) AS count FROM telegram_users",
+    ).get() as Row;
+    return Number(row.count);
+  }
+
+  telegramChatUserCount(chatId: number): number {
+    const row = this.db.prepare(`
+      SELECT COUNT(DISTINCT user_id) AS count
+      FROM telegram_topic_users
+      WHERE chat_id = ?
+    `).get(chatId) as Row;
+    return Number(row.count);
+  }
+
+  telegramTopicUserCount(chatId: number, topicId: number): number {
+    const row = this.db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM telegram_topic_users
+      WHERE chat_id = ? AND topic_id = ?
+    `).get(chatId, topicId) as Row;
+    return Number(row.count);
+  }
+
+  listTelegramChatUsers(chatId: number): TelegramObservedUserRecord[] {
+    return (this.db.prepare(`
+      SELECT u.*, SUM(a.message_count) AS message_count,
+        COUNT(*) AS topic_count, MIN(a.first_seen_at) AS activity_first_seen_at,
+        MAX(a.last_seen_at) AS activity_last_seen_at
+      FROM telegram_topic_users a
+      JOIN telegram_users u ON u.user_id = a.user_id
+      WHERE a.chat_id = ?
+      GROUP BY u.user_id
+      ORDER BY message_count DESC, activity_last_seen_at DESC, u.user_id
+    `).all(chatId) as Row[]).map((row) => this.toTelegramObservedUser(row));
+  }
+
+  listTelegramTopicUsers(chatId: number, topicId: number): TelegramObservedUserRecord[] {
+    return (this.db.prepare(`
+      SELECT u.*, a.message_count, 1 AS topic_count,
+        a.first_seen_at AS activity_first_seen_at,
+        a.last_seen_at AS activity_last_seen_at
+      FROM telegram_topic_users a
+      JOIN telegram_users u ON u.user_id = a.user_id
+      WHERE a.chat_id = ? AND a.topic_id = ?
+      ORDER BY a.message_count DESC, a.last_seen_at DESC, u.user_id
+    `).all(chatId, topicId) as Row[]).map((row) => this.toTelegramObservedUser(row));
+  }
+
+  forgetTelegramChatUser(chatId: number, userId: number): number {
+    return this.transaction(() => {
+      const result = this.db.prepare(`
+        DELETE FROM telegram_topic_users WHERE chat_id = ? AND user_id = ?
+      `).run(chatId, userId);
+      this.db.prepare(`
+        DELETE FROM telegram_users
+        WHERE user_id = ?
+          AND NOT EXISTS (
+            SELECT 1 FROM telegram_topic_users WHERE user_id = ?
+          )
+      `).run(userId, userId);
+      return Number(result.changes);
+    });
+  }
+
   private toTelegramChat(row: Row): TelegramChatRecord {
     return {
       chatId: Number(row.chat_id),
@@ -825,6 +996,22 @@ export class StateStore {
       name: String(row.name),
       firstSeenAt: Number(row.first_seen_at),
       updatedAt: Number(row.updated_at),
+    };
+  }
+
+  private toTelegramObservedUser(row: Row): TelegramObservedUserRecord {
+    return {
+      userId: Number(row.user_id),
+      username: String(row.username),
+      firstName: String(row.first_name),
+      lastName: String(row.last_name),
+      isBot: Number(row.is_bot) === 1,
+      languageCode: String(row.language_code),
+      isPremium: Number(row.is_premium) === 1,
+      messageCount: Number(row.message_count),
+      topicCount: Number(row.topic_count),
+      firstSeenAt: Number(row.activity_first_seen_at),
+      lastSeenAt: Number(row.activity_last_seen_at),
     };
   }
 
@@ -1583,6 +1770,18 @@ export class StateStore {
         `).run(spaceId, provider, externalUserId, personId, enabled ? 1 : 0, now, now);
       }
     });
+  }
+
+  teamIdentityObservationEnabled(
+    spaceId: string,
+    provider: string,
+    externalUserId: string,
+  ): boolean {
+    const identity = this.db.prepare(`
+      SELECT observation_enabled FROM team_identities
+      WHERE space_id = ? AND provider = ? AND external_user_id = ?
+    `).get(spaceId, provider, externalUserId) as Row | undefined;
+    return !identity || Number(identity.observation_enabled) === 1;
   }
 
   forgetTeamIdentity(spaceId: string, provider: string, externalUserId: string): number {

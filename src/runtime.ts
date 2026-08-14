@@ -1125,6 +1125,25 @@ export class SummingRuntime {
     if (!knownTopic || (topicName && knownTopic.name !== topicName)) {
       this.state.recordTelegramTopic(chatId, topicId, topicName, observedAt);
     }
+    const sender = record(message.from);
+    const userId = Number(sender?.id ?? 0);
+    const observationEnabled = this.state.teamIdentityObservationEnabled(
+      StateStore.teamSpaceId("telegram", String(chatId)),
+      "telegram",
+      String(userId),
+    );
+    if (Number.isSafeInteger(userId) && userId > 0 && observationEnabled) {
+      this.state.recordTelegramTopicUser(chatId, topicId, {
+        userId,
+        username: String(sender?.username ?? ""),
+        firstName: String(sender?.first_name ?? ""),
+        lastName: String(sender?.last_name ?? ""),
+        isBot: sender?.is_bot === true,
+        languageCode: String(sender?.language_code ?? ""),
+        isPremium: sender?.is_premium === true,
+        observedAt,
+      });
+    }
   }
 
   private telegramChatTitle(chat: TelegramObject): string {
@@ -2038,6 +2057,7 @@ export class SummingRuntime {
         "telegram",
         String(senderId),
       );
+      this.state.forgetTelegramChatUser(chatId, senderId);
       await this.reply(
         chatId,
         topicId,

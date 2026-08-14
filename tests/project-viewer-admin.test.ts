@@ -91,6 +91,30 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
     botStatus: "administrator",
   });
   state.recordTelegramTopic(-300, 44, "Backend");
+  state.recordTelegramTopicUser(-300, 44, {
+    userId: 42,
+    username: "maria",
+    firstName: "Мария",
+    lastName: "Петрова",
+    languageCode: "ru",
+    isPremium: true,
+    observedAt: 1_700_000_100,
+  });
+  state.recordTelegramTopicUser(-300, 44, {
+    userId: 42,
+    username: "maria",
+    firstName: "Мария",
+    lastName: "Петрова",
+    languageCode: "ru",
+    isPremium: true,
+    observedAt: 1_700_000_110,
+  });
+  state.recordTelegramTopicUser(-300, 44, {
+    userId: 77,
+    firstName: "Deploy Bot",
+    isBot: true,
+    observedAt: 1_700_000_105,
+  });
 
   try {
     await viewer.start();
@@ -105,11 +129,66 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
     const initial = await fetch(`${endpoint}/api/viewer/admin`, { headers: auth(1) });
     assert.equal(initial.status, 200);
     const initialPayload = await initial.json() as {
-      counts: { projects: number; topics: number; bindings: number };
-      chats: Array<{ topics: Array<{ name: string; binding: unknown }> }>;
+      counts: { projects: number; topics: number; bindings: number; users: number };
+      chats: Array<{
+        userCount: number;
+        topics: Array<{ name: string; userCount: number; binding: unknown }>;
+      }>;
     };
-    assert.deepEqual(initialPayload.counts, { projects: 1, topics: 1, bindings: 0 });
+    assert.deepEqual(
+      initialPayload.counts,
+      { projects: 1, topics: 1, bindings: 0, users: 2 },
+    );
+    assert.equal(initialPayload.chats[0]?.userCount, 2);
     assert.equal(initialPayload.chats[0]?.topics[0]?.name, "Backend");
+    assert.equal(initialPayload.chats[0]?.topics[0]?.userCount, 2);
+
+    const deniedUsers = await fetch(
+      `${endpoint}/api/viewer/admin/users?chatId=-300`,
+      { headers: auth(42) },
+    );
+    assert.equal(deniedUsers.status, 403);
+
+    const topicUsers = await fetch(
+      `${endpoint}/api/viewer/admin/users?chatId=-300&topicId=44`,
+      { headers: auth(1) },
+    );
+    assert.equal(topicUsers.status, 200);
+    const topicUsersPayload = await topicUsers.json() as {
+      scope: string;
+      topic: { topicId: number; name: string };
+      users: Array<Record<string, unknown>>;
+    };
+    assert.equal(topicUsersPayload.scope, "topic");
+    assert.deepEqual(topicUsersPayload.topic, { topicId: 44, name: "Backend" });
+    assert.deepEqual(topicUsersPayload.users[0], {
+      userId: 42,
+      username: "maria",
+      firstName: "Мария",
+      lastName: "Петрова",
+      isBot: false,
+      languageCode: "ru",
+      isPremium: true,
+      messageCount: 2,
+      topicCount: 1,
+      firstSeenAt: 1_700_000_100,
+      lastSeenAt: 1_700_000_110,
+    });
+
+    const chatUsers = await fetch(
+      `${endpoint}/api/viewer/admin/users?chatId=-300`,
+      { headers: auth(1) },
+    );
+    assert.equal(chatUsers.status, 200);
+    const chatUsersPayload = await chatUsers.json() as {
+      scope: string;
+      users: Array<{ userId: number; messageCount: number; topicCount: number }>;
+    };
+    assert.equal(chatUsersPayload.scope, "chat");
+    assert.deepEqual(
+      chatUsersPayload.users.map((user) => [user.userId, user.messageCount, user.topicCount]),
+      [[42, 2, 1], [77, 1, 1]],
+    );
 
     const created = await fetch(`${endpoint}/api/viewer/admin/projects`, {
       method: "POST",
@@ -170,14 +249,17 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
 
     const final = await fetch(`${endpoint}/api/viewer/admin`, { headers: auth(1) });
     const finalPayload = await final.json() as {
-      counts: { projects: number; topics: number; bindings: number };
+      counts: { projects: number; topics: number; bindings: number; users: number };
       chats: Array<{
         topics: Array<{
           binding: { projectId: string; workspaceId: string; busy: boolean } | null;
         }>;
       }>;
     };
-    assert.deepEqual(finalPayload.counts, { projects: 2, topics: 1, bindings: 1 });
+    assert.deepEqual(
+      finalPayload.counts,
+      { projects: 2, topics: 1, bindings: 1, users: 2 },
+    );
     assert.deepEqual(finalPayload.chats[0]?.topics[0]?.binding, {
       conversationId: state.byTopic(-300, 44)?.id,
       projectId: "summing",

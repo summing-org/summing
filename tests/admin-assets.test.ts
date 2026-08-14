@@ -7,9 +7,14 @@ test("administrator Mini App exposes project creation and topic binding UI", () 
   assert.match(ADMIN_HTML, /telegram-web-app\.js\?63/);
   assert.match(ADMIN_HTML, /id="createForm"/);
   assert.match(ADMIN_HTML, /id="topicSearch"/);
+  assert.match(ADMIN_HTML, /id="userCount"/);
   assert.match(ADMIN_HTML, /Привязки топиков/);
+  assert.match(ADMIN_HTML, /Telegram Bot API не отдаёт полный список/);
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/projects/);
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/bindings/);
+  assert.match(ADMIN_JS, /\/api\/viewer\/admin\/users/);
+  assert.match(ADMIN_JS, /Telegram ID:/);
+  assert.match(ADMIN_JS, /Наблюдаемые пользователи топика/);
   assert.match(ADMIN_JS, /Перепривязать топик/);
   assert.match(ADMIN_CSS, /@media\(max-width:520px\)/);
   assert.match(ADMIN_CSS, /--accent:#ff2e6b/);

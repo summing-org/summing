@@ -148,6 +148,86 @@ test("persists Telegram memberships and discovered topics", () => {
   }
 });
 
+test("aggregates observed Telegram users by chat and topic with stable IDs", () => {
+  const { root, store } = tempStore();
+  try {
+    store.recordTelegramChat({
+      chatId: -100700,
+      type: "supergroup",
+      title: "Product",
+      isForum: true,
+      observedAt: 1_700_001_000,
+    });
+    store.recordTelegramTopic(-100700, 17, "Design", 1_700_001_000);
+    store.recordTelegramTopic(-100700, 18, "Research", 1_700_001_000);
+    store.recordTelegramTopicUser(-100700, 17, {
+      userId: 42,
+      username: "maria",
+      firstName: "Маша",
+      languageCode: "ru",
+      observedAt: 1_700_001_100,
+    });
+    store.recordTelegramTopicUser(-100700, 17, {
+      userId: 42,
+      firstName: "Мария",
+      isPremium: true,
+      observedAt: 1_700_001_120,
+    });
+    store.recordTelegramTopicUser(-100700, 18, {
+      userId: 42,
+      observedAt: 1_700_001_130,
+    });
+    store.recordTelegramTopicUser(-100700, 17, {
+      userId: 77,
+      username: "helper_bot",
+      firstName: "Helper",
+      isBot: true,
+      observedAt: 1_700_001_125,
+    });
+
+    assert.equal(store.telegramUserCount(), 2);
+    assert.equal(store.telegramChatUserCount(-100700), 2);
+    assert.equal(store.telegramTopicUserCount(-100700, 17), 2);
+    assert.equal(store.telegramTopicUserCount(-100700, 18), 1);
+    assert.deepEqual(store.listTelegramChatUsers(-100700), [
+      {
+        userId: 42,
+        username: "maria",
+        firstName: "Мария",
+        lastName: "",
+        isBot: false,
+        languageCode: "ru",
+        isPremium: true,
+        messageCount: 3,
+        topicCount: 2,
+        firstSeenAt: 1_700_001_100,
+        lastSeenAt: 1_700_001_130,
+      },
+      {
+        userId: 77,
+        username: "helper_bot",
+        firstName: "Helper",
+        lastName: "",
+        isBot: true,
+        languageCode: "",
+        isPremium: false,
+        messageCount: 1,
+        topicCount: 1,
+        firstSeenAt: 1_700_001_125,
+        lastSeenAt: 1_700_001_125,
+      },
+    ]);
+    assert.equal(store.listTelegramTopicUsers(-100700, 17)[0]?.messageCount, 2);
+    assert.equal(store.listTelegramTopicUsers(-100700, 18)[0]?.userId, 42);
+    assert.equal(store.forgetTelegramChatUser(-100700, 42), 2);
+    assert.equal(store.telegramUserCount(), 1);
+    assert.deepEqual(store.listTelegramChatUsers(-100700).map((user) => user.userId), [77]);
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("Team Space journals evidence, preserves provenance, and honors erasure", () => {
   const { root, path, store } = tempStore();
   try {
@@ -269,6 +349,7 @@ test("Team Space journals evidence, preserves provenance, and honors erasure", (
       "decision",
     );
     assert.equal(store.forgetTeamIdentity(space.id, "telegram", "42"), 1);
+    assert.equal(store.teamIdentityObservationEnabled(space.id, "telegram", "42"), false);
     assert.equal(store.teamEvent(first.id)?.synthesisState, "redacted");
     assert.equal(store.teamEvent(first.id)?.text, "");
     assert.equal(store.teamEvent(first.id)?.senderDisplayName, "");
