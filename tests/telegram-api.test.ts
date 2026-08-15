@@ -60,6 +60,29 @@ test("sendMessage supports HTML mentions in a Telegram topic", async () => {
   }
 });
 
+test("editMessage forwards Telegram HTML parse mode", async () => {
+  const api = new TelegramAPI("token");
+  let payload: Record<string, unknown> = {};
+  api.call = async (method, input) => {
+    assert.equal(method, "editMessageText");
+    payload = input;
+    return true;
+  };
+
+  try {
+    await api.editMessage(42, 18, "<b>Готово</b>", { parseMode: "HTML" });
+    assert.deepEqual(payload, {
+      chat_id: 42,
+      message_id: 18,
+      text: "<b>Готово</b>",
+      disable_web_page_preview: true,
+      parse_mode: "HTML",
+    });
+  } finally {
+    await api.close();
+  }
+});
+
 test("sendChatAction targets the active Telegram topic", async () => {
   const api = new TelegramAPI("token");
   let payload: Record<string, unknown> = {};

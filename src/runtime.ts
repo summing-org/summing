@@ -54,6 +54,7 @@ import {
   splitMessage,
   type TelegramObject,
 } from "./telegram-api.js";
+import { markdownToTelegramHtmlChunks } from "./telegram-markdown.js";
 import {
   WorkspaceError,
   WorkspaceManager,
@@ -233,15 +234,18 @@ export class TelegramStream {
   private async render(fallback: string): Promise<void> {
     const content = this.text.trim() || fallback;
     if (!content) return;
-    const chunks = splitMessage(content);
+    const chunks = markdownToTelegramHtmlChunks(content);
     for (const [index, chunk] of chunks.entries()) {
       const messageId = this.messageIds[index];
       if (messageId !== undefined) {
-        if (this.rendered[index] !== chunk) await this.api.editMessage(this.chatId, messageId, chunk);
+        if (this.rendered[index] !== chunk) {
+          await this.api.editMessage(this.chatId, messageId, chunk, { parseMode: "HTML" });
+        }
       } else {
         this.messageIds.push(
           await this.api.sendMessage(this.chatId, chunk, {
             topicId: this.topicId,
+            parseMode: "HTML",
             ...(index === 0 && this.replyTo ? { replyTo: this.replyTo } : {}),
           }),
         );
@@ -977,10 +981,15 @@ export class SummingRuntime {
       replyToExternalEventId,
       providerMessageId: "",
     });
-    const providerMessageId = await this.telegram.sendMessage(chatId, text, {
-      ...(topicId ? { topicId } : {}),
-      ...(replyTo ? { replyTo } : {}),
-    });
+    let providerMessageId = 0;
+    for (const [index, chunk] of markdownToTelegramHtmlChunks(text).entries()) {
+      const sentMessageId = await this.telegram.sendMessage(chatId, chunk, {
+        ...(topicId ? { topicId } : {}),
+        ...(index === 0 && replyTo ? { replyTo } : {}),
+        parseMode: "HTML",
+      });
+      if (index === 0) providerMessageId = sentMessageId;
+    }
     this.state.markTeamInterventionSent(interventionId, String(providerMessageId));
     return true;
   }

@@ -10,7 +10,11 @@ function wait(milliseconds: number): Promise<void> {
 test("direct stream stays silent and keeps the native typing action alive", async () => {
   const api = new TelegramAPI("token");
   const messages: string[] = [];
-  const messageOptions: Array<{ topicId?: number; replyTo?: number }> = [];
+  const messageOptions: Array<{
+    topicId?: number;
+    replyTo?: number;
+    parseMode?: "HTML" | "MarkdownV2";
+  }> = [];
   const actions: Array<{ chatId: number; topicId: number }> = [];
   api.sendMessage = async (_chatId, text, options) => {
     messages.push(text);
@@ -32,13 +36,45 @@ test("direct stream stays silent and keeps the native typing action alive", asyn
     assert.ok(actions.length >= 2);
     assert.deepEqual(actions[0], { chatId: -10042, topicId: 17 });
 
-    stream.append("Готовый ответ");
+    stream.append("**Готовый ответ**");
     await stream.flush();
     const stoppedAt = actions.length;
     await wait(18);
     assert.equal(actions.length, stoppedAt);
-    assert.equal(messages.at(-1), "Готовый ответ");
-    assert.deepEqual(messageOptions[0], { topicId: 17, replyTo: 9 });
+    assert.equal(messages.at(-1), "<b>Готовый ответ</b>");
+    assert.deepEqual(messageOptions[0], { topicId: 17, replyTo: 9, parseMode: "HTML" });
+  } finally {
+    stream.stopTyping();
+    await api.close();
+  }
+});
+
+test("streaming updates and the final edit both use Telegram HTML", async () => {
+  const api = new TelegramAPI("token");
+  const sent: Array<{ text: string; parseMode: string | undefined }> = [];
+  const edited: Array<{ text: string; parseMode: string | undefined }> = [];
+  api.sendChatAction = async () => undefined;
+  api.sendMessage = async (_chatId, text, options) => {
+    sent.push({ text, parseMode: options?.parseMode });
+    return 101;
+  };
+  api.editMessage = async (_chatId, _messageId, text, options) => {
+    edited.push({ text, parseMode: options?.parseMode });
+  };
+  const stream = new TelegramStream(api, -10042, 17, 0, 1_000);
+  try {
+    stream.start(9);
+    stream.append("**Готов");
+    await wait(5);
+    stream.append("о**");
+    await stream.flush();
+
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0]?.parseMode, "HTML");
+    assert.deepEqual(edited.at(-1), {
+      text: "<b>Готово</b>",
+      parseMode: "HTML",
+    });
   } finally {
     stream.stopTyping();
     await api.close();

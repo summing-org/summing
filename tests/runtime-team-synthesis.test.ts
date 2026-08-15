@@ -34,7 +34,11 @@ test("one background understanding loop creates an episode, memory, and optional
   const sent: Array<{
     chatId: number;
     text: string;
-    options: { topicId?: number; replyTo?: number } | undefined;
+    options: {
+      topicId?: number;
+      replyTo?: number;
+      parseMode?: "HTML" | "MarkdownV2";
+    } | undefined;
   }> = [];
   const threadOptions: Array<Record<string, unknown>> = [];
   const turnOptions: Array<Record<string, unknown>> = [];
@@ -192,7 +196,7 @@ test("one background understanding loop creates an episode, memory, and optional
     assert.equal(runtime.state.teamSpace(first.spaceId)?.orientedAt !== null, true);
     assert.equal(runtime.state.teamSpace(first.spaceId)?.modelEgressAnnouncedAt !== null, true);
     assert.match(sent[0]?.text ?? "", /Администратор включил фоновое осмысление/);
-    assert.deepEqual(sent[1]?.options, { topicId: 9 });
+    assert.deepEqual(sent[1]?.options, { topicId: 9, parseMode: "HTML" });
     assert.match(sent[1]?.text ?? "", /Что мне важно уточнить/);
 
     const third = runtime.state.recordTeamEvent({
@@ -251,13 +255,17 @@ test("one background understanding loop creates an episode, memory, and optional
       intervention: {
         action: "reply",
         reply_to_event_id: third.id,
-        message: "Это пока открытый вопрос. Кто владеет проверкой rollback?",
+        message: "**Это пока открытый вопрос.** Кто владеет проверкой rollback?",
         reason: "Вопрос о критичной проверке остался без владельца.",
       },
     });
     await understandTeamConversation(first.sourceId);
 
-    assert.deepEqual(sent[2]?.options, { topicId: 9, replyTo: 103 });
+    assert.equal(
+      sent[2]?.text,
+      "<b>Это пока открытый вопрос.</b> Кто владеет проверкой rollback?",
+    );
+    assert.deepEqual(sent[2]?.options, { topicId: 9, replyTo: 103, parseMode: "HTML" });
     assert.equal(threadOptions.every((item) => item.readOnly === true), true);
     assert.equal(threadOptions.every((item) => item.networkAccess === false), true);
     assert.equal(threadOptions.every((item) => item.ephemeral === true), true);

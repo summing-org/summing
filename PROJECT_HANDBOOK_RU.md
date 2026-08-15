@@ -1,6 +1,6 @@
 # SUMMING 9.5: архитектура, эксплуатация и разработка
 
-> Версия: **9.5.1**
+> Версия: **9.5.2**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
 > Последняя сверка с кодом: **15 августа 2026 года**.
 
@@ -399,10 +399,16 @@ Telegram-сообщение содержит уже сам ответ и сох�
 `item/agentMessage/delta` накапливаются и не чаще заданного интервала заменяют
 текст этого сообщения через `editMessageText`.
 
-Если ответ длиннее лимита Telegram, создаются дополнительные сообщения. Reply на
-любую часть активного потока распознаётся как steer. На завершении выполняется
-принудительный flush итогового текста. Conversation Understanding turn не использует
-Telegram stream; runtime публикует только прошедшую gates интервенцию.
+Перед каждым `sendMessage`/`editMessageText` Markdown агента преобразуется в
+экранированный Telegram HTML. Рендерер поддерживает заголовки, списки и task-list,
+bold/italic/strikethrough/spoiler, ссылки только с разрешёнными схемами, blockquote,
+inline code, fenced code blocks и GitHub-style таблицы; сырой HTML модели остаётся
+текстом. Если ответ длиннее безопасного лимита Telegram, создаются дополнительные
+самостоятельно сбалансированные HTML-сообщения: форматирующие теги и entities не
+разрезаются. Reply на любую часть активного потока распознаётся как steer. На
+завершении выполняется принудительный flush итогового текста. Conversation
+Understanding turn не использует Telegram stream, но его прошедшая gates интервенция
+проходит тот же Markdown → Telegram HTML boundary.
 
 ### 4.6. Telegram polling и offset
 
@@ -1369,7 +1375,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "9.5.1",
+  "version": "9.5.2",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",

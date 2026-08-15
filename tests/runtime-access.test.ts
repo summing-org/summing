@@ -670,7 +670,7 @@ test("explicit questions in unbound topics run without Project access", async ()
             item: {
               type: "agentMessage",
               phase: "final_answer",
-              text: "Короткий ответ по обсуждению.",
+              text: "**Короткий ответ** по обсуждению.",
             },
           },
         });
@@ -736,8 +736,8 @@ test("explicit questions in unbound topics run without Project access", async ()
     assert.deepEqual(replies, [
       {
         chatId: -500,
-        text: "Короткий ответ по обсуждению.",
-        options: { topicId: 77, replyTo: 10 },
+        text: "<b>Короткий ответ</b> по обсуждению.",
+        options: { topicId: 77, replyTo: 10, parseMode: "HTML" },
       },
     ]);
 

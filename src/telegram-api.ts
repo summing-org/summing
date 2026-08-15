@@ -184,14 +184,21 @@ export class TelegramAPI {
     await this.call("deleteMessage", { chat_id: chatId, message_id: messageId });
   }
 
-  async editMessage(chatId: number, messageId: number, text: string): Promise<void> {
+  async editMessage(
+    chatId: number,
+    messageId: number,
+    text: string,
+    options: { parseMode?: "HTML" | "MarkdownV2" } = {},
+  ): Promise<void> {
+    const payload: TelegramObject = {
+      chat_id: chatId,
+      message_id: messageId,
+      text: text.slice(0, 4_096) || "…",
+      disable_web_page_preview: true,
+    };
+    if (options.parseMode) payload.parse_mode = options.parseMode;
     try {
-      await this.call("editMessageText", {
-        chat_id: chatId,
-        message_id: messageId,
-        text: text.slice(0, 4_096) || "…",
-        disable_web_page_preview: true,
-      });
+      await this.call("editMessageText", payload);
     } catch (error) {
       if (!(error instanceof TelegramError) || !error.message.toLowerCase().includes("message is not modified")) {
         throw error;
