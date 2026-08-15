@@ -43,6 +43,53 @@ valid_environment_key() {
     grep -Eq '^[0-9a-fA-F]{64}$' "${path}"
 }
 
+prepare_environment_verification() {
+  local release_config=${release_root}/deploy/${project_id}.runner.json
+  local release_network=
+  local config_next=
+
+  if [ -L "${release_config}" ]; then
+    printf '%s\n' 'Release runner project config must not be a symlink.' >&2
+    return 2
+  fi
+  if [ ! -e "${release_config}" ]; then return 0; fi
+  if [ ! -f "${release_config}" ]; then
+    printf '%s\n' 'Release runner project config must be a regular file.' >&2
+    return 2
+  fi
+  if ! release_network=$(jq -er \
+    'if has("network") then
+       if (.network | type) == "boolean" then .network
+       else error("network must be boolean") end
+     else false end' "${release_config}"); then
+    printf '%s\n' 'Release runner project config has an invalid network policy.' >&2
+    return 2
+  fi
+  if [ "${release_network}" != true ]; then return 0; fi
+  if [ ! -f "${config_path}" ] || [ -L "${config_path}" ]; then
+    printf '%s\n' 'Runner project config is missing or is a symlink.' >&2
+    return 2
+  fi
+  if jq -e '.network == true' "${config_path}" >/dev/null; then return 0; fi
+  if ! jq -e '(.envPath | type == "string") and (.envPath | startswith("/"))' \
+    "${config_path}" >/dev/null; then
+    printf '%s\n' 'Legacy runner project config has no absolute envPath.' >&2
+    return 2
+  fi
+
+  config_next=$(mktemp "${config_path}.XXXXXX")
+  if ! jq '.network = true' "${config_path}" > "${config_next}" || \
+    ! chown --reference="${config_path}" "${config_next}" || \
+    ! chmod --reference="${config_path}" "${config_next}"; then
+    rm -f "${config_next}"
+    printf '%s\n' 'Could not prepare runner network for migration verification.' >&2
+    return 2
+  fi
+  mv -f "${config_next}" "${config_path}"
+  printf 'Enabled release-declared runner network for %s/%s migration verification.\n' \
+    "${project_id}" "${workspace_id}"
+}
+
 if [ -L "${state_root}" ]; then
   printf '%s\n' 'Migration state directory must not be a symlink.' >&2
   exit 2
@@ -73,9 +120,10 @@ if [ -L "${verified_marker}" ]; then
   exit 2
 fi
 if [ ! -f "${verified_marker}" ]; then
+  prepare_environment_verification
   printf 'Legacy environment migration for %s/%s is imported but not verified yet.\n' \
     "${project_id}" "${workspace_id}" >&2
-  exit 1
+  exit 75
 fi
 if ! private_regular_file "${verified_marker}"; then
   printf '%s\n' 'Verification marker is not a private regular file.' >&2

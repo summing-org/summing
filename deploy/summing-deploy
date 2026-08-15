@@ -257,7 +257,15 @@ if ! valid_sha "${target_sha}"; then
   exit 1
 fi
 if [ "${previous_sha}" = "${target_sha}" ]; then
-  if ! finalize_project_environment_cutover "${previous_target}"; then
+  cutover_status=0
+  finalize_project_environment_cutover "${previous_target}" || cutover_status=$?
+  if [ "${cutover_status}" = 75 ]; then
+    write_state waiting \
+      "Версия установлена; ждём Validate/Dry run для migration cutover" \
+      "${previous_sha}" "${target_sha}" "$(now)"
+    exit 0
+  fi
+  if [ "${cutover_status}" != 0 ]; then
     write_state failed \
       "Версия установлена, но завершение migration cutover не удалось" \
       "${previous_sha}" "${target_sha}" "$(now)"
@@ -322,7 +330,15 @@ restart_services
 wait_for_health
 switched=0
 
-if ! finalize_project_environment_cutover "${release_dir}"; then
+cutover_status=0
+finalize_project_environment_cutover "${release_dir}" || cutover_status=$?
+if [ "${cutover_status}" = 75 ]; then
+  write_state waiting \
+    "Версия установлена; ждём Validate/Dry run для migration cutover" \
+    "${target_sha}" "${target_sha}" "$(now)"
+  exit 0
+fi
+if [ "${cutover_status}" != 0 ]; then
   write_state failed \
     "Версия установлена, но завершение migration cutover не удалось" \
     "${target_sha}" "${target_sha}" "$(now)"

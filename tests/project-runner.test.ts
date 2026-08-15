@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import {
   chmodSync,
   existsSync,
@@ -31,6 +32,43 @@ async function completedJob(
     if (Date.now() > deadline) throw new Error("runner job timed out");
     await new Promise((resolveWait) => setTimeout(resolveWait, 20));
   }
+}
+
+function seedTerminalJobHistory(
+  runs: string,
+  revision: string,
+): { malformedId: string; queuedId: string } {
+  const malformedId = randomUUID();
+  const queuedId = randomUUID();
+  mkdirSync(join(runs, malformedId));
+  writeFileSync(join(runs, malformedId, "job.json"), "operator recovery note\n");
+  mkdirSync(join(runs, queuedId));
+  writeFileSync(join(runs, queuedId, "job.json"), JSON.stringify({
+    id: queuedId,
+    projectId: "demo",
+    workspaceId: "repo",
+    action: "run",
+    revision,
+    status: "queued",
+    createdAt: new Date(0).toISOString(),
+  }));
+  for (let index = 0; index < 105; index += 1) {
+    const id = randomUUID();
+    const directory = join(runs, id);
+    mkdirSync(directory);
+    writeFileSync(join(directory, "job.json"), JSON.stringify({
+      id,
+      projectId: "demo",
+      workspaceId: "repo",
+      action: "dry-run",
+      revision,
+      status: "failed",
+      error: "historical migration verification failure",
+      createdAt: new Date(index).toISOString(),
+      completedAt: new Date(index + 1).toISOString(),
+    }));
+  }
+  return { malformedId, queuedId };
 }
 
 test("runner snapshots an encrypted workspace environment and injects one temporary env-file", async () => {
@@ -152,11 +190,44 @@ exit 0
     assert.equal(existsSync(envFiles[0]!), false);
     assert.equal(existsSync(join(dataRoot, "projects", "demo", "runs", dryRun.id, "environment.json")), false);
 
+    const runs = join(dataRoot, "projects", "demo", "runs");
+    const { malformedId, queuedId } = seedTerminalJobHistory(runs, revision);
+
     const validate = await client.submit("demo", "repo", "validate", revision, archive);
     assert.equal((await completedJob(client, "demo", "repo", validate.id)).status, "completed");
     assert.match(readFileSync(dockerArgs, "utf8"), /--network\nnone/);
+    assert.equal(readdirSync(runs).length, 102);
+    assert.equal(existsSync(join(runs, validate.id)), true);
+    assert.equal(existsSync(join(runs, dryRun.id)), true);
+    assert.equal(existsSync(join(runs, malformedId)), true);
+    assert.equal(existsSync(join(runs, queuedId)), true);
   } finally {
     await server.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runner bounds terminal job history on startup without deleting active or malformed state", () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-runner-retention-"));
+  const dataRoot = join(root, "data");
+  const runs = join(dataRoot, "projects", "demo", "runs");
+  const revision = "a".repeat(40);
+  mkdirSync(runs, { recursive: true });
+  try {
+    const { malformedId, queuedId } = seedTerminalJobHistory(runs, revision);
+
+    new ProjectRunnerServer(
+      join(root, "runner.sock"),
+      dataRoot,
+      join(root, "config"),
+      "/bin/false",
+      Buffer.alloc(32, 5),
+    );
+
+    assert.equal(readdirSync(runs).length, 102);
+    assert.equal(existsSync(join(runs, queuedId)), true);
+    assert.equal(existsSync(join(runs, malformedId)), true);
+  } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });

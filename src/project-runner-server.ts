@@ -39,6 +39,7 @@ const MAX_ARCHIVE_BYTES = 50_000_000;
 const MAX_ARTIFACT_BYTES = 8_000_000;
 const MAX_JSON_BYTES = 1_100_000;
 const DRY_RUN_RETENTION = 30;
+const JOB_RETENTION = 100;
 const RUNNER_ACTIONS = new Set<RunnerAction>(["build", "validate", "dry-run", "run"]);
 const ARTIFACTS = new Map([
   ["manifest.json", "application/json"],
@@ -229,6 +230,7 @@ export class ProjectRunnerServer {
       const metadata = lstatSync(path);
       if (metadata.isFile() && !metadata.isSymbolicLink()) rmSync(path);
     }
+    this.pruneStoredJobDirectories();
   }
 
   markReady(): void {
@@ -692,6 +694,7 @@ export class ProjectRunnerServer {
       rmSync(resolve(directory, "source"), { recursive: true, force: true });
       rmSync(resolve(directory, "source.tar"), { force: true });
       rmSync(resolve(directory, "environment.json"), { force: true });
+      this.pruneJobDirectories(job.projectId);
     }
   }
 
@@ -843,6 +846,42 @@ export class ProjectRunnerServer {
       if (JOB_ID.test(entry) && !keep.has(entry)) {
         rmSync(resolve(root, entry), { recursive: true, force: true });
       }
+    }
+  }
+
+  private pruneJobDirectories(projectId: string): void {
+    const root = resolve(this.dataRoot, "projects", projectId, "runs");
+    if (!existsSync(root) || !lstatSync(root).isDirectory()) return;
+    const terminal = readdirSync(root)
+      .filter((entry) => JOB_ID.test(entry))
+      .flatMap((entry) => {
+        try {
+          const job = JSON.parse(readFileSync(resolve(root, entry, "job.json"), "utf8")) as RunnerJob;
+          if (
+            job.id !== entry ||
+            job.projectId !== projectId ||
+            (job.status !== "completed" && job.status !== "failed") ||
+            typeof job.createdAt !== "string"
+          ) {
+            return [];
+          }
+          return [{ id: entry, createdAt: job.createdAt }];
+        } catch {
+          return [];
+        }
+      })
+      .sort((left, right) =>
+        right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id));
+    for (const job of terminal.slice(JOB_RETENTION)) {
+      rmSync(resolve(root, job.id), { recursive: true, force: true });
+    }
+  }
+
+  private pruneStoredJobDirectories(): void {
+    const root = resolve(this.dataRoot, "projects");
+    if (!existsSync(root) || !lstatSync(root).isDirectory()) return;
+    for (const projectId of readdirSync(root)) {
+      if (PROJECT_ID.test(projectId)) this.pruneJobDirectories(projectId);
     }
   }
 

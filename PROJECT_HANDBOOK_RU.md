@@ -1,6 +1,6 @@
 # SUMMING 9.5: архитектура, эксплуатация и разработка
 
-> Версия: **9.5.2**
+> Версия: **9.5.3**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
 > Последняя сверка с кодом: **15 августа 2026 года**.
 
@@ -1274,6 +1274,19 @@ owner получает `403`. Локальный SSH-tunnel bearer token счи�
    и повторно запустить старый release;
 7. сохранить JSON-состояние для Mini App и оставить последние пять releases.
 
+Legacy Connections → project environment cutover использует контролируемую
+двухтактную схему. Если импорт уже существует, но установленный legacy project
+config ещё не содержит разрешённую release-версией сеть, первый deploy hook
+атомарно переносит только `network: true`, сохраняя `envPath`, и публикует
+состояние `waiting`, а не ложный `failed`. Coordinator выполняет Validate и Dry
+run на одной encrypted environment revision; следующий deploy tick принимает
+только `verified.json`, совпадающий с активной schedule revision, и затем
+транзакционно удаляет `envPath`, legacy route и broker. Любая другая ошибка
+hook остаётся состоянием `failed`. При старте и после завершения каждой job
+runner оставляет не более 100 завершённых job-каталогов на Project;
+queued/running и непонятные операторские каталоги автоматически не удаляются.
+Отдельный лимит подробных Dry run artifacts — 30.
+
 Root-only настройки находятся в `/etc/summing/deploy.env`. В частности,
 `SUMMING_DEPLOY_EXPECTED_REMOTE` должен точно совпадать с `git remote get-url
 origin`; значение по умолчанию —
@@ -1375,7 +1388,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "9.5.2",
+  "version": "9.5.3",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",

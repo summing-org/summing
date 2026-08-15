@@ -35,6 +35,8 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
   assert.match(script, /wait_for_idle_runtime/);
   assert.match(script, /finalize_project_environment_cutover "\$\{previous_target\}"/);
   assert.match(script, /finalize_project_environment_cutover "\$\{release_dir\}"/);
+  assert.match(script, /cutover_status.*75/);
+  assert.match(script, /Версия установлена; ждём Validate\/Dry run для migration cutover/);
   assert.doesNotMatch(script, /git .*\b(?:pull|reset|checkout)\b/);
   assert.doesNotMatch(service, /summing\.env/);
   assert.match(service, /ExecStart=\/opt\/summing-current\/deploy\/summing-deploy/);
@@ -52,6 +54,11 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
     "the hardened runner must be able to create persistent dry-run artifacts",
   );
   assert.match(cutover, /if \[ ! -f "\$\{verified_marker\}" \]/);
+  assert.match(cutover, /prepare_environment_verification/);
+  assert.match(cutover, /exit 75/);
+  assert.match(cutover, /release_config=\$\{release_root\}\/deploy\/\$\{project_id\}\.runner\.json/);
+  assert.match(cutover, /jq '\.network = true'/);
+  assert.match(cutover, /chown --reference="\$\{config_path\}"/);
   assert.match(cutover, /Encrypted environment changed after Validate\/Dry run verification/);
   assert.match(cutover, /del\(\.envPath\)/);
   assert.match(cutover, /systemctl restart summing-runner\.service/);
