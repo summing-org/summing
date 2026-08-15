@@ -14,13 +14,12 @@ test("Project Viewer bounds Telegram authorization and network waits", () => {
   assert.match(VIEWER_JS, /new AbortController\(\)/);
   assert.match(VIEWER_JS, /Telegram не передал данные авторизации/);
   assert.match(VIEWER_JS, /Повторить/);
-  assert.match(VIEWER_HTML, /data-tab="settings"/);
+  assert.doesNotMatch(VIEWER_HTML, /data-tab="settings"/);
   assert.match(VIEWER_HTML, /data-tab="environment"/);
   assert.match(VIEWER_HTML, /Энвы репозитория/);
   assert.match(VIEWER_HTML, /id="environmentText"/);
-  assert.match(VIEWER_HTML, /Обновиться сейчас/);
-  assert.match(VIEWER_JS, /\/api\/viewer\/deployment/);
-  assert.match(VIEWER_JS, /state\.session\.administrator&&state\.session\.deploymentAvailable/);
+  assert.doesNotMatch(VIEWER_HTML, /Обновиться сейчас/);
+  assert.doesNotMatch(VIEWER_JS, /\/api\/viewer\/deployment/);
   assert.match(VIEWER_HTML, /id="artifactPanel"/);
   assert.match(VIEWER_HTML, /id="artifactReport"[^>]+sandbox/);
   assert.match(VIEWER_HTML, /href="\/logo\.svg"/);

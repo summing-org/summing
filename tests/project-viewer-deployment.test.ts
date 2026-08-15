@@ -77,7 +77,7 @@ class FakeDeployment implements DeploymentControl {
   }
 }
 
-test("viewer exposes deployment controls only to the SUMMING administrator", async () => {
+test("administrator Mini App owns deployment controls without a Project scope", async () => {
   const root = mkdtempSync(join(tmpdir(), "summing-viewer-deploy-"));
   const staticPath = join(root, "summing");
   const clientPath = join(root, "client");
@@ -151,21 +151,20 @@ test("viewer exposes deployment controls only to the SUMMING administrator", asy
     assert.equal(adminSession.status, 200);
     const adminPayload = await adminSession.json() as {
       administrator: boolean;
-      deploymentAvailable: boolean;
+      deploymentAvailable?: boolean;
     };
     assert.equal(adminPayload.administrator, true);
-    assert.equal(adminPayload.deploymentAvailable, true);
+    assert.equal(adminPayload.deploymentAvailable, undefined);
 
     const adminStatus = await fetch(
-      `${endpoint}/api/viewer/deployment?conversation=${adminConversation.id}`,
+      `${endpoint}/api/viewer/admin/deployment`,
       { headers: auth(1) },
     );
     assert.equal(adminStatus.status, 200);
 
-    const requested = await fetch(`${endpoint}/api/viewer/deployment`, {
+    const requested = await fetch(`${endpoint}/api/viewer/admin/deployment`, {
       method: "POST",
-      headers: { ...auth(1), "content-type": "application/json" },
-      body: JSON.stringify({ conversation: adminConversation.id }),
+      headers: auth(1),
     });
     assert.equal(requested.status, 202);
     assert.equal(deployment.requests, 1);
@@ -177,18 +176,28 @@ test("viewer exposes deployment controls only to the SUMMING administrator", asy
     assert.equal(ownerSession.status, 200);
     const ownerPayload = await ownerSession.json() as {
       administrator: boolean;
-      deploymentAvailable: boolean;
+      deploymentAvailable?: boolean;
     };
     assert.equal(ownerPayload.administrator, false);
-    assert.equal(ownerPayload.deploymentAvailable, false);
+    assert.equal(ownerPayload.deploymentAvailable, undefined);
 
-    const denied = await fetch(`${endpoint}/api/viewer/deployment`, {
+    const deniedStatus = await fetch(`${endpoint}/api/viewer/admin/deployment`, {
+      headers: auth(42),
+    });
+    assert.equal(deniedStatus.status, 403);
+
+    const denied = await fetch(`${endpoint}/api/viewer/admin/deployment`, {
       method: "POST",
-      headers: { ...auth(42), "content-type": "application/json" },
-      body: JSON.stringify({ conversation: ownerConversation.id }),
+      headers: auth(42),
     });
     assert.equal(denied.status, 403);
     assert.equal(deployment.requests, 1);
+
+    const removedProjectEndpoint = await fetch(
+      `${endpoint}/api/viewer/deployment?conversation=${adminConversation.id}`,
+      { headers: auth(1) },
+    );
+    assert.equal(removedProjectEndpoint.status, 404);
   } finally {
     await viewer.close();
     state.close();

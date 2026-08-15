@@ -223,6 +223,20 @@ export class ProjectViewerServer {
       json(response, 200, this.adminOverview());
       return;
     }
+    if (request.method === "GET" && url.pathname === "/api/viewer/admin/deployment") {
+      this.requireAdminAccess(telegramUser);
+      json(response, 200, await this.deployment.status());
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/viewer/admin/deployment") {
+      this.requireAdministrator(telegramUser);
+      const requestResult = await this.deployment.requestUpdate();
+      json(response, 202, {
+        request: requestResult,
+        deployment: await this.deployment.status(),
+      });
+      return;
+    }
     if (request.method === "GET" && url.pathname === "/api/viewer/admin/users") {
       this.requireAdminAccess(telegramUser);
       const rawChatId = url.searchParams.get("chatId") ?? "";
@@ -348,7 +362,6 @@ export class ProjectViewerServer {
         repository: await scope.inspector.summary(),
         runnerAvailable: await this.runner.available(),
         administrator: this.isAdministrator(telegramUser),
-        deploymentAvailable: this.isAdministrator(telegramUser) && this.deployment.available,
       });
       return;
     }
@@ -478,24 +491,6 @@ export class ProjectViewerServer {
       if (!/^[0-9a-f-]{36}$/.test(jobId)) throw new ViewerHttpError(400, "invalid job id");
       json(response, 200, {
         artifact: await this.runner.artifact(scope.project.id, jobId, name),
-      });
-      return;
-    }
-    if (request.method === "GET" && url.pathname === "/api/viewer/deployment") {
-      await this.scope(conversationId, telegramUser);
-      this.requireAdministrator(telegramUser);
-      json(response, 200, await this.deployment.status());
-      return;
-    }
-    if (request.method === "POST" && url.pathname === "/api/viewer/deployment") {
-      const body = await requestBody(request) as Record<string, unknown> | null;
-      const requestedConversation = String(body?.conversation ?? "");
-      await this.scope(requestedConversation, telegramUser);
-      this.requireAdministrator(telegramUser);
-      const requestResult = await this.deployment.requestUpdate();
-      json(response, 202, {
-        request: requestResult,
-        deployment: await this.deployment.status(),
       });
       return;
     }

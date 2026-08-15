@@ -1,6 +1,6 @@
-# SUMMING 9.5: архитектура, эксплуатация и разработка
+# SUMMING 9.6: архитектура, эксплуатация и разработка
 
-> Версия: **9.5.5**
+> Версия: **9.6.0**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
 > Последняя сверка с кодом: **15 августа 2026 года**.
 
@@ -788,6 +788,10 @@ Bot API не предоставляет полный список молчащи
 Перепривязка отклоняется, пока у Conversation есть active turn, processor или
 pending input; успешная смена использует тот же `StateStore.bind`, сбрасывает оба
 Codex thread и worktree path и очищает непостоянный unbound-контекст топика.
+Глобальный раздел **Настройки SUMMING** в этом же Mini App показывает deployment
+status и запрашивает атомарное обновление без выбора Project или Conversation.
+Project Viewer больше не содержит системную вкладку и остаётся scoped-интерфейсом
+конкретного Project/Repository.
 Карточки пользователей не входят в основной overview payload и загружаются только
 при раскрытии группы/topic. `/memory_forget_me` удаляет scoped activity автора из
 этой сводки и существующее Team Space opt-out блокирует повторное накопление до
@@ -1267,14 +1271,16 @@ Production не запускается непосредственно из из�
 Один `summing-deploy.service` обслуживает два источника запроса:
 
 - `summing-deploy.timer` проверяет `origin/master` каждые 10 минут;
-- администраторская кнопка **Настройки → Обновиться сейчас** атомарно обновляет
+- администраторская кнопка **Управление → Настройки SUMMING → Обновиться сейчас**
+  атомарно обновляет
   `/var/lib/summing/deploy/request.json`, который наблюдает
   `summing-deploy.path`.
 
 Request-файл не содержит команды или revision и не интерпретируется worker:
 каждый запуск самостоятельно получает и проверяет текущий remote ref. Deploy
-API требует Telegram Mini App signature и точный `TELEGRAM_OWNER_ID`; project
-owner получает `403`. Локальный SSH-tunnel bearer token считается
+API `/api/viewer/admin/deployment` не зависит от Project/Conversation, требует
+Telegram Mini App signature и точный `TELEGRAM_OWNER_ID`; project owner получает
+`403`. Локальный SSH-tunnel bearer token считается
 администраторским доступом, как и для остальных Viewer diagnostics.
 
 Порядок deployment:
@@ -1405,7 +1411,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "9.5.5",
+  "version": "9.6.0",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",

@@ -134,6 +134,27 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
     const denied = await fetch(`${endpoint}/api/viewer/admin`, { headers: auth(42) });
     assert.equal(denied.status, 403);
 
+    const disabledDeployment = await fetch(
+      `${endpoint}/api/viewer/admin/deployment`,
+      { headers: auth(1) },
+    );
+    assert.equal(disabledDeployment.status, 200);
+    assert.deepEqual(await disabledDeployment.json(), {
+      available: false,
+      status: "disabled",
+      message: "Автоматическое обновление не настроено",
+      currentSha: null,
+      remoteSha: null,
+      requestedAt: null,
+      startedAt: null,
+      finishedAt: null,
+    });
+    const unavailableDeploymentRequest = await fetch(
+      `${endpoint}/api/viewer/admin/deployment`,
+      { method: "POST", headers: auth(1) },
+    );
+    assert.equal(unavailableDeploymentRequest.status, 503);
+
     const initial = await fetch(`${endpoint}/api/viewer/admin`, { headers: auth(1) });
     assert.equal(initial.status, 200);
     const initialPayload = await initial.json() as {

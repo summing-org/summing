@@ -78,7 +78,7 @@ test("shows an explicit unknown state when a weekly window is absent", () => {
   assert.equal(snapshot.weekly, null);
   assert.equal(
     codexLimitsProfileText(snapshot, "UTC"),
-    "⚪ Codex: недельный лимит недоступен · SUMMING 9.5.5",
+    "⚪ Codex: недельный лимит недоступен · SUMMING 9.6.0",
   );
   assert.match(codexLimitsMessage(snapshot, "UTC"), /Недельное окно App Server не вернул/);
 });
