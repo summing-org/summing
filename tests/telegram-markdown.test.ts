@@ -93,6 +93,19 @@ test("renders GitHub-style tables as readable preformatted text", () => {
   ]);
 });
 
+test("renders an escaped expandable transcript before the response", () => {
+  assert.deepEqual(
+    markdownToTelegramHtmlChunks("**Ответ**", 3_900, {
+      title: "🎙 Транскрипция «voice.ogg»",
+      text: "Слышно <плохо> & неточно",
+    }),
+    [
+      "<blockquote expandable><b>🎙 Транскрипция «voice.ogg»</b>\n" +
+        "Слышно &lt;плохо&gt; &amp; неточно\n</blockquote>\n\n<b>Ответ</b>",
+    ],
+  );
+});
+
 test("long formatted answers are split into independently balanced chunks", () => {
   const limit = 180;
   const markdown = [

@@ -40,6 +40,7 @@ import {
 } from "./team-memory.js";
 import {
   StateStore,
+  type AudioTranscript,
   type Conversation,
   type PendingInput,
   type ResponseMode,
@@ -175,6 +176,7 @@ export class TelegramStream {
   private typingActive = false;
   private replyTo: number | null = null;
   private flushChain = Promise.resolve();
+  private expandableQuote: AudioTranscript | null = null;
 
   constructor(
     readonly api: TelegramAPI,
@@ -187,6 +189,10 @@ export class TelegramStream {
   start(replyTo?: number): void {
     this.replyTo = replyTo ?? null;
     this.startTyping();
+  }
+
+  showAudioTranscript(transcript: AudioTranscript): void {
+    this.expandableQuote = transcript;
   }
 
   private startTyping(): void {
@@ -246,7 +252,16 @@ export class TelegramStream {
   private async render(fallback: string): Promise<void> {
     const content = this.text.trim() || fallback;
     if (!content) return;
-    const chunks = markdownToTelegramHtmlChunks(content);
+    const chunks = markdownToTelegramHtmlChunks(
+      content,
+      undefined,
+      this.expandableQuote
+        ? {
+            title: `🎙 Транскрипция «${this.expandableQuote.fileName}»`,
+            text: this.expandableQuote.text,
+          }
+        : undefined,
+    );
     for (const [index, chunk] of chunks.entries()) {
       const messageId = this.messageIds[index];
       if (messageId !== undefined) {
@@ -273,9 +288,28 @@ interface CodexResponseRun {
   stream?: TelegramStream;
   turnId: string | null;
   response: string;
+  lastAgentMessageItemId: string | null;
   status: string;
   error: string | null;
   done: Deferred<void>;
+}
+
+export function appendAgentMessageDelta(
+  current: string,
+  previousItemId: string | null,
+  itemId: string,
+  delta: string,
+): string {
+  if (
+    current &&
+    previousItemId &&
+    previousItemId !== itemId &&
+    !/\s$/u.test(current) &&
+    !/^(?:\s|[,.;:!?…\)\]\}])/u.test(delta)
+  ) {
+    return ` ${delta}`;
+  }
+  return delta;
 }
 
 interface ActiveRun extends CodexResponseRun {
@@ -826,6 +860,7 @@ export class SummingRuntime {
         threadId,
         turnId: null,
         response: "",
+        lastAgentMessageItemId: null,
         status: "running",
         error: null,
         done: new Deferred<void>(),
@@ -1442,6 +1477,7 @@ export class SummingRuntime {
       return;
     }
     let attachment: StoredAttachment | null = null;
+    let audioTranscript: AudioTranscript | null = null;
     if (attachmentCandidate) {
       try {
         attachment = await this.attachments.download(message, conversation.id);
@@ -1483,6 +1519,7 @@ export class SummingRuntime {
             );
             return;
           }
+          audioTranscript = { fileName: attachment.fileName, text: transcript };
           text = [
             text,
             `Транскрипция аудио «${attachment.fileName}»:\n${transcript}`,
@@ -1530,6 +1567,7 @@ export class SummingRuntime {
         senderId,
         "direct",
         inputAttachments,
+        audioTranscript,
       );
       this.startProcessor(conversation);
       console.info(`queued direct participant input ${inputId} for ${conversation.id}`);
@@ -1556,6 +1594,7 @@ export class SummingRuntime {
         senderId,
         "direct",
         inputAttachments,
+        audioTranscript,
       );
       if (mode === "steer" && active?.turnId) {
         const pending = this.state.pending(conversation.id, "steer");
@@ -1574,6 +1613,7 @@ export class SummingRuntime {
       senderId,
       "direct",
       inputAttachments,
+      audioTranscript,
     );
     this.startProcessor(conversation);
   }
@@ -1782,6 +1822,7 @@ export class SummingRuntime {
         stream,
         turnId: null,
         response: "",
+        lastAgentMessageItemId: null,
         status: "running",
         error: null,
         done: new Deferred<void>(),
@@ -3131,6 +3172,19 @@ export class SummingRuntime {
       conversation.topicId,
       this.config.streamIntervalSec,
     );
+    const transcripts = inputs
+      .map((input) => input.audioTranscript)
+      .filter((transcript): transcript is AudioTranscript => transcript !== null);
+    if (transcripts.length === 1) {
+      stream.showAudioTranscript(transcripts[0]!);
+    } else if (transcripts.length > 1) {
+      stream.showAudioTranscript({
+        fileName: `${transcripts.length} аудио`,
+        text: transcripts
+          .map((transcript) => `«${transcript.fileName}»\n${transcript.text}`)
+          .join("\n\n"),
+      });
+    }
     let runId: number | null = null;
     let releaseWorkspace: (() => void) | null = null;
     let artifactInspector: GitInspector | null = null;
@@ -3219,6 +3273,7 @@ export class SummingRuntime {
         access,
         turnId: null,
         response: "",
+        lastAgentMessageItemId: null,
         status: "running",
         error: null,
         cancelRequested: false,
@@ -3440,14 +3495,23 @@ export class SummingRuntime {
   ): void {
     if (event.method === "item/agentMessage/delta") {
       if (typeof event.params.delta === "string") {
-        active.response += event.params.delta;
-        if (streamResponse) active.stream?.append(event.params.delta);
+        const itemId = String(event.params.itemId ?? "");
+        const delta = appendAgentMessageDelta(
+          active.response,
+          active.lastAgentMessageItemId,
+          itemId,
+          event.params.delta,
+        );
+        active.response += delta;
+        active.lastAgentMessageItemId = itemId || active.lastAgentMessageItemId;
+        if (streamResponse) active.stream?.append(delta);
       }
     } else if (event.method === "item/completed") {
       const item = record(event.params.item);
       if (item?.type === "agentMessage" && typeof item.text === "string") {
         if (item.phase === "final_answer" || item.phase === undefined || item.phase === null) {
           active.response = item.text;
+          active.lastAgentMessageItemId = String(item.id ?? "") || active.lastAgentMessageItemId;
           if (streamResponse && active.stream) active.stream.text = item.text;
         }
       }

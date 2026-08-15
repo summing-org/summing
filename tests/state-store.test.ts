@@ -39,6 +39,7 @@ test("binding, input queues, and Telegram offset", () => {
         filePath: "/private/spool/source.zip",
         size: 27,
       }],
+      { fileName: "voice.ogg", text: "Проверить транскрипцию" },
     );
     assert.deepEqual(store.pending(conversation.id, "steer").map((item) => item.id), [steerId]);
     assert.deepEqual(store.pending(conversation.id, "followup").map((item) => item.id), [followId]);
@@ -49,13 +50,18 @@ test("binding, input queues, and Telegram offset", () => {
         item.senderId,
         item.responseMode,
         item.attachments.map((attachment) => attachment.fileName),
+        item.audioTranscript?.fileName ?? null,
       ]),
       [
-        [steerId, "write", 0, "direct", []],
-        [followId, "write", 0, "direct", []],
-        [viewerId, "read-only", 55, "ambient", ["source.zip"]],
+        [steerId, "write", 0, "direct", [], null],
+        [followId, "write", 0, "direct", [], null],
+        [viewerId, "read-only", 55, "ambient", ["source.zip"], "voice.ogg"],
       ],
     );
+    assert.deepEqual(store.pendingAll(conversation.id)[2]?.audioTranscript, {
+      fileName: "voice.ogg",
+      text: "Проверить транскрипцию",
+    });
     assert.deepEqual(store.counts(), {
       conversations: 1,
       active: 1,

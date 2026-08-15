@@ -22,6 +22,11 @@ interface RenderedBlock {
   separator: "\n" | "\n\n";
 }
 
+export interface TelegramExpandableQuote {
+  title: string;
+  text: string;
+}
+
 function escapeHtml(value: string): string {
   return value.replace(/[&<>]/g, (character) => ({
     "&": "&amp;",
@@ -407,6 +412,7 @@ function splitBalancedHtml(html: string, limit: number): string[] {
 export function markdownToTelegramHtmlChunks(
   markdown: string,
   limit = DEFAULT_TELEGRAM_HTML_LIMIT,
+  expandableQuote?: TelegramExpandableQuote,
 ): string[] {
   if (!Number.isSafeInteger(limit) || limit < 128) {
     throw new RangeError("Telegram HTML chunk limit must be an integer of at least 128");
@@ -414,6 +420,16 @@ export function markdownToTelegramHtmlChunks(
   const source = markdown.trim();
   if (!source) return ["Готово."];
   const rendered: RenderedBlock[] = [];
+  if (expandableQuote?.text.trim()) {
+    const quote = [
+      `<blockquote expandable><b>${escapeHtml(expandableQuote.title.trim())}</b>`,
+      escapeHtml(expandableQuote.text.trim()),
+      "</blockquote>",
+    ].join("\n");
+    for (const [index, html] of splitBalancedHtml(quote, limit).entries()) {
+      rendered.push({ html, separator: index > 0 ? "\n" : "\n\n" });
+    }
+  }
   for (const block of parseBlocks(source)) {
     const pieces = splitBalancedHtml(renderBlock(block), limit);
     for (const [index, html] of pieces.entries()) {

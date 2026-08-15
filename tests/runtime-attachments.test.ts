@@ -100,6 +100,10 @@ test("voice is transcribed through the configured provider while documents remai
     assert.match(pending[0]?.text ?? "", /Транскрипция аудио «voice\.ogg»/);
     assert.match(pending[0]?.text ?? "", /Нужно проверить этот архив/);
     assert.deepEqual(pending[0]?.attachments, []);
+    assert.deepEqual(pending[0]?.audioTranscript, {
+      fileName: "voice.ogg",
+      text: "Нужно проверить этот архив",
+    });
     assert.equal(pending[1]?.text, "Посмотри эту программу");
     assert.deepEqual(pending[1]?.attachments.map((item) => item.fileName), ["source.zip"]);
     assert.match(pending[2]?.text ?? "", /Изучи приложенный файл «source\.zip»/);

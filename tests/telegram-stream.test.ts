@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { TelegramStream } from "../src/runtime.js";
+import { appendAgentMessageDelta, TelegramStream } from "../src/runtime.js";
 import { TelegramAPI } from "../src/telegram-api.js";
 
 function wait(milliseconds: number): Promise<void> {
@@ -79,4 +79,37 @@ test("streaming updates and the final edit both use Telegram HTML", async () => 
     stream.stopTyping();
     await api.close();
   }
+});
+
+test("a stream keeps an expandable audio transcript before every edit", async () => {
+  const api = new TelegramAPI("token");
+  const messages: string[] = [];
+  api.sendChatAction = async () => undefined;
+  api.sendMessage = async (_chatId, text) => {
+    messages.push(text);
+    return 101;
+  };
+  api.editMessage = async (_chatId, _messageId, text) => {
+    messages.push(text);
+  };
+  const stream = new TelegramStream(api, -10042, 17, 0, 1_000);
+  try {
+    stream.showAudioTranscript({ fileName: "voice.ogg", text: "Что было услышано" });
+    stream.append("Ответ");
+    await stream.flush();
+    assert.equal(
+      messages.at(-1),
+      "<blockquote expandable><b>🎙 Транскрипция «voice.ogg»</b>\n" +
+        "Что было услышано\n</blockquote>\n\nОтвет",
+    );
+  } finally {
+    stream.stopTyping();
+    await api.close();
+  }
+});
+
+test("separate agent message items get a boundary without splitting streamed words", () => {
+  assert.equal(appendAgentMessageDelta("Готов", "item-1", "item-1", "о."), "о.");
+  assert.equal(appendAgentMessageDelta("Готово.", "item-1", "item-2", "Дальше"), " Дальше");
+  assert.equal(appendAgentMessageDelta("Готово.", "item-1", "item-2", "\nДальше"), "\nДальше");
 });

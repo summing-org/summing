@@ -20,6 +20,11 @@ export interface Conversation {
 export type RunAccess = "write" | "read-only";
 export type ResponseMode = "direct" | "ambient";
 
+export interface AudioTranscript {
+  fileName: string;
+  text: string;
+}
+
 export interface PendingInput {
   id: number;
   conversationId: string;
@@ -30,6 +35,7 @@ export interface PendingInput {
   senderId: number;
   responseMode: ResponseMode;
   attachments: StoredAttachment[];
+  audioTranscript: AudioTranscript | null;
   createdAt: number;
 }
 
@@ -358,6 +364,7 @@ export class StateStore {
           response_mode TEXT NOT NULL DEFAULT 'direct'
             CHECK(response_mode IN ('direct', 'ambient')),
           attachments_json TEXT NOT NULL DEFAULT '[]',
+          audio_transcript_json TEXT NOT NULL DEFAULT '',
           run_id INTEGER,
           state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending', 'consumed')),
           created_at REAL NOT NULL
@@ -667,6 +674,11 @@ export class StateStore {
       if (!pendingColumns.some((column) => column.name === "attachments_json")) {
         this.db.exec(
           "ALTER TABLE pending_inputs ADD COLUMN attachments_json TEXT NOT NULL DEFAULT '[]'",
+        );
+      }
+      if (!pendingColumns.some((column) => column.name === "audio_transcript_json")) {
+        this.db.exec(
+          "ALTER TABLE pending_inputs ADD COLUMN audio_transcript_json TEXT NOT NULL DEFAULT ''",
         );
       }
       if (!pendingColumns.some((column) => column.name === "run_id")) {
@@ -2255,13 +2267,14 @@ export class StateStore {
     senderId = 0,
     responseMode: ResponseMode = "direct",
     attachments: StoredAttachment[] = [],
+    audioTranscript: AudioTranscript | null = null,
   ): number {
     return this.transaction(() => {
       const result = this.db.prepare(`
         INSERT INTO pending_inputs
           (conversation_id, telegram_message_id, text, mode, access_mode, telegram_user_id,
-           response_mode, attachments_json, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           response_mode, attachments_json, audio_transcript_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         conversationId,
         telegramMessageId,
@@ -2271,6 +2284,7 @@ export class StateStore {
         senderId,
         responseMode,
         JSON.stringify(attachments),
+        audioTranscript ? JSON.stringify(audioTranscript) : "",
         Date.now() / 1000,
       );
       return Number(result.lastInsertRowid);
@@ -2284,7 +2298,7 @@ export class StateStore {
   ): PendingInput[] {
     const rows = this.db.prepare(`
       SELECT id, conversation_id, telegram_message_id, text, mode, access_mode,
-             telegram_user_id, response_mode, attachments_json, created_at
+             telegram_user_id, response_mode, attachments_json, audio_transcript_json, created_at
       FROM pending_inputs
       WHERE conversation_id = ? AND mode = ? AND access_mode = ? AND state = 'pending'
       ORDER BY created_at, id
@@ -2295,7 +2309,7 @@ export class StateStore {
   pendingAll(conversationId: string): PendingInput[] {
     const rows = this.db.prepare(`
       SELECT id, conversation_id, telegram_message_id, text, mode, access_mode,
-             telegram_user_id, response_mode, attachments_json, created_at
+             telegram_user_id, response_mode, attachments_json, audio_transcript_json, created_at
       FROM pending_inputs
       WHERE conversation_id = ? AND state = 'pending'
       ORDER BY created_at, id
@@ -2305,11 +2319,23 @@ export class StateStore {
 
   private toPending(row: Row): PendingInput {
     let attachments: StoredAttachment[] = [];
+    let audioTranscript: AudioTranscript | null = null;
     try {
       const value = JSON.parse(String(row.attachments_json ?? "[]"));
       attachments = storedAttachments(value);
     } catch {
       console.warn(`discarding invalid attachment metadata for pending input ${String(row.id)}`);
+    }
+    try {
+      const value = JSON.parse(String(row.audio_transcript_json || "null")) as unknown;
+      if (value && typeof value === "object" && !Array.isArray(value)) {
+        const candidate = value as Record<string, unknown>;
+        if (typeof candidate.fileName === "string" && typeof candidate.text === "string") {
+          audioTranscript = { fileName: candidate.fileName, text: candidate.text };
+        }
+      }
+    } catch {
+      console.warn(`discarding invalid audio transcript for pending input ${String(row.id)}`);
     }
     return {
       id: Number(row.id),
@@ -2321,6 +2347,7 @@ export class StateStore {
       senderId: Number(row.telegram_user_id),
       responseMode: String(row.response_mode) as ResponseMode,
       attachments,
+      audioTranscript,
       createdAt: Number(row.created_at),
     };
   }
