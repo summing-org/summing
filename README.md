@@ -73,7 +73,8 @@ Team Space: создаётся при подключении командног�
   Groq Whisper доступен как опция, в Codex передаётся только текст, а локальный
   аудиофайл удаляется;
 - Project Viewer открывается как Telegram Mini App: показывает дерево, безопасный
-  текст файлов, working/commit/run diff, состояние `origin`, безопасные Pull/Push,
+  текст файлов, working/commit/run diff, состояние `origin`, безопасные Pull/Push
+  текущей ветки и явную fast-forward публикацию её `HEAD` в `origin/master`,
   runner jobs, логи и простой dotenv-editor;
 - отдельный администраторский Mini App открывается постоянной кнопкой
   **Управление** в личном чате: показывает проекты и обнаруженные Telegram-топики,
@@ -396,6 +397,14 @@ config/unit/Caddyfile сохраняются для rollback. После cutover
 rebase или reset. Для private remote заранее настройте non-interactive write
 credentials пользователя `summing` либо используйте встроенный SSH-мастер.
 
+Отдельная кнопка **Отправить в origin/master** доступна тому же owner и
+администратору. Перед подтверждением Viewer показывает текущий `HEAD`, актуальный
+`origin/master` и число публикуемых commits. Backend повторно делает fetch,
+сверяет оба полных SHA и разрешает только fast-forward точного текущего `HEAD`
+при чистом working tree. Кнопка не создаёт отсутствующий `master`, merge commit,
+reset или force-push; если remote успел измениться, требуется обновить состояние
+и подтвердить публикацию заново.
+
 Если `origin` отсутствует, owner вставляет SSH URL вида
 `git@github.com:owner/repository.git`. SUMMING один раз добавляет `origin`,
 создаёт отдельный Ed25519 deploy key для Project repository и показывает в API
@@ -416,8 +425,9 @@ host key принимается по TOFU, после чего его измен
 deploy key ротируется в два этапа: новый ключ сначала добавляется и проверяется,
 пока старый продолжает работать, и лишь затем активируется. Старый project-local
 `core.sshCommand` не исполняется и удаляется отдельной миграцией только после
-успешной проверки управляемого ключа. Подключения, проверки, Pull/Push, смены URL
-и ротации записываются в ограниченный журнал с actor, временем, branch и HEAD.
+успешной проверки управляемого ключа. Подключения, проверки, Pull/Push, публикации
+в `origin/master`, смены URL и ротации записываются в ограниченный журнал с actor,
+временем, branch и HEAD.
 
 Существующие внешние SSH и HTTPS URL без embedded token продолжают работать;
 repository-local hooks, command filters, credential helpers, SSH overrides и

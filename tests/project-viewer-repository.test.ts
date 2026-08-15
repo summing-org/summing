@@ -62,10 +62,12 @@ test("repository tab gives the project owner and administrator safe push and pul
   const replacementRemote = join(workspace, ".git", "replacement.git");
   const updater = join(root, "updater");
   initializeRepository(workspace);
-  execFileSync("git", ["init", "--bare", "--initial-branch=main", remote]);
-  execFileSync("git", ["init", "--bare", "--initial-branch=main", replacementRemote]);
+  git(workspace, "branch", "-m", "master");
+  execFileSync("git", ["init", "--bare", "--initial-branch=master", remote]);
+  execFileSync("git", ["init", "--bare", "--initial-branch=master", replacementRemote]);
   git(workspace, "remote", "add", "origin", remote);
-  git(workspace, "push", "origin", "main");
+  git(workspace, "push", "origin", "master");
+  git(workspace, "switch", "-c", "summing/client/topic");
   writeFileSync(join(workspace, "LOCAL.md"), "local\n");
   git(workspace, "add", "LOCAL.md");
   git(workspace, "commit", "-m", "local change");
@@ -131,10 +133,19 @@ test("repository tab gives the project owner and administrator safe push and pul
     );
     assert.equal(statusResponse.status, 200);
     const statusPayload = await statusResponse.json() as {
-      repository: { head: string; ahead: number; canPush: boolean };
+      repository: {
+        head: string;
+        ahead: number;
+        canPush: boolean;
+        masterHead: string;
+        masterAhead: number;
+        canPushMaster: boolean;
+      };
     };
     assert.equal(statusPayload.repository.ahead, 1);
     assert.equal(statusPayload.repository.canPush, true);
+    assert.equal(statusPayload.repository.masterAhead, 1);
+    assert.equal(statusPayload.repository.canPushMaster, true);
 
     const administratorStatus = await fetch(
       `${endpoint}/api/viewer/repository?conversation=${conversation.id}`,
@@ -153,8 +164,10 @@ test("repository tab gives the project owner and administrator safe push and pul
       headers: { ...auth(42), "content-type": "application/json" },
       body: JSON.stringify({
         conversation: conversation.id,
-        action: "push",
+        action: "push-master",
         expectedHead: statusPayload.repository.head,
+        expectedMasterHead: statusPayload.repository.masterHead,
+        confirmed: true,
       }),
     });
     assert.equal(busy.status, 409);
@@ -170,15 +183,87 @@ test("repository tab gives the project owner and administrator safe push and pul
       }),
     });
     assert.equal(pushed.status, 200);
-    assert.equal(git(remote, "rev-parse", "refs/heads/main"), git(workspace, "rev-parse", "HEAD"));
+    assert.equal(
+      git(remote, "rev-parse", "refs/heads/summing/client/topic"),
+      git(workspace, "rev-parse", "HEAD"),
+    );
+    assert.notEqual(
+      git(remote, "rev-parse", "refs/heads/master"),
+      git(workspace, "rev-parse", "HEAD"),
+    );
 
-    execFileSync("git", ["clone", "--branch", "main", remote, updater]);
+    const unconfirmedMaster = await fetch(`${endpoint}/api/viewer/repository`, {
+      method: "POST",
+      headers: { ...auth(42), "content-type": "application/json" },
+      body: JSON.stringify({
+        conversation: conversation.id,
+        action: "push-master",
+        expectedHead: statusPayload.repository.head,
+        expectedMasterHead: statusPayload.repository.masterHead,
+      }),
+    });
+    assert.equal(unconfirmedMaster.status, 400);
+    const ownerMaster = await fetch(`${endpoint}/api/viewer/repository`, {
+      method: "POST",
+      headers: { ...auth(42), "content-type": "application/json" },
+      body: JSON.stringify({
+        conversation: conversation.id,
+        action: "push-master",
+        expectedHead: statusPayload.repository.head,
+        expectedMasterHead: statusPayload.repository.masterHead,
+        confirmed: true,
+      }),
+    });
+    assert.equal(ownerMaster.status, 200);
+    assert.equal(
+      git(remote, "rev-parse", "refs/heads/master"),
+      git(workspace, "rev-parse", "HEAD"),
+    );
+
+    writeFileSync(join(workspace, "ADMIN.md"), "administrator publication\n");
+    git(workspace, "add", "ADMIN.md");
+    git(workspace, "commit", "-m", "administrator publication");
+    const administratorMasterStatus = await fetch(
+      `${endpoint}/api/viewer/repository?conversation=${conversation.id}`,
+      { headers: auth(1) },
+    );
+    const administratorMasterPayload = await administratorMasterStatus.json() as {
+      repository: {
+        head: string;
+        masterHead: string;
+        canPush: boolean;
+        canPushMaster: boolean;
+      };
+    };
+    assert.equal(administratorMasterPayload.repository.canPushMaster, true);
+    const administratorMaster = await fetch(`${endpoint}/api/viewer/repository`, {
+      method: "POST",
+      headers: { ...auth(1), "content-type": "application/json" },
+      body: JSON.stringify({
+        conversation: conversation.id,
+        action: "push-master",
+        expectedHead: administratorMasterPayload.repository.head,
+        expectedMasterHead: administratorMasterPayload.repository.masterHead,
+        confirmed: true,
+      }),
+    });
+    assert.equal(administratorMaster.status, 200);
+    assert.equal(
+      git(remote, "rev-parse", "refs/heads/master"),
+      administratorMasterPayload.repository.head,
+    );
+    const synchronizedFeature = await repositoryPost("push", {
+      expectedHead: administratorMasterPayload.repository.head,
+    });
+    assert.equal(synchronizedFeature.status, 200);
+
+    execFileSync("git", ["clone", "--branch", "summing/client/topic", remote, updater]);
     git(updater, "config", "user.name", "Remote");
     git(updater, "config", "user.email", "remote@example.test");
     writeFileSync(join(updater, "REMOTE.md"), "remote\n");
     git(updater, "add", "REMOTE.md");
     git(updater, "commit", "-m", "remote change");
-    git(updater, "push", "origin", "main");
+    git(updater, "push", "origin", "HEAD");
 
     const behindResponse = await fetch(
       `${endpoint}/api/viewer/repository?conversation=${conversation.id}`,
@@ -213,7 +298,10 @@ test("repository tab gives the project owner and administrator safe push and pul
     assert.equal(verifiedBody.experience.verification.write, true);
     assert.equal(verifiedBody.experience.verification.code, "ok");
     assert.match(verifiedBody.experience.verification.checkedAt, /^\d{4}-\d{2}-\d{2}T/);
-    assert.equal(git(remote, "for-each-ref", "--format=%(refname)", "refs/heads/summing"), "");
+    assert.equal(
+      git(remote, "for-each-ref", "--format=%(refname)", "refs/heads/summing/access-check-"),
+      "",
+    );
 
     const preview = await repositoryPost("preview-origin", { remoteUrl: replacementRemote });
     assert.equal(preview.status, 200);
@@ -299,6 +387,9 @@ test("repository controls are present in the Mini App", () => {
   assert.match(VIEWER_HTML, /id="repositoryAudit"/);
   assert.match(VIEWER_HTML, /id="pullRepository"/);
   assert.match(VIEWER_HTML, /id="pushRepository"/);
+  assert.match(VIEWER_HTML, /id="pushMasterRepository"/);
+  assert.match(VIEWER_HTML, /id="repositoryMasterHead"/);
+  assert.match(VIEWER_HTML, /id="repositoryMasterAhead"/);
   assert.match(VIEWER_JS, /postRepository\("connect"/);
   assert.match(VIEWER_JS, /copyFrom\("repositoryPublicKey"/);
   assert.match(VIEWER_JS, /postRepository\("verify"\)/);
@@ -306,6 +397,8 @@ test("repository controls are present in the Mini App", () => {
   assert.match(VIEWER_JS, /rotationAction\("activate-rotation"\)/);
   assert.match(VIEWER_JS, /syncRepository\("pull"\)/);
   assert.match(VIEWER_JS, /syncRepository\("push"\)/);
+  assert.match(VIEWER_JS, /postRepository\("push-master"/);
+  assert.match(VIEWER_JS, /expectedMasterHead:repository\.masterHead/);
 });
 
 test("repository onboarding configures a missing origin and returns only its public deploy key", async () => {

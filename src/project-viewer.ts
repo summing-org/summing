@@ -54,6 +54,7 @@ interface ViewerRepositoryConnection {
 const REPOSITORY_ACTIONS = new Set([
   "pull",
   "push",
+  "push-master",
   "connect",
   "verify",
   "migrate-legacy",
@@ -648,6 +649,7 @@ export class ProjectViewerServer {
     body: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
     const expectedHead = String(body.expectedHead ?? "");
+    const expectedMasterHead = String(body.expectedMasterHead ?? "");
     const expectedRemote = String(body.expectedRemote ?? "");
     const remoteUrl = String(body.remoteUrl ?? "");
     let context = await this.repositoryContext(scope);
@@ -866,6 +868,15 @@ export class ProjectViewerServer {
         context.rotation = null;
         repository = await context.inspector.repositoryStatus(false);
         message = "Ротация ключа отменена.";
+      } else if (action === "push-master") {
+        if (body.confirmed !== true) {
+          throw new ViewerHttpError(400, "подтвердите публикацию в origin/master");
+        }
+        repository = await context.inspector.pushHeadToMaster(
+          expectedHead,
+          expectedMasterHead,
+        );
+        message = "Текущий HEAD опубликован в origin/master безопасным fast-forward.";
       } else {
         repository = action === "pull"
           ? await context.inspector.pullCurrentBranch(expectedHead)
@@ -967,6 +978,8 @@ export class ProjectViewerServer {
           ...repository,
           canPush: false,
           canPull: false,
+          canPushMaster: false,
+          masterMessage: `${repository.masterMessage} Дождитесь завершения активного Codex run.`,
           message: `${repository.message} Дождитесь завершения активного Codex run.`,
         }
       : verification
@@ -974,9 +987,10 @@ export class ProjectViewerServer {
             ...repository,
             canPush: repository.canPush && verification.write,
             canPull: repository.canPull && verification.read,
+            canPushMaster: repository.canPushMaster && verification.write,
           }
         : context.credential
-          ? { ...repository, canPush: false, canPull: false }
+          ? { ...repository, canPush: false, canPull: false, canPushMaster: false }
           : repository;
     return {
       repository: gated,

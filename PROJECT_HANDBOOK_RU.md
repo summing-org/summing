@@ -1,6 +1,6 @@
 # SUMMING 9.5: архитектура, эксплуатация и разработка
 
-> Версия: **9.5.3**
+> Версия: **9.5.4**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
 > Последняя сверка с кодом: **15 августа 2026 года**.
 
@@ -494,7 +494,9 @@ SUMMING не делает автоматически merge, rebase, commit, push
 
 Администратор и owner могут синхронизировать текущую conversation-ветку вручную
 во вкладке **Репозиторий** Project Viewer. Это не автоматическая интеграция:
-каждый Push или Pull запускается отдельным явным нажатием пользователя.
+каждый Push, Pull или fast-forward текущего `HEAD` в `origin/master` запускается
+отдельным явным нажатием, а публикация в `master` дополнительно требует
+подтверждения пользователя.
 
 Если Workspace не является Git-репозиторием, используется исходный каталог
 напрямую. Runs одного такого Workspace сериализуются: это сохраняет целостность
@@ -761,7 +763,8 @@ mobile-first интерфейс и JSON API показывают:
 - последние commits и diff commit относительно parent;
 - before/after patch конкретного editor Run;
 - подключение отсутствующего `origin` через проектный SSH deploy key, состояние
-  текущей ветки относительно remote и явные Pull/Push;
+  текущей ветки относительно remote, явные Pull/Push и отдельную fast-forward
+  публикацию текущего `HEAD` в `origin/master`;
 - очередь, статусы и журналы project runner.
 
 Тот же server публикует отдельный администраторский Mini App на `/admin`, которому
@@ -808,6 +811,14 @@ remote-ветку обычным non-force refspec и не включает не
 разрешён только для чистого worktree, когда изменение возможно через
 `merge --ff-only`; divergence оставляется пользователю/Codex для явного merge
 или rebase.
+
+Отдельный `POST action=push-master` отправляет точный текущий `HEAD` в
+`refs/heads/master`. Он требует явный `confirmed=true`, чистый worktree,
+существующий `origin/master` и полный ожидаемый SHA как `HEAD`, так и
+`origin/master`. После повторного fetch операция разрешена только когда
+`origin/master` является предком текущего `HEAD`; обычный non-force push
+дополнительно закрывает race между fetch и публикацией. Mini App не создаёт
+основную ветку, merge commit, reset/rebase и никогда не переписывает историю.
 
 POST содержит ожидаемый полный HEAD, поэтому устаревшая кнопка не публикует и не
 обновляет уже изменившуюся ветку. Viewer-операции сериализуются на общий Git
@@ -1388,7 +1399,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "9.5.3",
+  "version": "9.5.4",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",
@@ -1657,8 +1668,9 @@ Telegram/OpenAI/Groq end-to-end теста в репозитории нет.
 - documents/ZIP и voice/audio принимаются до Telegram download limit 20 МБ;
 - один бот и один SQLite;
 - нет multi-host coordination;
-- нет автоматического commit/merge/push и force push; ручные Pull/Push доступны
-  owner и администратору в Project Viewer;
+- нет автоматического commit/merge/push и force push; ручные Pull/Push текущей
+  ветки и fast-forward её `HEAD` в существующий `origin/master` доступны owner и
+  администратору в Project Viewer;
 - нет смены owner, удаления Project или добавления второго repository через Telegram;
 - Viewer публикуется только через явно настроенный HTTPS proxy и owner ACL;
 - нет per-message approval UI;

@@ -61,6 +61,13 @@ export interface RepositorySyncStatus extends RepositorySummary {
   message: string;
   canPush: boolean;
   canPull: boolean;
+  masterPublished: boolean;
+  masterHead: string;
+  masterShortHead: string;
+  masterAhead: number;
+  masterBehind: number;
+  masterMessage: string;
+  canPushMaster: boolean;
   errorCode: RepositoryDiagnosticCode;
   legacySshCommand: boolean;
 }
@@ -348,6 +355,13 @@ export class GitInspector {
       message: "Origin не настроен.",
       canPush: false,
       canPull: false,
+      masterPublished: false,
+      masterHead: "",
+      masterShortHead: "",
+      masterAhead: 0,
+      masterBehind: 0,
+      masterMessage: "Origin/master недоступен.",
+      canPushMaster: false,
       errorCode: "missing-origin",
       legacySshCommand: false,
     };
@@ -399,6 +413,7 @@ export class GitInspector {
     );
     const published = publishedResult.code === 0;
     const defaultBranch = await this.defaultRemoteBranch();
+    const master = await this.masterPublicationStatus(summary);
     const pullSource = published ? `origin/${summary.branch}` : defaultBranch;
     let ahead = 0;
     let behind = 0;
@@ -457,6 +472,7 @@ export class GitInspector {
       message,
       canPush: !published || (ahead > 0 && behind === 0),
       canPull: !summary.dirty && Boolean(pullSource) && ahead === 0 && behind > 0,
+      ...master,
       errorCode: legacySshCommand ? "legacy-ssh-command" : "ok",
       legacySshCommand,
     };
@@ -565,6 +581,60 @@ export class GitInspector {
     );
     if (pushed.code !== 0) {
       throw new GitInspectorError(`Push в origin не выполнен: ${gitFailure(pushed, status.remote)}`);
+    }
+    return this.repositoryStatus(true);
+  }
+
+  async pushHeadToMaster(
+    expectedHead: string,
+    expectedMasterHead: string,
+  ): Promise<RepositorySyncStatus> {
+    const status = await this.repositoryStatus(true);
+    this.verifyExpectedHead(status, expectedHead);
+    if (!status.remote) throw new GitInspectorError("origin не настроен");
+    if (status.state === "error") throw new GitInspectorError(status.message);
+    if (status.dirty) {
+      throw new GitInspectorError(
+        "перед публикацией в origin/master закоммитьте или отмените рабочие изменения",
+      );
+    }
+    if (!status.masterPublished) {
+      throw new GitInspectorError(
+        "origin/master отсутствует; создание основной ветки через Mini App запрещено",
+      );
+    }
+    if (
+      !/^[0-9a-f]{40}$/.test(expectedMasterHead)
+      || expectedMasterHead !== status.masterHead
+    ) {
+      throw new GitInspectorError(
+        "origin/master изменился после отображения; обновите состояние и подтвердите снова",
+      );
+    }
+    if (status.masterBehind > 0) {
+      throw new GitInspectorError(
+        "в origin/master есть отсутствующие в текущей ветке коммиты; сначала выполните merge или rebase",
+      );
+    }
+    if (status.masterAhead === 0) return status;
+    if (!status.canPushMaster) {
+      throw new GitInspectorError("текущий HEAD нельзя безопасно опубликовать в origin/master");
+    }
+    const endpoints = await this.repositoryEndpoints();
+    const pushed = await this.git(
+      [
+        "push",
+        "--porcelain",
+        "--",
+        endpoints.push,
+        `${status.head}:refs/heads/master`,
+      ],
+      { allowFailure: true, env: this.repositoryEnvironment() },
+    );
+    if (pushed.code !== 0) {
+      throw new GitInspectorError(
+        `Публикация в origin/master не выполнена: ${gitFailure(pushed, status.remote)}`,
+      );
     }
     return this.repositoryStatus(true);
   }
@@ -886,6 +956,68 @@ export class GitInspector {
       value.startsWith("origin/") && value !== "origin/HEAD"
     );
     return refs.length === 1 ? refs[0]! : "";
+  }
+
+  private async masterPublicationStatus(summary: RepositorySummary): Promise<{
+    masterPublished: boolean;
+    masterHead: string;
+    masterShortHead: string;
+    masterAhead: number;
+    masterBehind: number;
+    masterMessage: string;
+    canPushMaster: boolean;
+  }> {
+    const masterRef = "refs/remotes/origin/master";
+    const exists = await this.git(
+      ["show-ref", "--verify", "--quiet", masterRef],
+      { allowFailure: true },
+    );
+    if (exists.code !== 0) {
+      return {
+        masterPublished: false,
+        masterHead: "",
+        masterShortHead: "",
+        masterAhead: 0,
+        masterBehind: 0,
+        masterMessage: "В origin нет ветки master; Mini App не создаёт основную ветку автоматически.",
+        canPushMaster: false,
+      };
+    }
+    const masterHead = text(await this.git(["rev-parse", masterRef])).trim();
+    const counts = text(await this.git([
+      "rev-list",
+      "--left-right",
+      "--count",
+      `HEAD...${masterRef}`,
+    ])).trim().split(/\s+/);
+    const masterAhead = Number(counts[0] ?? 0);
+    const masterBehind = Number(counts[1] ?? 0);
+    let masterMessage: string;
+    if (masterAhead > 0 && masterBehind > 0) {
+      masterMessage =
+        "Текущая ветка и origin/master разошлись; сначала выполните merge или rebase.";
+    } else if (masterBehind > 0) {
+      masterMessage =
+        `В origin/master есть ${masterBehind} отсутствующих локально коммитов; ` +
+        "сначала добавьте их в текущую ветку.";
+    } else if (masterAhead > 0 && summary.dirty) {
+      masterMessage =
+        `Fast-forward на ${masterAhead} комм., но рабочее дерево должно быть чистым.`;
+    } else if (masterAhead > 0) {
+      masterMessage =
+        `Готово к fast-forward: ${masterAhead} комм. из ${summary.branch} в origin/master.`;
+    } else {
+      masterMessage = "Origin/master уже содержит текущий HEAD.";
+    }
+    return {
+      masterPublished: true,
+      masterHead,
+      masterShortHead: masterHead.slice(0, 8),
+      masterAhead,
+      masterBehind,
+      masterMessage,
+      canPushMaster: !summary.dirty && masterAhead > 0 && masterBehind === 0,
+    };
   }
 
   async tree(): Promise<TreeEntry[]> {

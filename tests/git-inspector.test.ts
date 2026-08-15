@@ -252,6 +252,92 @@ test("publishes and fast-forwards the current branch without force or automatic 
   }
 });
 
+test("publishes a clean current HEAD to origin/master only as a fast-forward", async () => {
+  const fixture = mkdtempSync(join(tmpdir(), "summing-inspector-master-publish-"));
+  const local = join(fixture, "local");
+  const remote = join(local, ".git", "origin.git");
+  const updater = join(fixture, "updater");
+  try {
+    execFileSync("git", ["init", "--initial-branch=master", local]);
+    execFileSync("git", ["init", "--bare", "--initial-branch=master", remote]);
+    execFileSync("git", ["-C", local, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", local, "config", "user.email", "test@example.test"]);
+    writeFileSync(join(local, "README.md"), "initial\n");
+    execFileSync("git", ["-C", local, "add", "README.md"]);
+    execFileSync("git", ["-C", local, "commit", "-m", "initial"]);
+    execFileSync("git", ["-C", local, "remote", "add", "origin", remote]);
+    execFileSync("git", ["-C", local, "switch", "-c", "summing/client/topic"]);
+    writeFileSync(join(local, "FEATURE.md"), "feature\n");
+    execFileSync("git", ["-C", local, "add", "FEATURE.md"]);
+    execFileSync("git", ["-C", local, "commit", "-m", "feature"]);
+
+    const inspector = new GitInspector(local);
+    const missingMaster = await inspector.repositoryStatus();
+    assert.equal(missingMaster.masterPublished, false);
+    assert.equal(missingMaster.canPushMaster, false);
+    await assert.rejects(
+      inspector.pushHeadToMaster(missingMaster.head, ""),
+      /создание основной ветки через Mini App запрещено/,
+    );
+    execFileSync("git", ["-C", local, "push", "origin", "master"]);
+    const ready = await inspector.repositoryStatus();
+    assert.equal(ready.masterPublished, true);
+    assert.equal(ready.masterAhead, 1);
+    assert.equal(ready.masterBehind, 0);
+    assert.equal(ready.canPushMaster, true);
+
+    writeFileSync(join(local, "DRAFT.md"), "not committed\n");
+    const dirty = await inspector.repositoryStatus();
+    assert.equal(dirty.canPushMaster, false);
+    await assert.rejects(
+      inspector.pushHeadToMaster(dirty.head, dirty.masterHead),
+      /рабочие изменения/,
+    );
+    rmSync(join(local, "DRAFT.md"));
+
+    const clean = await inspector.repositoryStatus();
+    await assert.rejects(
+      inspector.pushHeadToMaster(clean.head, "0".repeat(40)),
+      /origin\/master изменился после отображения/,
+    );
+    const hookMarker = join(fixture, "master-hook-ran");
+    const hook = join(local, ".git", "hooks", "pre-push");
+    writeFileSync(hook, `#!/bin/sh\nprintf ran > ${JSON.stringify(hookMarker)}\n`);
+    chmodSync(hook, 0o700);
+    const published = await inspector.pushHeadToMaster(clean.head, clean.masterHead);
+    assert.equal(published.masterAhead, 0);
+    assert.equal(published.canPushMaster, false);
+    assert.equal(
+      gitOutput(remote, "rev-parse", "refs/heads/master"),
+      clean.head,
+    );
+    assert.equal(existsSync(hookMarker), false);
+
+    execFileSync("git", ["clone", "--branch", "master", remote, updater]);
+    execFileSync("git", ["-C", updater, "config", "user.name", "Remote"]);
+    execFileSync("git", ["-C", updater, "config", "user.email", "remote@example.test"]);
+    writeFileSync(join(local, "LOCAL.md"), "local\n");
+    execFileSync("git", ["-C", local, "add", "LOCAL.md"]);
+    execFileSync("git", ["-C", local, "commit", "-m", "next local"]);
+    const stale = await inspector.repositoryStatus();
+    writeFileSync(join(updater, "REMOTE.md"), "remote\n");
+    execFileSync("git", ["-C", updater, "add", "REMOTE.md"]);
+    execFileSync("git", ["-C", updater, "commit", "-m", "next remote"]);
+    execFileSync("git", ["-C", updater, "push", "origin", "master"]);
+
+    await assert.rejects(
+      inspector.pushHeadToMaster(stale.head, stale.masterHead),
+      /origin\/master изменился после отображения/,
+    );
+    const diverged = await inspector.repositoryStatus();
+    assert.equal(diverged.masterAhead, 1);
+    assert.equal(diverged.masterBehind, 1);
+    assert.equal(diverged.canPushMaster, false);
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
 test("verifies read and write without creating refs, migrates legacy SSH, and safely changes origin", async () => {
   const fixture = mkdtempSync(join(tmpdir(), "summing-inspector-access-"));
   const local = join(fixture, "local");
