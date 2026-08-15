@@ -10,7 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import test from "node:test";
 import { CodexAppServer, type JsonRecord } from "../src/codex-app-server.js";
 
@@ -82,12 +82,18 @@ test("thread and turn requests use official v2 shapes", async (context) => {
   const launcher = join(binaryFixture, "codex");
   symlinkSync(releaseExecutable, launcher);
   const canonicalReleaseBin = realpathSync(releaseBin);
+  const canonicalNodeBin = dirname(realpathSync(process.execPath));
+  const canonicalNodeInstallation =
+    basename(canonicalNodeBin) === "bin" ? dirname(canonicalNodeBin) : canonicalNodeBin;
   context.after(() => rmSync(binaryFixture, { recursive: true, force: true }));
   const client = new FakeCodex(launcher, "/tmp/codex-test");
   const permissionOptions = {
     deniedPaths: ["workspace/deep/secrets/.env"],
     networkAccess: true,
-    gitMetadataRoots: ["/tmp/project-git"],
+    gitMetadataRoots: [
+      "/tmp/project-git",
+      "/tmp/project-git/worktrees/project-workspace",
+    ],
     readableRoots: ["/tmp/project"],
   };
   const threadId = await client.startThread("/tmp/project/workspace", "", permissionOptions);
@@ -105,7 +111,11 @@ test("thread and turn requests use official v2 shapes", async (context) => {
   const threadParams = client.calls[0]?.[1] ?? {};
   assert.equal(Object.hasOwn(threadParams, "sandbox"), false);
   assert.equal(threadParams.permissions, "summing-project");
-  assert.deepEqual(threadParams.runtimeWorkspaceRoots, ["/tmp/project", "/tmp/project-git"]);
+  assert.deepEqual(threadParams.runtimeWorkspaceRoots, [
+    "/tmp/project",
+    "/tmp/project-git",
+    "/tmp/project-git/worktrees/project-workspace",
+  ]);
   assert.equal(Object.hasOwn(threadParams, "environments"), false);
   assert.deepEqual(threadParams.dynamicTools, []);
   assert.deepEqual(threadParams.selectedCapabilityRoots, []);
@@ -119,6 +129,7 @@ test("thread and turn requests use official v2 shapes", async (context) => {
           ":workspace_roots": {
             ".": "read",
           },
+          [canonicalNodeInstallation]: "read",
           "/tmp/project/workspace": "write",
           "/tmp/project/workspace/.git": "read",
           "/tmp/project/workspace/.summing-runtime": "read",
@@ -126,6 +137,7 @@ test("thread and turn requests use official v2 shapes", async (context) => {
           "/tmp/project/workspace/.summing-runtime/tmp": "write",
           "/tmp/project/workspace/.summing-runtime/attachments": "read",
           "/tmp/project-git": "write",
+          "/tmp/project-git/worktrees/project-workspace": "write",
           [canonicalReleaseBin]: "read",
         },
         network: { enabled: true, domains: { "*": "allow" } },
@@ -166,14 +178,22 @@ test("thread and turn requests use official v2 shapes", async (context) => {
   const turnParams = client.calls[1]?.[1] ?? {};
   assert.equal(Object.hasOwn(turnParams, "sandboxPolicy"), false);
   assert.equal(Object.hasOwn(turnParams, "permissions"), false);
-  assert.deepEqual(turnParams.runtimeWorkspaceRoots, ["/tmp/project", "/tmp/project-git"]);
+  assert.deepEqual(turnParams.runtimeWorkspaceRoots, [
+    "/tmp/project",
+    "/tmp/project-git",
+    "/tmp/project-git/worktrees/project-workspace",
+  ]);
   assert.deepEqual(turnParams.outputSchema, outputSchema);
   assert.equal(Object.hasOwn(turnParams, "environments"), false);
 
   await client.resumeThread(threadId, "/tmp/project/workspace", permissionOptions);
   const resumeParams = client.calls[2]?.[1] ?? {};
   assert.equal(resumeParams.permissions, "summing-project");
-  assert.deepEqual(resumeParams.runtimeWorkspaceRoots, ["/tmp/project", "/tmp/project-git"]);
+  assert.deepEqual(resumeParams.runtimeWorkspaceRoots, [
+    "/tmp/project",
+    "/tmp/project-git",
+    "/tmp/project-git/worktrees/project-workspace",
+  ]);
 
   await client.startThread("/tmp/project/workspace", "", {
     deniedPaths: ["workspace/deep/secrets/.env"],
@@ -269,8 +289,11 @@ test("thread and turn requests use official v2 shapes", async (context) => {
     "summing-project"
   ] as JsonRecord;
   const writeFilesystem = writeProfile.filesystem as JsonRecord;
+  assert.equal(writeFilesystem[canonicalNodeInstallation], "read");
+  assert.equal(writeFilesystem["/tmp/project-git"], "write");
+  assert.equal(writeFilesystem["/tmp/project-git/worktrees/project-workspace"], "write");
   assert.equal(
-    Object.keys(writeFilesystem).some((path) => path.startsWith("/tmp/project-git/")),
+    Object.keys(writeFilesystem).some((path) => path.includes("project-git/.summing-runtime")),
     false,
   );
 

@@ -188,11 +188,14 @@ export class WorkspaceManager {
       }
       path = resolve(worktreeRoot, relativeWorkspace);
       readableRoot = worktreeRoot;
-      const commonGitDirectory = await this.commonGitDir(worktreeRoot, signal);
-      if (!commonGitDirectory) {
+      const [commonGitDirectory, worktreeGitDirectory] = await Promise.all([
+        this.commonGitDir(worktreeRoot, signal),
+        this.gitDir(worktreeRoot, signal),
+      ]);
+      if (!commonGitDirectory || !worktreeGitDirectory) {
         throw new WorkspaceError(`cannot resolve linked Git metadata for ${worktreeRoot}`);
       }
-      gitMetadataRoots = [commonGitDirectory];
+      gitMetadataRoots = [...new Set([commonGitDirectory, worktreeGitDirectory])];
       if (!existsSync(path) || !statSync(path).isDirectory()) {
         throw new WorkspaceError(`workspace subdirectory is absent from worktree: ${path}`);
       }
@@ -350,6 +353,14 @@ export class WorkspaceManager {
 
   private async commonGitDir(path: string, signal?: AbortSignal): Promise<string | null> {
     const result = await runProcess("git", ["-C", path, "rev-parse", "--git-common-dir"], 60_000, signal);
+    if (result.code !== 0) return null;
+    const raw = result.stdout.trim();
+    const resolved = resolve(path, raw);
+    return existsSync(resolved) ? realpathSync(resolved) : resolved;
+  }
+
+  private async gitDir(path: string, signal?: AbortSignal): Promise<string | null> {
+    const result = await runProcess("git", ["-C", path, "rev-parse", "--git-dir"], 60_000, signal);
     if (result.code !== 0) return null;
     const raw = result.stdout.trim();
     const resolved = resolve(path, raw);

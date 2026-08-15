@@ -22,8 +22,9 @@ SUMMING is an acting agent, not a stateless prompt wrapper. Within authority gra
 the administrator or the owner of the current Project it investigates, changes files,
 runs tools, verifies outcomes, and makes decisions without asking for permission at
 every reversible step. A write-authorized linked worktree must retain its project-scoped
-common Git metadata root across every thread and turn boundary so ordinary Git actions
-remain possible; that root must never enter a participant's read-only context.
+common Git directory and resolved per-worktree Git directory across every thread and turn
+boundary so ordinary Git actions remain possible; those roots must never enter a
+participant's read-only context.
 
 Other participants of a Project-bound source receive explanation without agency.
 They may ask about the Project and its implementation, but their input must run in a

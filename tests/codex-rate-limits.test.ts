@@ -30,7 +30,7 @@ test("selects the weekly Codex window and renders remaining usage", () => {
   assert.equal(snapshot.weekly?.remainingPercent, 68);
   assert.match(
     codexLimitsProfileText(snapshot, "UTC"),
-    /^🟢 Codex: неделя 68% · сброс .* · SUMMING 9\.5\.0$/,
+    /^🟢 Codex: неделя 68% · сброс .* · SUMMING 9\.5\.1$/,
   );
   const message = codexLimitsMessage(snapshot, "UTC");
   assert.match(message, /5 ч\.: 80% осталось/);
@@ -78,7 +78,7 @@ test("shows an explicit unknown state when a weekly window is absent", () => {
   assert.equal(snapshot.weekly, null);
   assert.equal(
     codexLimitsProfileText(snapshot, "UTC"),
-    "⚪ Codex: недельный лимит недоступен · SUMMING 9.5.0",
+    "⚪ Codex: недельный лимит недоступен · SUMMING 9.5.1",
   );
   assert.match(codexLimitsMessage(snapshot, "UTC"), /Недельное окно App Server не вернул/);
 });

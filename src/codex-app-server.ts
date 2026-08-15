@@ -1,7 +1,7 @@
 import { EventEmitter, once } from "node:events";
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { delimiter, dirname, relative, resolve } from "node:path";
+import { basename, delimiter, dirname, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { parse } from "smol-toml";
 import { SUMMING_VERSION } from "./version.js";
@@ -50,6 +50,12 @@ function executableReadRoot(command: string): string | null {
   return null;
 }
 
+function executableInstallationReadRoot(command: string): string | null {
+  const binaryDirectory = executableReadRoot(command);
+  if (!binaryDirectory) return null;
+  return basename(binaryDirectory) === "bin" ? dirname(binaryDirectory) : binaryDirectory;
+}
+
 interface WorkspacePermissionOptions {
   deniedPaths?: string[];
   disableEnvironments?: boolean;
@@ -74,6 +80,7 @@ export class CodexAppServer extends EventEmitter {
   private nextId = 1;
   private closed = false;
   private readonly binaryReadRoot: string | null;
+  private readonly nodeInstallationReadRoot: string | null;
 
   constructor(
     readonly binary: string,
@@ -81,6 +88,7 @@ export class CodexAppServer extends EventEmitter {
   ) {
     super();
     this.binaryReadRoot = executableReadRoot(binary);
+    this.nodeInstallationReadRoot = executableInstallationReadRoot(process.execPath);
   }
 
   get running(): boolean {
@@ -416,6 +424,12 @@ export class CodexAppServer extends EventEmitter {
       ":minimal": "read",
       ":workspace_roots": workspaceRoots,
     };
+    // Node and npm are symlinked into PATH on production hosts, while their real
+    // binaries and JavaScript packages live under one versioned installation root.
+    // A PATH entry alone does not expose those symlink targets inside the sandbox.
+    if (!options.readOnly && this.nodeInstallationReadRoot) {
+      filesystem[this.nodeInstallationReadRoot] = "read";
+    }
     // Relative workspace-root rules are expanded for every runtimeWorkspaceRoot.
     // Keep only the common read baseline relative; all worktree-specific grants
     // must be absolute so the App Server cannot synthesize paths such as

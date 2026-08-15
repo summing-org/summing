@@ -17,9 +17,14 @@ import { ProjectConfig, RuntimeConfig, type WorkspaceConfig } from "../src/confi
 import type { Conversation } from "../src/state-store.js";
 import { WorkspaceManager } from "../src/workspace-manager.js";
 
-function git(cwd: string, ...args: string[]): void {
+function gitOutput(cwd: string, ...args: string[]): string {
   const result = spawnSync("git", args, { cwd, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
+  return result.stdout.trim();
+}
+
+function git(cwd: string, ...args: string[]): void {
+  gitOutput(cwd, ...args);
 }
 
 test("upgrades the previous identity, worktree branch, and runtime directory to SUMMING", async () => {
@@ -194,7 +199,10 @@ test("conversation gets a persistent worktree and project memory", async () => {
     assert.notEqual(prepared.path, source);
     assert.equal(prepared.path.split("/").at(-1), "web");
     assert.equal(prepared.readableRoot, join(root, "worktrees", conversation.id));
-    assert.deepEqual(prepared.gitMetadataRoots, [realpathSync(join(source, ".git"))]);
+    assert.deepEqual(prepared.gitMetadataRoots, [
+      realpathSync(join(source, ".git")),
+      realpathSync(gitOutput(prepared.readableRoot, "rev-parse", "--git-dir")),
+    ]);
     const readOnlyDeniedPaths = await manager.readOnlyDeniedPaths(prepared.readableRoot);
     assert.ok(readOnlyDeniedPaths.includes(".git"));
     assert.ok(readOnlyDeniedPaths.includes(".ssh"));

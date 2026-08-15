@@ -1,8 +1,8 @@
 # SUMMING 9.5: архитектура, эксплуатация и разработка
 
-> Версия: **9.5.0**
+> Версия: **9.5.1**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
-> Последняя сверка с кодом: **14 августа 2026 года**.
+> Последняя сверка с кодом: **15 августа 2026 года**.
 
 Это единый технический документ о проекте. Он описывает продуктовую модель,
 архитектуру, состояние на диске, протокол выполнения, авторизацию ChatGPT,
@@ -615,9 +615,10 @@ runtime явно показывает, что данные недоступны,
 `summing-project`, в который входят:
 
 - `approvalPolicy = never`;
-- `runtimeWorkspaceRoots`, содержащий conversation worktree и только для write-run
-  project-scoped общий Git directory; один и тот же набор передаётся в `thread/start`,
-  `thread/resume` и `turn/start`, потому что turn override заменяет сохранённые roots;
+- `runtimeWorkspaceRoots`, содержащий conversation worktree и только для write-run два
+  project-scoped metadata root: общий Git directory и resolved Git directory конкретного
+  linked worktree; один и тот же набор передаётся в `thread/start`, `thread/resume` и
+  `turn/start`, потому что turn override заменяет сохранённые roots;
 - относительная секция `filesystem.:workspace_roots` задаёт только общий read-baseline
   `.`. Write/read/deny для worktree, `.git`, `.summing-runtime`, attachments и secrets
   задаются абсолютными путями: App Server применяет относительное правило к каждому
@@ -627,14 +628,20 @@ runtime явно показывает, что данные недоступны,
 - каталог, содержащий реальный executable `CODEX_BIN` после разрешения symlink,
   доступен только на чтение: standalone Codex повторно запускает этот binary
   внутри Linux sandbox при выполнении shell-команд;
+- versioned root установленного Node.js вычисляется из реального `process.execPath` и
+  доступен editor-профилю только на чтение. Поэтому `/usr/local/bin/node`, `npm`, `npx`
+  и `corepack` продолжают работать, даже когда это symlink на `/opt/node-v*/`, а один
+  `PATH` сам по себе не раскрывает target внутри sandbox;
 - read всего текущего worktree и write только текущего Workspace внутри него;
 - служебный `.summing-runtime` доступен на чтение, а запись разрешена только в
   каталогах `memory/` и `tmp/`; `attachments/` доступен только на чтение;
   permission profile не использует отдельный файл
   `PROJECT_MEMORY.md` как writable root;
-- `.git`-указатель worktree доступен на чтение, а project-scoped общий Git
-  directory — на запись, чтобы owner мог выполнять `git add`, commit, rebase и
-  push без доступа к metadata других репозиториев;
+- `.git`-указатель worktree доступен на чтение, а project-scoped общий Git directory и
+  resolved `.../.git/worktrees/<id>` получают отдельные exact write-grants. Это сохраняет
+  защиту Git metadata других worktree, но позволяет owner выполнять `git add`, commit,
+  rebase и push: более широкий grant только на common dir не снимает рекурсивную защиту
+  resolved linked-worktree directory;
 - временные файлы editor создаются в `.summing-runtime/tmp` текущего worktree,
   а не в общем системном `/tmp`;
 - network выключен или, при `agent.network_access = true`, явно разрешены все
@@ -1362,7 +1369,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "9.5.0",
+  "version": "9.5.1",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",
