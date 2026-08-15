@@ -61,7 +61,7 @@ test("owners control projects while group participants get read-only Q&A", async
     repliedText = "",
     replyToUserId = 0,
     replyMessageId = 500,
-  ): Promise<void> => {
+  ): Promise<number> => {
     messageId += 1;
     await handleMessage({
       message_id: messageId,
@@ -85,6 +85,7 @@ test("owners control projects while group participants get read-only Q&A", async
           }
         : {}),
     });
+    return messageId;
   };
   const waitFor = async (predicate: () => boolean): Promise<void> => {
     const deadline = Date.now() + 5_000;
@@ -331,8 +332,49 @@ test("owners control projects while group participants get read-only Q&A", async
     assert.match(explicitReplyInput.text, /SUMMING transport context/);
     assert.match(explicitReplyInput.text, /"message_id": 639/);
     assert.match(explicitReplyInput.text, /"text": "подтянул, чекай"/);
-    assert.match(explicitReplyInput.text, /respond to the quoted message/);
+    assert.match(explicitReplyInput.text, /deepest relevant quoted message/);
     runtime.state.consume([explicitReplyInput.id]);
+    startedConversation = "";
+
+    const rootReplyId = await send(
+      42,
+      "Исходное решение: выпускать в пятницу",
+      -100,
+      "supergroup",
+      5,
+    );
+    const bridgeReplyId = await send(
+      42,
+      "вот",
+      -100,
+      "supergroup",
+      5,
+      false,
+      "",
+      "Исходное решение: выпускать в пятницу",
+      42,
+      rootReplyId,
+    );
+    runtime.state.consume(runtime.state.pendingAll(bound.id).map((item) => item.id));
+    await send(
+      42,
+      "@summing_bot",
+      -100,
+      "supergroup",
+      5,
+      false,
+      "",
+      "вот",
+      42,
+      bridgeReplyId,
+    );
+    const replyChainInput = runtime.state.pendingAll(bound.id)[0]!;
+    assert.match(replyChainInput.text, /"relation": "explicit_reply_chain"/);
+    assert.match(
+      replyChainInput.text,
+      /"depth": 1[\s\S]*"text": "вот"[\s\S]*"depth": 2[\s\S]*"text": "Исходное решение: выпускать в пятницу"/,
+    );
+    runtime.state.consume([replyChainInput.id]);
     startedConversation = "";
 
     const handleTeamEditedMessage = (
