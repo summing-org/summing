@@ -2013,6 +2013,14 @@ export class SummingRuntime {
         ? `${candidate.slice(0, MAX_TELEGRAM_REPLY_CONTEXT_LENGTH - 1)}…`
         : candidate;
     };
+    const persistedReply = teamEvent
+      ? this.state.teamEventByExternalId(
+          teamEvent.sourceId,
+          String(reply.message_id ?? ""),
+        )
+      : null;
+    const replyText =
+      persistedReply?.text.trim() || String(reply.text ?? reply.caption ?? "");
     const replyChain: TelegramReplyContextItem[] = [{
       depth: 1,
       message_id: Number(reply.message_id ?? 0),
@@ -2020,15 +2028,14 @@ export class SummingRuntime {
       sender_display_name: displayName,
       sender_username: String(sender.username ?? ""),
       sender_is_bot: sender.is_bot === true,
-      text: safeText(String(reply.text ?? reply.caption ?? "")),
-      has_attachment: telegramAttachment(reply) !== null,
+      text: safeText(replyText),
+      has_attachment:
+        telegramAttachment(reply) !== null ||
+        Boolean(persistedReply?.attachments.length),
     }];
     if (teamEvent) {
       const visited = new Set([String(reply.message_id ?? "")]);
-      let cursor = this.state.teamEventByExternalId(
-        teamEvent.sourceId,
-        String(reply.message_id ?? ""),
-      );
+      let cursor = persistedReply;
       while (
         cursor?.replyToExternalEventId &&
         replyChain.length < MAX_TELEGRAM_REPLY_CHAIN_DEPTH

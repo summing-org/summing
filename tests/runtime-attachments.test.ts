@@ -109,3 +109,107 @@ test("voice is transcribed through the configured provider while documents remai
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("a direct reply reuses the stored voice transcript without downloading audio again", async () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-runtime-audio-reply-"));
+  const repository = join(root, "repository");
+  mkdirSync(repository);
+  const workspace: WorkspaceConfig = { id: "repo", path: repository };
+  const project = new ProjectConfig(
+    "demo",
+    "Demo",
+    "repo",
+    new Map([["repo", workspace]]),
+  );
+  const config = new RuntimeConfig(
+    join(root, "data"),
+    join(root, "codex"),
+    join(root, "worktrees"),
+    "telegram-token",
+    1,
+    "codex",
+    8765,
+    2,
+    1,
+    "",
+    "medium",
+    true,
+    new Map([["demo", project]]),
+    20,
+    12,
+    60,
+    "openai",
+    "gpt-transcribe",
+    "openai-key",
+  );
+  const runtime = new SummingRuntime(config);
+  const conversation = runtime.state.bind(-100, 5, "demo", "repo");
+  Object.assign(runtime, {
+    telegramUsername: "summing_bot",
+    startProcessor: (): void => undefined,
+  });
+  let downloadCalls = 0;
+  let transcriptionCalls = 0;
+  runtime.attachments.download = async () => {
+    downloadCalls += 1;
+    return {
+      kind: "audio",
+      fileName: "voice.ogg",
+      mimeType: "audio/ogg",
+      filePath: join(root, "voice.ogg"),
+      size: 4,
+    };
+  };
+  runtime.transcriber.transcribe = async () => {
+    transcriptionCalls += 1;
+    return "Антон, создай документ и пришли ссылку";
+  };
+  const handleMessage = (
+    runtime as unknown as { handleMessage(message: TelegramObject): Promise<void> }
+  ).handleMessage.bind(runtime);
+
+  try {
+    await handleMessage({
+      message_id: 20,
+      message_thread_id: 5,
+      from: { id: 1, first_name: "Owner" },
+      chat: { id: -100, type: "supergroup", title: "Team" },
+      voice: { file_id: "voice-id", mime_type: "audio/ogg", file_size: 4 },
+    });
+    runtime.state.consume(runtime.state.pendingAll(conversation.id).map((item) => item.id));
+
+    await handleMessage({
+      message_id: 20,
+      message_thread_id: 5,
+      text: "Чужой Source не должен попасть в reply context",
+      from: { id: 2, first_name: "Other" },
+      chat: { id: -200, type: "supergroup", title: "Other team" },
+    });
+
+    await handleMessage({
+      message_id: 21,
+      message_thread_id: 5,
+      text: "@summing_bot что сказано в этом аудио?",
+      from: { id: 1, first_name: "Owner" },
+      chat: { id: -100, type: "supergroup", title: "Team" },
+      reply_to_message: {
+        message_id: 20,
+        from: { id: 1, first_name: "Owner" },
+        voice: { file_id: "voice-id", mime_type: "audio/ogg", file_size: 4 },
+      },
+    });
+
+    const replyInput = runtime.state.pendingAll(conversation.id)[0];
+    assert.ok(replyInput);
+    assert.match(replyInput.text, /"depth": 1/);
+    assert.match(replyInput.text, /Транскрипция аудио «voice\.ogg»/);
+    assert.match(replyInput.text, /Антон, создай документ и пришли ссылку/);
+    assert.doesNotMatch(replyInput.text, /Чужой Source/);
+    assert.equal(downloadCalls, 1);
+    assert.equal(transcriptionCalls, 1);
+  } finally {
+    runtime.state.close();
+    await runtime.telegram.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});

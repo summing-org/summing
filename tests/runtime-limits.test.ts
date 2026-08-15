@@ -77,7 +77,7 @@ test("administrator reads VPS limits and refreshes the bot profile", async () =>
       (runtime.status().codex_limits as Record<string, unknown>).weekly_remaining_percent,
       60,
     );
-    assert.equal(runtime.status().version, "9.5.4");
+    assert.equal(runtime.status().version, "9.5.5");
 
     await handleMessage({
       message_id: 2,

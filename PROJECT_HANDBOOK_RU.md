@@ -1,6 +1,6 @@
 # SUMMING 9.5: архитектура, эксплуатация и разработка
 
-> Версия: **9.5.4**
+> Версия: **9.5.5**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
 > Последняя сверка с кодом: **15 августа 2026 года**.
 
@@ -291,8 +291,10 @@ Telegram Bot API добавляет `reply_to_message`, равный `message_th
 сообщениям forum topic. Это transport edge на корневое service-message, а не действие
 пользователя: runtime исключает его до определения direct/ambient. Настоящий reply
 сохраняется внутри durable input как host-сформированный контекст с message id, sender
-identity и bounded безопасной цепочкой: ближайшая цитата берётся из Telegram update,
-а её предки разрешаются по `reply_to_external_event_id` того же Source из локального
+identity и bounded безопасной цепочкой: ближайшая цитата дополняется сохранённым
+текстом того же event из локального evidence journal, поэтому уже готовая транскрипция
+аудио используется повторно без повторного скачивания и распознавания. Её предки
+разрешаются по `reply_to_external_event_id` того же Source из локального
 evidence journal, максимум до восьми уровней. Цикл, отсутствующий или redacted event
 останавливает обход; каждый текст повторно проходит credential-фильтр. Поэтому голый
 `@username_бота` в reply означает «проследи ссылки вроде “вот” и отреагируй на самый
@@ -1403,7 +1405,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "9.5.4",
+  "version": "9.5.5",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",
