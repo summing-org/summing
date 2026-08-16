@@ -20,7 +20,8 @@ interface ProcessResult {
 
 export interface ProjectAccess {
   project: ProjectConfig;
-  ownerId: number;
+  primaryOwnerId: number;
+  ownerIds: readonly number[];
   managed: boolean;
 }
 
@@ -92,7 +93,8 @@ export class ProjectCatalog {
     for (const project of config.projects.values()) {
       this.entries.set(project.id, {
         project,
-        ownerId: config.telegramOwnerId,
+        primaryOwnerId: config.telegramOwnerId,
+        ownerIds: [config.telegramOwnerId],
         managed: false,
       });
     }
@@ -116,14 +118,14 @@ export class ProjectCatalog {
   isKnownOwner(telegramUser: number): boolean {
     return (
       telegramUser === this.config.telegramOwnerId ||
-      this.all().some((entry) => entry.ownerId === telegramUser)
+      this.all().some((entry) => entry.ownerIds.includes(telegramUser))
     );
   }
 
   canAccess(telegramUser: number, projectId: string): boolean {
     const entry = this.entries.get(projectId);
     if (!entry) return false;
-    return telegramUser === this.config.telegramOwnerId || entry.ownerId === telegramUser;
+    return telegramUser === this.config.telegramOwnerId || entry.ownerIds.includes(telegramUser);
   }
 
   project(projectId: string): ProjectConfig {
@@ -133,9 +135,40 @@ export class ProjectCatalog {
   }
 
   owner(projectId: string): number {
-    const ownerId = this.entries.get(projectId)?.ownerId;
+    const ownerId = this.entries.get(projectId)?.primaryOwnerId;
     if (ownerId === undefined) throw new ConfigError(`unknown project '${projectId}'`);
     return ownerId;
+  }
+
+  owners(projectId: string): readonly number[] {
+    const ownerIds = this.entries.get(projectId)?.ownerIds;
+    if (!ownerIds) throw new ConfigError(`unknown project '${projectId}'`);
+    return ownerIds;
+  }
+
+  replaceOwners(
+    rawProjectId: unknown,
+    rawPrimaryOwnerId: unknown,
+    rawOwnerIds: unknown,
+  ): ProjectAccess {
+    const projectId = normalizeProjectIdentifier(rawProjectId, "project id");
+    const entry = this.entries.get(projectId);
+    if (!entry) throw new ProjectCatalogError(`project '${projectId}' does not exist`);
+    if (!entry.managed) {
+      throw new ProjectCatalogError(`project '${projectId}' is configured outside Mini App`);
+    }
+    if (!Array.isArray(rawOwnerIds)) {
+      throw new ProjectCatalogError("project owner ids must be an array");
+    }
+    const primaryOwnerId = telegramUserId(rawPrimaryOwnerId, "primary project owner id");
+    const ownerIds = [...new Set([
+      primaryOwnerId,
+      ...rawOwnerIds.map((ownerId) => telegramUserId(ownerId, "project owner id")),
+    ])];
+    this.state.replaceManagedProjectOwners(projectId, primaryOwnerId, ownerIds);
+    entry.primaryOwnerId = primaryOwnerId;
+    entry.ownerIds = ownerIds;
+    return entry;
   }
 
   async createLocal(
@@ -199,7 +232,8 @@ export class ProjectCatalog {
     const stored: ManagedProject = {
       id: projectId,
       name: project.name,
-      ownerId,
+      primaryOwnerId: ownerId,
+      ownerIds: [ownerId],
       defaultWorkspaceId: workspaceId,
       workspaces: [workspace],
       createdAt: Date.now() / 1000,
@@ -211,7 +245,12 @@ export class ProjectCatalog {
         `repository was created at ${repositoryPath}, but project registration failed: ${String(error)}`,
       );
     }
-    this.entries.set(projectId, { project, ownerId, managed: true });
+    this.entries.set(projectId, {
+      project,
+      primaryOwnerId: ownerId,
+      ownerIds: [ownerId],
+      managed: true,
+    });
     return project;
   }
 
@@ -359,9 +398,22 @@ export class ProjectCatalog {
       defaultWorkspaceId,
       workspaces,
     );
+    const primaryOwnerId = telegramUserId(
+      stored.primaryOwnerId,
+      `managed project '${projectId}' primary owner id`,
+    );
+    const ownerIds = [...new Set(stored.ownerIds.map((ownerId) =>
+      telegramUserId(ownerId, `managed project '${projectId}' owner id`)
+    ))];
+    if (!ownerIds.includes(primaryOwnerId)) {
+      throw new ProjectCatalogError(
+        `managed project '${projectId}' primary owner is missing from its owner list`,
+      );
+    }
     this.entries.set(projectId, {
       project,
-      ownerId: telegramUserId(stored.ownerId, `managed project '${projectId}' owner id`),
+      primaryOwnerId,
+      ownerIds,
       managed: true,
     });
   }

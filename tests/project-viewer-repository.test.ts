@@ -104,7 +104,8 @@ test("repository tab gives the project owner and administrator safe push and pul
   state.createManagedProject({
     id: "client",
     name: "Client",
-    ownerId: 42,
+    primaryOwnerId: 42,
+    ownerIds: [42, 77],
     defaultWorkspaceId: "repo",
     workspaces: [{ id: "repo", path: workspace }],
     createdAt: Date.now() / 1_000,
@@ -132,6 +133,11 @@ test("repository tab gives the project owner and administrator safe push and pul
       { headers: auth(42) },
     );
     assert.equal(statusResponse.status, 200);
+    const coOwnerStatus = await fetch(
+      `${endpoint}/api/viewer/repository?conversation=${conversation.id}`,
+      { headers: auth(77) },
+    );
+    assert.equal(coOwnerStatus.status, 200);
     const statusPayload = await statusResponse.json() as {
       repository: {
         head: string;
@@ -437,7 +443,8 @@ test("repository onboarding configures a missing origin and returns only its pub
   state.createManagedProject({
     id: "client",
     name: "Client",
-    ownerId: 42,
+    primaryOwnerId: 42,
+    ownerIds: [42],
     defaultWorkspaceId: "repo",
     workspaces: [{ id: "repo", path: workspace }],
     createdAt: Date.now() / 1_000,

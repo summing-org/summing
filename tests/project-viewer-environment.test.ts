@@ -170,7 +170,8 @@ test("viewer lets a managed project owner edit only that project's environment",
   state.createManagedProject({
     id: "demo",
     name: "Demo",
-    ownerId: 99,
+    primaryOwnerId: 99,
+    ownerIds: [99],
     defaultWorkspaceId: "repo",
     workspaces: [{ id: "repo", path: workspace }],
     createdAt: Date.now() / 1_000,
@@ -178,12 +179,14 @@ test("viewer lets a managed project owner edit only that project's environment",
   state.createManagedProject({
     id: "other",
     name: "Other",
-    ownerId: 100,
+    primaryOwnerId: 100,
+    ownerIds: [100],
     defaultWorkspaceId: "repo",
     workspaces: [{ id: "repo", path: otherWorkspace }],
     createdAt: Date.now() / 1_000,
   });
   const projects = new ProjectCatalog(config, state);
+  projects.replaceOwners("demo", 99, [99, 102]);
   const conversation = state.bind(99, 1, "demo", "repo");
   const viewer = new ProjectViewerServer(config, state, projects);
   Object.assign(viewer.runner, {
@@ -214,6 +217,12 @@ test("viewer lets a managed project owner edit only that project's environment",
       { headers: ownerHeaders },
     );
     assert.equal(allowed.status, 200);
+
+    const coOwnerAllowed = await fetch(
+      `${endpoint}/api/viewer/environment?conversation=${conversation.id}`,
+      { headers: { "x-telegram-init-data": signedInitData("bot-token", 102) } },
+    );
+    assert.equal(coOwnerAllowed.status, 200);
 
     const otherOwnerForbidden = await fetch(
       `${endpoint}/api/viewer/environment?conversation=${conversation.id}`,

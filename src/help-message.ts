@@ -74,10 +74,10 @@ export function helpMessage(isAdministrator: boolean): string {
         "привязать топик из личного чата",
       ),
       example("/bind_topic -1001234567890 42 summing repo"),
-      command("/project_create <project> <owner_id> <repo>", "создать локальный Git-проект"),
+      command("/project_create <project> <primary_owner_id> <repo>", "создать локальный Git-проект"),
       example("/project_create shop 123456789 backend"),
       command(
-        "/project_clone <project> <owner_id> <repo> <git_url>",
+        "/project_clone <project> <primary_owner_id> <repo> <git_url>",
         "клонировать Git-проект",
       ),
       example("/project_clone shop 123456789 backend https://github.com/acme/backend.git"),

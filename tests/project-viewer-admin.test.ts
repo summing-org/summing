@@ -229,12 +229,47 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
       body: JSON.stringify({
         mode: "empty",
         projectId: "client",
-        ownerId: "42",
+        primaryOwnerId: "42",
         workspaceId: "backend",
       }),
     });
     assert.equal(created.status, 201, await created.text());
     assert.equal(projects.owner("client"), 42);
+    assert.deepEqual(projects.owners("client"), [42]);
+
+    const deniedOwnerUpdate = await fetch(`${endpoint}/api/viewer/admin/project-owners`, {
+      method: "PUT",
+      headers: { ...auth(42), "content-type": "application/json" },
+      body: JSON.stringify({ projectId: "client", primaryOwnerId: 42, ownerIds: [42, 77] }),
+    });
+    assert.equal(deniedOwnerUpdate.status, 403);
+
+    const addedOwner = await fetch(`${endpoint}/api/viewer/admin/project-owners`, {
+      method: "PUT",
+      headers: { ...auth(1), "content-type": "application/json" },
+      body: JSON.stringify({ projectId: "client", primaryOwnerId: 42, ownerIds: [42, 77] }),
+    });
+    assert.equal(addedOwner.status, 200, await addedOwner.text());
+    assert.deepEqual(projects.owners("client"), [42, 77]);
+    assert.equal(projects.canAccess(77, "client"), true);
+
+    const changedPrimary = await fetch(`${endpoint}/api/viewer/admin/project-owners`, {
+      method: "PUT",
+      headers: { ...auth(1), "content-type": "application/json" },
+      body: JSON.stringify({ projectId: "client", primaryOwnerId: 77, ownerIds: [42, 77] }),
+    });
+    assert.equal(changedPrimary.status, 200, await changedPrimary.text());
+    assert.equal(projects.owner("client"), 77);
+    assert.deepEqual(projects.owners("client"), [77, 42]);
+
+    const removedOwner = await fetch(`${endpoint}/api/viewer/admin/project-owners`, {
+      method: "PUT",
+      headers: { ...auth(1), "content-type": "application/json" },
+      body: JSON.stringify({ projectId: "client", primaryOwnerId: 77, ownerIds: [77] }),
+    });
+    assert.equal(removedOwner.status, 200, await removedOwner.text());
+    assert.deepEqual(projects.owners("client"), [77]);
+    assert.equal(projects.canAccess(42, "client"), false);
 
     const bound = await fetch(`${endpoint}/api/viewer/admin/bindings`, {
       method: "POST",
@@ -299,6 +334,12 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
     const final = await fetch(`${endpoint}/api/viewer/admin`, { headers: auth(1) });
     const finalPayload = await final.json() as {
       counts: { projects: number; topics: number; bindings: number; users: number };
+      projects: Array<{
+        id: string;
+        primaryOwnerId: number;
+        ownerIds: number[];
+        managed: boolean;
+      }>;
       chats: Array<{
         topics: Array<{
           binding: { projectId: string; workspaceId: string; busy: boolean } | null;
@@ -308,6 +349,20 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
     assert.deepEqual(
       finalPayload.counts,
       { projects: 2, topics: 1, bindings: 1, users: 2 },
+    );
+    assert.deepEqual(
+      finalPayload.projects.find((project) => project.id === "client"),
+      {
+        id: "client",
+        name: "client",
+        primaryOwnerId: 77,
+        ownerIds: [77],
+        managed: true,
+        selfChange: false,
+        defaultWorkspaceId: "backend",
+        workspaces: [{ id: "backend" }],
+        bindingCount: 0,
+      },
     );
     assert.deepEqual(finalPayload.chats[0]?.topics[0]?.binding, {
       conversationId: state.byTopic(-300, 44)?.id,

@@ -286,11 +286,15 @@ export class ProjectViewerServer {
         const project = mode === "clone"
           ? await this.projects.cloneRemote(
             body?.projectId,
-            body?.ownerId,
+            body?.primaryOwnerId ?? body?.ownerId,
             body?.workspaceId,
             String(body?.remoteUrl ?? ""),
           )
-          : await this.projects.createLocal(body?.projectId, body?.ownerId, body?.workspaceId);
+          : await this.projects.createLocal(
+            body?.projectId,
+            body?.primaryOwnerId ?? body?.ownerId,
+            body?.workspaceId,
+          );
         json(response, 201, {
           project: {
             id: project.id,
@@ -302,6 +306,23 @@ export class ProjectViewerServer {
       } finally {
         this.projectOperations.delete(projectId);
       }
+      return;
+    }
+    if (request.method === "PUT" && url.pathname === "/api/viewer/admin/project-owners") {
+      this.requireAdminAccess(telegramUser);
+      const body = await requestBody(request) as Record<string, unknown> | null;
+      const entry = this.projects.replaceOwners(
+        body?.projectId,
+        body?.primaryOwnerId,
+        body?.ownerIds,
+      );
+      json(response, 200, {
+        project: {
+          id: entry.project.id,
+          primaryOwnerId: entry.primaryOwnerId,
+          ownerIds: entry.ownerIds,
+        },
+      });
       return;
     }
     if (request.method === "POST" && url.pathname === "/api/viewer/admin/bindings") {
@@ -552,7 +573,8 @@ export class ProjectViewerServer {
     const projects = this.projects.all().map((entry) => ({
       id: entry.project.id,
       name: entry.project.name,
-      ownerId: entry.ownerId,
+      primaryOwnerId: entry.primaryOwnerId,
+      ownerIds: entry.ownerIds,
       managed: entry.managed,
       selfChange: entry.project.selfChange,
       defaultWorkspaceId: entry.project.defaultWorkspace,

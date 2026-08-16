@@ -6,6 +6,7 @@ test("administrator Mini App exposes projects, bindings and global settings", ()
   assert.doesNotThrow(() => new Function(ADMIN_JS));
   assert.match(ADMIN_HTML, /telegram-web-app\.js\?63/);
   assert.match(ADMIN_HTML, /id="createForm"/);
+  assert.match(ADMIN_HTML, /id="primaryOwnerId"/);
   assert.match(ADMIN_HTML, /id="topicSearch"/);
   assert.match(ADMIN_HTML, /id="userCount"/);
   assert.match(ADMIN_HTML, /Привязки топиков/);
@@ -20,6 +21,9 @@ test("administrator Mini App exposes projects, bindings and global settings", ()
   assert.match(ADMIN_HTML, /id="deploymentFailedTests"/);
   assert.match(ADMIN_HTML, /id="deploymentHistory"/);
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/projects/);
+  assert.match(ADMIN_JS, /\/api\/viewer\/admin\/project-owners/);
+  assert.match(ADMIN_JS, /Сделать primary/);
+  assert.match(ADMIN_JS, /Добавить owner/);
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/bindings/);
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/users/);
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/deployment/);
@@ -38,4 +42,5 @@ test("administrator Mini App exposes projects, bindings and global settings", ()
   assert.match(ADMIN_CSS, /\.deployment-card/);
   assert.match(ADMIN_CSS, /\.admin-tabs/);
   assert.match(ADMIN_CSS, /\.admin-panel\.active/);
+  assert.match(ADMIN_CSS, /\.owner-manager/);
 });

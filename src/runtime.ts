@@ -2505,8 +2505,8 @@ export class SummingRuntime {
       if (parts.length !== expected) {
         const usage =
           command === "/project_create"
-            ? "/project_create <project> <owner_id> <repo>"
-            : "/project_clone <project> <owner_id> <repo> <git_url>";
+            ? "/project_create <project> <primary_owner_id> <repo>"
+            : "/project_clone <project> <primary_owner_id> <repo> <git_url>";
         await this.reply(chatId, topicId, messageId, `Использование: ${usage}`);
         return;
       }
@@ -2661,7 +2661,9 @@ export class SummingRuntime {
     if (command === "/projects") {
       const lines = ["Проекты:"];
       for (const entry of this.projects.visibleTo(senderId)) {
-        const owner = isAdministrator ? ` owner:${entry.ownerId}` : "";
+        const owner = isAdministrator
+          ? ` primary-owner:${entry.primaryOwnerId} owners:${entry.ownerIds.join(",")}`
+          : "";
         lines.push(
           `- ${entry.project.id}: ${entry.project.name} ` +
             `[${[...entry.project.workspaces.keys()].join(", ")}]${owner}`,
@@ -3084,7 +3086,7 @@ export class SummingRuntime {
           chatId,
           topicId,
           messageId,
-          `Проект создан: ${project.id}\nOwner: ${this.projects.owner(project.id)}\n` +
+          `Проект создан: ${project.id}\nPrimary owner: ${this.projects.owner(project.id)}\n` +
             `Repository: ${workspace.id}\nPath: ${workspace.path}`,
         );
       })

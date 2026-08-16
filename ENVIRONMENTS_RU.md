@@ -28,8 +28,8 @@ Runner владеет `PATH`, `HOME`, `HOSTNAME`, `NODE_OPTIONS`, `DOCKER_HOST`,
 ## Хранение и версии
 
 Project Viewer возвращает plaintext только системному администратору
-(`TELEGRAM_OWNER_ID` или локальный admin token) либо назначенному владельцу
-конкретного Project. Владелец проходит тот же Project ACL и не может запросить
+(`TELEGRAM_OWNER_ID` или локальный admin token) либо любому назначенному owner
+конкретного Project. Owner проходит тот же Project ACL и не может запросить
 environment чужой Conversation. Сохранение использует optimistic locking: если
 документ изменился в другой вкладке, нужно перезагрузить актуальную версию.
 

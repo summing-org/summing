@@ -727,7 +727,8 @@ test("managed projects and owners persist", () => {
   store.createManagedProject({
     id: "client",
     name: "client",
-    ownerId: 42,
+    primaryOwnerId: 42,
+    ownerIds: [42, 77],
     defaultWorkspaceId: "repo",
     workspaces: [{ id: "repo", path: join(root, "repositories", "client", "repo") }],
     createdAt: 123,
@@ -740,17 +741,26 @@ test("managed projects and owners persist", () => {
       {
         id: "client",
         name: "client",
-        ownerId: 42,
+        primaryOwnerId: 42,
+        ownerIds: [42, 77],
         defaultWorkspaceId: "repo",
         workspaces: [{ id: "repo", path: join(root, "repositories", "client", "repo") }],
         createdAt: 123,
       },
     ]);
+    reopened.replaceManagedProjectOwners("client", 77, [42, 77, 99]);
+    assert.deepEqual(reopened.listManagedProjects()[0]?.ownerIds, [77, 42, 99]);
+    assert.equal(reopened.listManagedProjects()[0]?.primaryOwnerId, 77);
+    assert.throws(
+      () => reopened.replaceManagedProjectOwners("client", 77, []),
+      /must include one valid primary owner/,
+    );
     assert.throws(() =>
       reopened.createManagedProject({
         id: "client",
         name: "duplicate",
-        ownerId: 99,
+        primaryOwnerId: 99,
+        ownerIds: [99],
         defaultWorkspaceId: "repo",
         workspaces: [{ id: "repo", path: join(root, "duplicate") }],
         createdAt: 456,
@@ -758,6 +768,42 @@ test("managed projects and owners persist", () => {
     );
   } finally {
     reopened.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("legacy managed project owners migrate to the primary-owner membership", () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-project-owner-migration-"));
+  const path = join(root, "state.sqlite3");
+  const legacy = new DatabaseSync(path);
+  legacy.exec(`
+    PRAGMA foreign_keys=ON;
+    CREATE TABLE managed_projects (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      owner_id INTEGER NOT NULL,
+      default_workspace_id TEXT NOT NULL,
+      created_at REAL NOT NULL
+    );
+    CREATE TABLE managed_workspaces (
+      project_id TEXT NOT NULL REFERENCES managed_projects(id) ON DELETE CASCADE,
+      id TEXT NOT NULL,
+      path TEXT NOT NULL,
+      created_at REAL NOT NULL,
+      PRIMARY KEY(project_id, id)
+    );
+    INSERT INTO managed_projects VALUES ('legacy', 'Legacy', 42, 'repo', 123);
+    INSERT INTO managed_workspaces VALUES ('legacy', 'repo', '${root}/repo', 123);
+  `);
+  legacy.close();
+
+  const migrated = new StateStore(path);
+  try {
+    const [project] = migrated.listManagedProjects();
+    assert.equal(project?.primaryOwnerId, 42);
+    assert.deepEqual(project?.ownerIds, [42]);
+  } finally {
+    migrated.close();
     rmSync(root, { recursive: true, force: true });
   }
 });

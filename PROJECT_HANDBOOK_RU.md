@@ -1,6 +1,6 @@
 # SUMMING 9.8: архитектура, эксплуатация и разработка
 
-> Версия: **9.8.1**
+> Версия: **9.8.2**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
 > Последняя сверка с кодом: **16 августа 2026 года**.
 
@@ -119,11 +119,14 @@ Project: Secret Cloud
 
 - статические Projects из TOML принадлежат администратору;
 - управляемые Projects администратор создаёт в личном Telegram-чате через
-  `/project_create` или `/project_clone`; они хранятся в SQLite и получают одного
-  назначенного Telegram owner.
+  `/project_create` или `/project_clone`; они хранятся в SQLite, получают одного
+  обязательного primary owner для уведомлений и могут иметь несколько
+  совладельцев с одинаковыми рабочими правами.
 
-Администратор имеет рабочий доступ ко всем Projects. Project owner видит,
-привязывает и изменяет только назначенные ему Projects. Остальные участники уже
+Администратор имеет рабочий доступ ко всем Projects. Любой назначенный Project
+owner видит, привязывает и изменяет только свои Projects. Primary owner не имеет
+дополнительных write-прав: его особая роль — быть единственным адресатом
+автоматических уведомлений Project. Остальные участники уже
 привязанного group topic могут задавать вопросы о текущем Project, но не получают
 команд или write-доступа. Перезапуск после создания не нужен.
 
@@ -802,7 +805,7 @@ Project Viewer больше не содержит системную вклад�
 `/memory_resume_me`.
 
 После успешного нового bind/rebind runtime отправляет сообщение именно в связанный
-Telegram topic. Project owner упоминается через HTML-ссылку `tg://user?id=<id>`,
+Telegram topic. Primary Project owner упоминается через HTML-ссылку `tg://user?id=<id>`,
 поэтому уведомление не зависит от наличия username; доступное наблюдаемое имя
 используется только как безопасно экранированная подпись ссылки. Сообщение содержит
 Project и Repository и объясняет, что рабочие запросы топика теперь относятся к
@@ -838,8 +841,8 @@ POST содержит ожидаемый полный HEAD, поэтому ус�
 обновляет уже изменившуюся ветку. Viewer-операции сериализуются на общий Git
 directory репозитория, включая все его conversation worktrees, и
 не запускаются во время активного Codex turn. Telegram HMAC и Project ACL дают
-write-кнопки только администратору и назначенному owner. Тот же ACL открывает
-вкладку **Энвы**: администратор управляет всеми Project, а owner может читать и
+write-кнопки только администратору и любому назначенному owner. Тот же ACL открывает
+вкладку **Энвы**: администратор управляет всеми Project, а каждый owner может читать и
 сохранять plaintext environment только своего Project; участник или owner
 другого Project получает `403`. POST `action=connect`
 принимает только нормализованный SSH URL, добавляет только отсутствующий
@@ -877,6 +880,10 @@ Production Mini App работает на `https://assist.summing.org`. Installe
 URL через `SUMMING_VIEWER_URL`. Runtime устанавливает для личного чата точного
 `TELEGRAM_OWNER_ID` постоянную кнопку меню **Управление**, ведущую на `/admin`;
 первый `/start` также обновляет menu button и возвращает inline `web_app` button.
+В карточке управляемого Project администратор добавляет и удаляет owners и
+назначает любого из них primary. Primary нельзя удалить, пока другой owner не
+назначен primary; backend атомарно сохраняет обязательный primary вместе с полным
+списком owners. Для config-проектов этот блок read-only.
 Project owner по-прежнему открывает конкретный viewer через `/files`, поэтому не
 получает администраторскую точку входа или список чужих проектов.
 
@@ -906,8 +913,8 @@ worktree. `run` требует чистый committed `HEAD`. Периодиче
 | `/admin` | Повторно показать кнопку администраторского Mini App; только администратор в личном чате. |
 | `/login` | Device-code login; только администратор в личном чате. |
 | `/limits` | 5-часовой и недельный остаток VPS-аккаунта; только администратор в личном чате. |
-| `/project_create <project> <owner_id> <repo>` | Создать пустой управляемый Git Project; только администратор в личном чате. |
-| `/project_clone <project> <owner_id> <repo> <git_url>` | Клонировать управляемый Git Project; только администратор в личном чате. |
+| `/project_create <project> <primary_owner_id> <repo>` | Создать пустой управляемый Git Project; только администратор в личном чате. |
+| `/project_clone <project> <primary_owner_id> <repo> <git_url>` | Клонировать управляемый Git Project; только администратор в личном чате. |
 | `/topics` | Список обнаруженных Telegram chats/topics и их bindings; только администратор в личном чате. |
 | `/bind_topic <chat_id> <topic_id> <project> [workspace]` | Удалённо привязать обнаруженный topic; только администратор в личном чате. |
 | `/projects` | Список доступных отправителю Project и Workspace. |
@@ -974,7 +981,7 @@ SQLite хранит:
 - pending steer/follow-up с `access_mode`, `response_mode`, Telegram user id и
   типизированными metadata вложений;
 - историю Run: access/response mode, prompt, response, status, error и timestamps;
-- управляемые Projects, Workspaces и Telegram owner id;
+- управляемые Projects, Workspaces, primary owner и списки совладельцев;
 - обнаруженные Telegram chats/topics, наблюдаемые авторы и последний membership
   event бота;
 - Team Spaces, Sources, People и не объединяемые автоматически provider identities;
@@ -991,7 +998,8 @@ SQLite хранит:
 | `pending_inputs` | Очередь, access/response mode, Telegram user id, attachment JSON и состояние обработки. |
 | `runs` | Access/response mode, prompt, response, status, error и время выполнения. |
 | `runtime_state` | Сейчас только Telegram update offset. |
-| `managed_projects` | Динамический Project, его owner и default Workspace. |
+| `managed_projects` | Динамический Project, его primary owner и default Workspace. |
+| `managed_project_owners` | Все owners Project; primary owner всегда входит в этот список. |
 | `managed_workspaces` | Абсолютные пути управляемых repositories. |
 | `telegram_chats` | Метаданные чата, membership status бота и последний membership event. |
 | `telegram_topics` | Обнаруженные topic id, доступные названия и timestamps. |
@@ -1188,7 +1196,7 @@ build и `npm prune --omit=dev`, устанавливает units, создаё�
 
 После запуска отправьте боту `/login`, завершите ChatGPT device-code flow, затем
 в личном чате создайте управляемый Project через `/project_create` или
-`/project_clone`. Назначенный owner должен отправить боту `/start`, после чего
+`/project_clone`. Каждый назначенный owner должен отправить боту `/start`, после чего
 можно создать forum group/topics и выполнить `/bind`.
 
 ### 13.3. Ручная подготовка пользователя и каталогов
@@ -1434,7 +1442,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "9.8.1",
+  "version": "9.8.2",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",
@@ -1698,7 +1706,8 @@ Telegram/OpenAI/Groq end-to-end теста в репозитории нет.
 
 Это намеренные ограничения, а не скрытые обещания:
 
-- один Telegram administrator id и один owner id на управляемый Project;
+- один Telegram administrator id; у управляемого Project один обязательный
+  primary owner и любое число совладельцев;
 - один общий ChatGPT/Codex account администратора;
 - documents/ZIP и voice/audio принимаются до Telegram download limit 20 МБ;
 - один бот и один SQLite;
@@ -1706,7 +1715,9 @@ Telegram/OpenAI/Groq end-to-end теста в репозитории нет.
 - нет автоматического commit/merge/push и force push; ручные Pull/Push текущей
   ветки и fast-forward её `HEAD` в существующий `origin/master` доступны owner и
   администратору в Project Viewer;
-- нет смены owner, удаления Project или добавления второго repository через Telegram;
+- смена primary owner и управление совладельцами доступны глобальному
+  администратору в Admin Mini App; удаления Project и добавления второго
+  repository через Telegram пока нет;
 - Viewer публикуется только через явно настроенный HTTPS proxy и owner ACL;
 - нет per-message approval UI;
 - non-Git Workspace сериализует Runs, но не изолирует изменения между ними;

@@ -102,6 +102,8 @@ test("owners control projects while group participants get read-only Q&A", async
     await waitFor(() => replies.some((reply) => reply.includes("Проект создан: beta")));
     assert.equal(runtime.projects.owner("alpha"), 42);
     assert.equal(runtime.projects.owner("beta"), 77);
+    runtime.projects.replaceOwners("alpha", 42, [42, 88]);
+    assert.deepEqual(runtime.projects.owners("alpha"), [42, 88]);
 
     await send(42, "/help", 42, "private");
     assert.match(replies.at(-1) ?? "", /\*Помощь по SUMMING\*/);
@@ -195,6 +197,9 @@ test("owners control projects while group participants get read-only Q&A", async
     await send(42, "/projects", 42, "private");
     assert.match(replies.at(-1) ?? "", /alpha/);
     assert.doesNotMatch(replies.at(-1) ?? "", /beta|summing/);
+    await send(88, "/projects", 88, "private");
+    assert.match(replies.at(-1) ?? "", /alpha/);
+    assert.doesNotMatch(replies.at(-1) ?? "", /beta|summing/);
 
     await send(1, "/project_create grouped 42 repo", -100, "supergroup", 5);
     assert.throws(() => runtime.projects.project("grouped"), ConfigError);
@@ -208,6 +213,7 @@ test("owners control projects while group participants get read-only Q&A", async
     assert.notEqual(ownerNotice, -1);
     assert.equal(replyChats[ownerNotice], -100);
     assert.match(replies[ownerNotice] ?? "", /tg:\/\/user\?id=42/);
+    assert.doesNotMatch(replies[ownerNotice] ?? "", /tg:\/\/user\?id=88/);
     assert.match(replies[ownerNotice] ?? "", /Repository: <code>repo<\/code>/);
     assert.deepEqual(replyOptions[ownerNotice], { topicId: 5, parseMode: "HTML" });
     const ownerNoticeCount = replies.filter((reply) =>

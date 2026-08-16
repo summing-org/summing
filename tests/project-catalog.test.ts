@@ -69,13 +69,27 @@ test("creates a persistent managed Git repository and enforces project ownership
       catalog.visibleTo(1).map((entry) => entry.project.id),
       ["client_name", "summing"],
     );
+    catalog.replaceOwners("client_name", 42, [42, 77]);
+    assert.equal(catalog.canAccess(77, "client_name"), true);
+    assert.deepEqual(catalog.owners("client_name"), [42, 77]);
+    catalog.replaceOwners("client_name", 77, [42, 77]);
+    assert.equal(catalog.owner("client_name"), 77);
+    assert.deepEqual(catalog.owners("client_name"), [77, 42]);
+    catalog.replaceOwners("client_name", 77, [77, 88]);
+    assert.equal(catalog.canAccess(42, "client_name"), false);
+    assert.equal(catalog.canAccess(88, "client_name"), true);
+    assert.throws(
+      () => catalog.replaceOwners("summing", 1, [1]),
+      /configured outside Mini App/,
+    );
 
     state.close();
     const reopened = new StateStore(join(config.dataDir, "state.sqlite3"));
     try {
       const reloaded = new ProjectCatalog(config, reopened);
       assert.equal(reloaded.project("client_name").workspace().path, repository);
-      assert.equal(reloaded.owner("client_name"), 42);
+      assert.equal(reloaded.owner("client_name"), 77);
+      assert.deepEqual(reloaded.owners("client_name"), [77, 88]);
     } finally {
       reopened.close();
     }

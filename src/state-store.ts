@@ -42,7 +42,8 @@ export interface PendingInput {
 export interface ManagedProject {
   id: string;
   name: string;
-  ownerId: number;
+  primaryOwnerId: number;
+  ownerIds: number[];
   defaultWorkspaceId: string;
   workspaces: Array<{ id: string; path: string }>;
   createdAt: number;
@@ -405,6 +406,17 @@ export class StateStore {
         );
         CREATE INDEX IF NOT EXISTS managed_projects_owner
           ON managed_projects(owner_id, id);
+        CREATE TABLE IF NOT EXISTS managed_project_owners (
+          project_id TEXT NOT NULL REFERENCES managed_projects(id) ON DELETE CASCADE,
+          telegram_user_id INTEGER NOT NULL,
+          added_at REAL NOT NULL,
+          PRIMARY KEY(project_id, telegram_user_id)
+        );
+        CREATE INDEX IF NOT EXISTS managed_project_owners_user
+          ON managed_project_owners(telegram_user_id, project_id);
+        INSERT OR IGNORE INTO managed_project_owners
+          (project_id, telegram_user_id, added_at)
+        SELECT id, owner_id, created_at FROM managed_projects;
         CREATE TABLE IF NOT EXISTS telegram_chats (
           chat_id INTEGER PRIMARY KEY,
           type TEXT NOT NULL,
@@ -771,6 +783,16 @@ export class StateStore {
   }
 
   createManagedProject(project: ManagedProject): void {
+    const ownerIds = [...new Set(project.ownerIds)];
+    if (
+      !Number.isSafeInteger(project.primaryOwnerId) ||
+      project.primaryOwnerId <= 0 ||
+      ownerIds.length === 0 ||
+      !ownerIds.includes(project.primaryOwnerId) ||
+      ownerIds.some((ownerId) => !Number.isSafeInteger(ownerId) || ownerId <= 0)
+    ) {
+      throw new Error("managed project owners must include one valid primary owner");
+    }
     this.transaction(() => {
       this.db.prepare(`
         INSERT INTO managed_projects
@@ -779,10 +801,17 @@ export class StateStore {
       `).run(
         project.id,
         project.name,
-        project.ownerId,
+        project.primaryOwnerId,
         project.defaultWorkspaceId,
         project.createdAt,
       );
+      const insertOwner = this.db.prepare(`
+        INSERT INTO managed_project_owners (project_id, telegram_user_id, added_at)
+        VALUES (?, ?, ?)
+      `);
+      for (const ownerId of ownerIds) {
+        insertOwner.run(project.id, ownerId, project.createdAt);
+      }
       const insertWorkspace = this.db.prepare(`
         INSERT INTO managed_workspaces (project_id, id, path, created_at)
         VALUES (?, ?, ?, ?)
@@ -802,17 +831,67 @@ export class StateStore {
     const workspaceQuery = this.db.prepare(`
       SELECT id, path FROM managed_workspaces WHERE project_id = ? ORDER BY id
     `);
-    return projects.map((project) => ({
-      id: String(project.id),
-      name: String(project.name),
-      ownerId: Number(project.owner_id),
-      defaultWorkspaceId: String(project.default_workspace_id),
-      workspaces: (workspaceQuery.all(project.id as SQLInputValue) as Row[]).map((workspace) => ({
-        id: String(workspace.id),
-        path: String(workspace.path),
-      })),
-      createdAt: Number(project.created_at),
-    }));
+    const ownerQuery = this.db.prepare(`
+      SELECT telegram_user_id
+      FROM managed_project_owners
+      WHERE project_id = ?
+      ORDER BY telegram_user_id
+    `);
+    return projects.map((project) => {
+      const primaryOwnerId = Number(project.owner_id);
+      const storedOwners = (ownerQuery.all(project.id as SQLInputValue) as Row[])
+        .map((owner) => Number(owner.telegram_user_id));
+      const ownerIds = [primaryOwnerId, ...storedOwners.filter((ownerId) =>
+        ownerId !== primaryOwnerId
+      )];
+      return {
+        id: String(project.id),
+        name: String(project.name),
+        primaryOwnerId,
+        ownerIds,
+        defaultWorkspaceId: String(project.default_workspace_id),
+        workspaces: (workspaceQuery.all(project.id as SQLInputValue) as Row[]).map((workspace) => ({
+          id: String(workspace.id),
+          path: String(workspace.path),
+        })),
+        createdAt: Number(project.created_at),
+      };
+    });
+  }
+
+  replaceManagedProjectOwners(
+    projectId: string,
+    primaryOwnerId: number,
+    ownerIds: readonly number[],
+  ): void {
+    const uniqueOwners = [...new Set(ownerIds)];
+    if (
+      !Number.isSafeInteger(primaryOwnerId) ||
+      primaryOwnerId <= 0 ||
+      uniqueOwners.length === 0 ||
+      !uniqueOwners.includes(primaryOwnerId) ||
+      uniqueOwners.some((ownerId) => !Number.isSafeInteger(ownerId) || ownerId <= 0)
+    ) {
+      throw new Error("managed project owners must include one valid primary owner");
+    }
+    this.transaction(() => {
+      const project = this.db.prepare(
+        "SELECT id FROM managed_projects WHERE id = ?",
+      ).get(projectId) as Row | undefined;
+      if (!project) throw new Error(`unknown managed project '${projectId}'`);
+      this.db.prepare(
+        "UPDATE managed_projects SET owner_id = ? WHERE id = ?",
+      ).run(primaryOwnerId, projectId);
+      this.db.prepare(
+        "DELETE FROM managed_project_owners WHERE project_id = ?",
+      ).run(projectId);
+      const insertOwner = this.db.prepare(`
+        INSERT INTO managed_project_owners (project_id, telegram_user_id, added_at)
+        VALUES (?, ?, ?)
+      `);
+      const addedAt = Date.now() / 1_000;
+      for (const ownerId of uniqueOwners) insertOwner.run(projectId, ownerId, addedAt);
+    });
   }
 
   recordTelegramChat(observation: TelegramChatObservation): TelegramChatRecord {
