@@ -716,6 +716,19 @@ test("explicit questions in unbound topics run without Project access", async ()
             threadId: "thr-unbound",
             turnId: "turn-unbound",
             item: {
+              id: "commentary-1",
+              type: "agentMessage",
+              phase: "commentary",
+              text: "Проверил контекст обсуждения.",
+            },
+          },
+        });
+        await routeCodexEvent({
+          method: "item/completed",
+          params: {
+            threadId: "thr-unbound",
+            turnId: "turn-unbound",
+            item: {
               type: "agentMessage",
               phase: "final_answer",
               text: "**Короткий ответ** по обсуждению.",
@@ -781,13 +794,15 @@ test("explicit questions in unbound topics run without Project access", async ()
     assert.match(turnPrompt, /"author": "bot"/);
     assert.match(turnPrompt, /что решили/);
     assert.equal(unsubscribedThread, "thr-unbound");
-    assert.deepEqual(replies, [
-      {
-        chatId: -500,
-        text: "<b>Короткий ответ</b> по обсуждению.",
-        options: { topicId: 77, replyTo: 10, parseMode: "HTML" },
-      },
-    ]);
+    assert.equal(replies.length, 1);
+    assert.equal(replies[0]?.chatId, -500);
+    assert.deepEqual(replies[0]?.options, { topicId: 77, replyTo: 10, parseMode: "HTML" });
+    assert.match(
+      replies[0]?.text ?? "",
+      /^<blockquote expandable><b>Ход работы · 1 сек<\/b>\n/,
+    );
+    assert.match(replies[0]?.text ?? "", /Проверил контекст обсуждения\./);
+    assert.match(replies[0]?.text ?? "", /<b>Короткий ответ<\/b> по обсуждению\.$/);
 
     replies.length = 0;
     runtime.codex.startThread = async () => {

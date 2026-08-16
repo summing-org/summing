@@ -408,6 +408,17 @@ Telegram-сообщение содержит уже сам ответ и сох�
 `item/agentMessage/delta` накапливаются и не чаще заданного интервала заменяют
 текст этого сообщения через `editMessageText`.
 
+Runtime отдельно накапливает авторитетные завершённые `agentMessage` с фазой
+`commentary`. Когда приходит `final_answer`, предыдущие commentary вставляются
+перед ним как нативная свёрнутая `<blockquote expandable>` с заголовком
+**«Ход работы · N мин N сек»**. В журнал не входят reasoning items, tool arguments,
+stdout/stderr или file diffs; сохраняется только уже показанный пользователю текст
+агента. Журнал ограничен последними 12 000 Unicode-символами и при усечении явно
+помечает скрытые ранние обновления. Если вместе с Run пришло аудио, «Ход работы» и
+транскрипция остаются двумя независимыми свёрнутыми блоками. Если финальный рендер
+короче промежуточного многочастного stream, ставшие лишними Telegram-сообщения
+удаляются.
+
 Перед каждым `sendMessage`/`editMessageText` Markdown агента преобразуется в
 экранированный Telegram HTML. Рендерер поддерживает заголовки, списки и task-list,
 bold/italic/strikethrough/spoiler, ссылки только с разрешёнными схемами, blockquote,
@@ -593,7 +604,7 @@ SUMMING использует один execution substrate: официальны�
 | `turn/steer` | Передать указание в активный turn. |
 | `turn/interrupt` | Реализовать `/cancel`. |
 | `item/agentMessage/delta` | Стримить ответ. |
-| `item/completed` | Зафиксировать окончательный текст agent message. |
+| `item/completed` | По `agentMessage.phase` отдельно зафиксировать `commentary` для свёрнутого журнала и `final_answer` как итоговый ответ. |
 | `error` | Сохранить ошибку активного Run. |
 | `turn/completed` | Закрыть Run и сохранить результат. |
 | `account/updated`, `account/login/completed` | Обновить локальный account status. |

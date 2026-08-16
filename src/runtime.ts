@@ -177,7 +177,9 @@ export class TelegramStream {
   private typingActive = false;
   private replyTo: number | null = null;
   private flushChain = Promise.resolve();
-  private expandableQuote: AudioTranscript | null = null;
+  private audioTranscript: AudioTranscript | null = null;
+  private workLog: { title: string; text: string } | null = null;
+  private startedAt: number | null = null;
 
   constructor(
     readonly api: TelegramAPI,
@@ -189,11 +191,24 @@ export class TelegramStream {
 
   start(replyTo?: number): void {
     this.replyTo = replyTo ?? null;
+    if (this.startedAt === null) this.startedAt = performance.now();
     this.startTyping();
   }
 
   showAudioTranscript(transcript: AudioTranscript): void {
-    this.expandableQuote = transcript;
+    this.audioTranscript = transcript;
+  }
+
+  showWorkLog(text: string): void {
+    const content = text.trim();
+    if (!content) return;
+    const elapsedMilliseconds = this.startedAt === null
+      ? 0
+      : performance.now() - this.startedAt;
+    this.workLog = {
+      title: `Ход работы · ${formatWorkLogDuration(elapsedMilliseconds)}`,
+      text: content,
+    };
   }
 
   private startTyping(): void {
@@ -256,12 +271,15 @@ export class TelegramStream {
     const chunks = markdownToTelegramHtmlChunks(
       content,
       undefined,
-      this.expandableQuote
-        ? {
-            title: `🎙 Транскрипция «${this.expandableQuote.fileName}»`,
-            text: this.expandableQuote.text,
-          }
-        : undefined,
+      [
+        ...(this.workLog ? [this.workLog] : []),
+        ...(this.audioTranscript
+          ? [{
+              title: `🎙 Транскрипция «${this.audioTranscript.fileName}»`,
+              text: this.audioTranscript.text,
+            }]
+          : []),
+      ],
     );
     for (const [index, chunk] of chunks.entries()) {
       const messageId = this.messageIds[index];
@@ -280,8 +298,33 @@ export class TelegramStream {
       }
       this.rendered[index] = chunk;
     }
+    for (let index = this.messageIds.length - 1; index >= chunks.length; index -= 1) {
+      const messageId = this.messageIds[index]!;
+      try {
+        await this.api.deleteMessage(this.chatId, messageId);
+        this.messageIds.splice(index, 1);
+        this.rendered.splice(index, 1);
+      } catch (error) {
+        console.warn(`could not delete obsolete Telegram stream message ${messageId}`, error);
+      }
+    }
     this.lastFlush = performance.now();
   }
+}
+
+export function formatWorkLogDuration(milliseconds: number): string {
+  const totalSeconds = Math.max(1, Math.round(Math.max(0, milliseconds) / 1_000));
+  const hours = Math.floor(totalSeconds / 3_600);
+  const minutes = Math.floor((totalSeconds % 3_600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours} ч ${minutes} мин ${seconds} сек`;
+  if (minutes > 0) return `${minutes} мин ${seconds} сек`;
+  return `${seconds} сек`;
+}
+
+interface CodexCommentaryMessage {
+  itemId: string | null;
+  text: string;
 }
 
 interface CodexResponseRun {
@@ -289,10 +332,38 @@ interface CodexResponseRun {
   stream?: TelegramStream;
   turnId: string | null;
   response: string;
+  commentary: CodexCommentaryMessage[];
+  hasFinalAnswer: boolean;
   lastAgentMessageItemId: string | null;
   status: string;
   error: string | null;
   done: Deferred<void>;
+}
+
+const MAX_CODEX_WORK_LOG_CHARACTERS = 12_000;
+
+export function codexWorkLogText(
+  commentary: Array<{ text: string }>,
+  limit = MAX_CODEX_WORK_LOG_CHARACTERS,
+): string {
+  if (!Number.isSafeInteger(limit) || limit < 128) {
+    throw new RangeError("Codex work log limit must be an integer of at least 128");
+  }
+  const joined = commentary
+    .map((message) => message.text.trim())
+    .filter(Boolean)
+    .join("\n\n");
+  const characters = Array.from(joined);
+  if (characters.length <= limit) return joined;
+  const prefix = "… более ранние обновления скрыты\n\n";
+  const available = Math.max(0, limit - Array.from(prefix).length);
+  return prefix + characters.slice(-available).join("").trimStart();
+}
+
+function showCodexWorkLog(active: CodexResponseRun): void {
+  if (!active.hasFinalAnswer) return;
+  const text = codexWorkLogText(active.commentary);
+  if (text) active.stream?.showWorkLog(text);
 }
 
 export function appendAgentMessageDelta(
@@ -877,6 +948,8 @@ export class SummingRuntime {
         threadId,
         turnId: null,
         response: "",
+        commentary: [],
+        hasFinalAnswer: false,
         lastAgentMessageItemId: null,
         status: "running",
         error: null,
@@ -1839,6 +1912,8 @@ export class SummingRuntime {
         stream,
         turnId: null,
         response: "",
+        commentary: [],
+        hasFinalAnswer: false,
         lastAgentMessageItemId: null,
         status: "running",
         error: null,
@@ -1883,6 +1958,7 @@ export class SummingRuntime {
       active.turnId = turnId;
       this.activeUnboundByTurn.set(turnId, active);
       await this.waitForUnboundTurn(active);
+      showCodexWorkLog(active);
       await stream.flush(
         active.status === "completed"
           ? "Не получилось сформулировать ответ."
@@ -1893,6 +1969,7 @@ export class SummingRuntime {
       if (!this.stopping) {
         try {
           if (active) {
+            showCodexWorkLog(active);
             await stream.flush("Не удалось ответить. Попробуйте ещё раз позже.");
           } else {
             await this.reply(
@@ -3208,6 +3285,7 @@ export class SummingRuntime {
     let releaseWorkspace: (() => void) | null = null;
     let artifactInspector: GitInspector | null = null;
     let artifactStarted = false;
+    let active: ActiveRun | null = null;
     try {
       runId = this.state.startRun(
         conversation.id,
@@ -3283,7 +3361,7 @@ export class SummingRuntime {
       );
       stream.start(replyTo);
       this.state.setActive(conversation.id, "starting", null);
-      const active: ActiveRun = {
+      active = {
         conversation,
         threadId,
         runId,
@@ -3292,6 +3370,8 @@ export class SummingRuntime {
         access,
         turnId: null,
         response: "",
+        commentary: [],
+        hasFinalAnswer: false,
         lastAgentMessageItemId: null,
         status: "running",
         error: null,
@@ -3325,6 +3405,7 @@ export class SummingRuntime {
         active.status === "completed"
           ? "Готово."
           : `Run ${active.status}: ${active.error || "без подробностей"}`;
+      showCodexWorkLog(active);
       await stream.flush(fallback);
       this.state.finishRun(runId, active.status, active.response, active.error);
       const conflict =
@@ -3348,6 +3429,7 @@ export class SummingRuntime {
       }
       if (!this.stopping) {
         try {
+          if (active) showCodexWorkLog(active);
           await stream.flush(`Ошибка: ${errorText(error)}`);
         } catch (reportError) {
           console.error("could not report run failure to Telegram", reportError);
@@ -3356,10 +3438,10 @@ export class SummingRuntime {
     } finally {
       try {
         stream.stopTyping();
-        const active = this.activeForConversation(conversationId);
-        if (active) {
-          this.activeByThread.delete(active.threadId);
-          if (active.turnId) this.activeByTurn.delete(active.turnId);
+        const currentActive = this.activeForConversation(conversationId);
+        if (currentActive) {
+          this.activeByThread.delete(currentActive.threadId);
+          if (currentActive.turnId) this.activeByTurn.delete(currentActive.turnId);
         }
         this.state.clearActive(conversationId);
       } finally {
@@ -3528,8 +3610,20 @@ export class SummingRuntime {
     } else if (event.method === "item/completed") {
       const item = record(event.params.item);
       if (item?.type === "agentMessage" && typeof item.text === "string") {
-        if (item.phase === "final_answer" || item.phase === undefined || item.phase === null) {
+        if (item.phase === "commentary") {
+          const text = item.text.trim();
+          if (text) {
+            const itemId = String(item.id ?? "").trim() || null;
+            const existing = itemId
+              ? active.commentary.findIndex((message) => message.itemId === itemId)
+              : -1;
+            const message = { itemId, text };
+            if (existing >= 0) active.commentary[existing] = message;
+            else active.commentary.push(message);
+          }
+        } else if (item.phase === "final_answer" || item.phase === undefined || item.phase === null) {
           active.response = item.text;
+          active.hasFinalAnswer = true;
           active.lastAgentMessageItemId = String(item.id ?? "") || active.lastAgentMessageItemId;
           if (streamResponse && active.stream) active.stream.text = item.text;
         }

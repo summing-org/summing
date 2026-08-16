@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { appendAgentMessageDelta, TelegramStream } from "../src/runtime.js";
+import {
+  appendAgentMessageDelta,
+  codexWorkLogText,
+  formatWorkLogDuration,
+  TelegramStream,
+} from "../src/runtime.js";
 import { TelegramAPI } from "../src/telegram-api.js";
 
 function wait(milliseconds: number): Promise<void> {
@@ -106,6 +111,83 @@ test("a stream keeps an expandable audio transcript before every edit", async ()
     stream.stopTyping();
     await api.close();
   }
+});
+
+test("a completed stream keeps the work log and audio transcript collapsed before the final answer", async () => {
+  const api = new TelegramAPI("token");
+  const messages: string[] = [];
+  api.sendChatAction = async () => undefined;
+  api.sendMessage = async (_chatId, text) => {
+    messages.push(text);
+    return 101;
+  };
+  const stream = new TelegramStream(api, -10042, 17, 0, 1_000);
+  try {
+    stream.start(9);
+    stream.showAudioTranscript({ fileName: "voice.ogg", text: "Текст аудио" });
+    stream.showWorkLog("Проверил код\n\nЗапустил тесты");
+    stream.append("**Готово**");
+    await stream.flush();
+
+    assert.match(
+      messages.at(-1) ?? "",
+      /^<blockquote expandable><b>Ход работы · 1 сек<\/b>\n/,
+    );
+    assert.match(messages.at(-1) ?? "", /Проверил код\n\nЗапустил тесты/);
+    assert.match(
+      messages.at(-1) ?? "",
+      /<blockquote expandable><b>🎙 Транскрипция «voice\.ogg»<\/b>\nТекст аудио/,
+    );
+    assert.match(messages.at(-1) ?? "", /<b>Готово<\/b>$/);
+  } finally {
+    stream.stopTyping();
+    await api.close();
+  }
+});
+
+test("a final edit removes obsolete messages left by a longer stream", async () => {
+  const api = new TelegramAPI("token");
+  const sentIds: number[] = [];
+  const deletedIds: number[] = [];
+  api.sendChatAction = async () => undefined;
+  api.sendMessage = async () => {
+    const messageId = 100 + sentIds.length;
+    sentIds.push(messageId);
+    return messageId;
+  };
+  api.editMessage = async () => undefined;
+  api.deleteMessage = async (_chatId, messageId) => {
+    deletedIds.push(messageId);
+  };
+  const stream = new TelegramStream(api, -10042, 17, 0, 1_000);
+  try {
+    stream.start(9);
+    stream.text = "длинный поток ".repeat(1_000);
+    await stream.flush();
+    assert.ok(sentIds.length > 1);
+
+    stream.text = "Короткий финал";
+    await stream.flush();
+    assert.deepEqual(deletedIds, sentIds.slice(1).reverse());
+    assert.deepEqual(stream.messageIds, [sentIds[0]!]);
+  } finally {
+    stream.stopTyping();
+    await api.close();
+  }
+});
+
+test("work log duration and retention stay bounded", () => {
+  assert.equal(formatWorkLogDuration(0), "1 сек");
+  assert.equal(formatWorkLogDuration(125_000), "2 мин 5 сек");
+  assert.equal(formatWorkLogDuration(3_723_000), "1 ч 2 мин 3 сек");
+
+  const bounded = codexWorkLogText([
+    { text: "старое ".repeat(100) },
+    { text: "последнее обновление" },
+  ], 128);
+  assert.ok(Array.from(bounded).length <= 128);
+  assert.match(bounded, /^… более ранние обновления скрыты/);
+  assert.match(bounded, /последнее обновление$/);
 });
 
 test("separate agent message items get a boundary without splitting streamed words", () => {

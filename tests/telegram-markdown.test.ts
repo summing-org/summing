@@ -106,6 +106,21 @@ test("renders an escaped expandable transcript before the response", () => {
   );
 });
 
+test("renders multiple expandable sections in their declared order", () => {
+  assert.deepEqual(
+    markdownToTelegramHtmlChunks("Финал", 3_900, [
+      { title: "Ход работы · 2 мин 5 сек", text: "Проверил сборку" },
+      { title: "🎙 Транскрипция", text: "Текст аудио" },
+    ]),
+    [
+      "<blockquote expandable><b>Ход работы · 2 мин 5 сек</b>\n" +
+        "Проверил сборку\n</blockquote>\n\n" +
+        "<blockquote expandable><b>🎙 Транскрипция</b>\n" +
+        "Текст аудио\n</blockquote>\n\nФинал",
+    ],
+  );
+});
+
 test("long formatted answers are split into independently balanced chunks", () => {
   const limit = 180;
   const markdown = [
