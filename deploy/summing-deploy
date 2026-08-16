@@ -14,6 +14,7 @@ current_link=${SUMMING_DEPLOY_CURRENT:-/opt/summing-current}
 state_dir=${SUMMING_DEPLOY_STATE_DIR:-/var/lib/summing/deploy}
 state_file=${SUMMING_DEPLOY_STATE_FILE:-${state_dir}/state.json}
 history_file=${SUMMING_DEPLOY_HISTORY_FILE:-${state_dir}/history.json}
+event_dir=${SUMMING_DEPLOY_EVENT_DIR:-${state_dir}/events}
 remote=${SUMMING_DEPLOY_REMOTE:-origin}
 branch=${SUMMING_DEPLOY_BRANCH:-master}
 expected_remote=${SUMMING_DEPLOY_EXPECTED_REMOTE:-git@summing.github.com:summing-org/summing.git}
@@ -70,6 +71,7 @@ fi
 
 install -d -o root -g root -m 0711 "${releases_dir}"
 install -d -o root -g summing -m 1770 "${state_dir}"
+install -d -o root -g summing -m 1770 "${event_dir}"
 install -d -o root -g root -m 0755 "$(dirname "${lock_file}")"
 exec 9>"${lock_file}"
 if ! flock -n 9; then
@@ -85,6 +87,8 @@ started_at=$(now)
 attempt_id="$(date -u +%Y%m%dT%H%M%S%3NZ)-$$"
 target_sha=
 previous_sha=
+target_version=
+previous_version=
 previous_target=
 switched=0
 installed=0
@@ -100,6 +104,10 @@ manual_retry=0
 
 valid_sha() {
   printf '%s' "${1:-}" | grep -Eq '^[0-9a-f]{40}$'
+}
+
+valid_version() {
+  printf '%s' "${1:-}" | grep -Eq '^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$'
 }
 
 git_as_summing() {
@@ -170,6 +178,47 @@ record_attempt() {
   chmod 0640 "${temporary}"
   mv -f "${temporary}" "${history_file}"
   rm -f -- "${previous}"
+}
+
+write_deployment_event() {
+  local event_kind=$1
+  local message=$2
+  local temporary target created_at
+  temporary=$(mktemp "${event_dir}/.event.XXXXXX") || return 1
+  target=${event_dir}/${attempt_id}-${event_kind}.json
+  created_at=$(now)
+  if ! jq -n \
+    --argjson schemaVersion 1 \
+    --arg eventId "${attempt_id}" \
+    --arg kind "${event_kind}" \
+    --arg message "${message}" \
+    --arg previousVersion "${previous_version}" \
+    --arg targetVersion "${target_version}" \
+    --arg previousSha "${previous_sha}" \
+    --arg targetSha "${target_sha}" \
+    --arg createdAt "${created_at}" \
+    --argjson failure "${failure_json}" \
+    '{
+      schemaVersion: $schemaVersion,
+      eventId: $eventId,
+      kind: $kind,
+      message: $message,
+      previousVersion: (if $previousVersion == "" then null else $previousVersion end),
+      targetVersion: (if $targetVersion == "" then null else $targetVersion end),
+      previousSha: (if $previousSha == "" then null else $previousSha end),
+      targetSha: (if $targetSha == "" then null else $targetSha end),
+      failure: $failure,
+      createdAt: $createdAt
+    }' > "${temporary}"; then
+    rm -f -- "${temporary}"
+    return 1
+  fi
+  if ! chown summing:summing "${temporary}" || \
+    ! chmod 0600 "${temporary}" || \
+    ! mv -f "${temporary}" "${target}"; then
+    rm -f -- "${temporary}"
+    return 1
+  fi
 }
 
 set_simple_failure() {
@@ -283,6 +332,12 @@ fail_deployment() {
   if [ "${installed}" = 1 ]; then failure_current_sha=${target_sha}; fi
   write_state failed "${message}" "${failure_current_sha}" "${target_sha}" "$(now)"
   record_attempt || printf '%s\n' 'Could not persist deployment attempt history.' >&2
+  case "$(printf '%s' "${failure_json}" | jq -r '.kind // empty' 2>/dev/null)" in
+    lint|tests)
+      write_deployment_event update_failed "${message}" || \
+        printf '%s\n' 'Could not persist deployment failure event.' >&2
+      ;;
+  esac
   printf '%s\n' "${message}" >&2
   exit "${code}"
 }
@@ -345,6 +400,8 @@ if [ -z "${previous_target}" ] || [ ! -d "${previous_target}" ]; then
   set_simple_failure runtime 2 'Current release symlink is missing; run deploy/activate.sh first.'
   fail_deployment 2 'Текущий release symlink отсутствует; запустите deploy/activate.sh'
 fi
+previous_version=$(jq -r '.version // empty' "${previous_target}/package.json" 2>/dev/null || true)
+if ! valid_version "${previous_version}"; then previous_version=; fi
 if [ -f "${state_file}" ]; then
   prior_status=$(jq -r '.status // empty' "${state_file}" 2>/dev/null || true)
   prior_remote_sha=$(jq -r '.remoteSha // empty' "${state_file}" 2>/dev/null || true)
@@ -381,6 +438,9 @@ if ! valid_sha "${target_sha}"; then
   set_simple_failure source 1 'Remote branch did not resolve to a full commit SHA.'
   fail_deployment 1 'Remote branch не разрешился в полный commit SHA'
 fi
+target_version=$(git_as_summing -C "${repo_dir}" show \
+  "${target_sha}:package.json" 2>/dev/null | jq -r '.version // empty' 2>/dev/null || true)
+if ! valid_version "${target_version}"; then target_version=; fi
 if [ "${previous_sha}" = "${target_sha}" ]; then
   phase=cutover
   failure_kind=cutover
@@ -400,8 +460,16 @@ if [ "${previous_sha}" = "${target_sha}" ]; then
       'Версия установлена, но завершение migration cutover не удалось'
   fi
   phase=complete
-  write_state idle "Установлена актуальная версия" "${previous_sha}" "${target_sha}" \
-    "$(now)"
+  if [ "${prior_status}" = waiting ] && [ "${prior_remote_sha}" = "${target_sha}" ]; then
+    write_state succeeded "Обновление установлено" "${target_sha}" "${target_sha}" \
+      "$(now)"
+    record_attempt || printf '%s\n' 'Could not persist deployment attempt history.' >&2
+    write_deployment_event update_succeeded 'Обновление установлено' || \
+      printf '%s\n' 'Could not persist deployment success event.' >&2
+  else
+    write_state idle "Установлена актуальная версия" "${previous_sha}" "${target_sha}" \
+      "$(now)"
+  fi
   exit 0
 fi
 if [ "${prior_status}" = failed ] && \
@@ -495,6 +563,8 @@ phase=complete
 write_state succeeded "Обновление установлено" "${target_sha}" "${target_sha}" \
   "$(now)"
 record_attempt || printf '%s\n' 'Could not persist deployment attempt history.' >&2
+write_deployment_event update_succeeded 'Обновление установлено' || \
+  printf '%s\n' 'Could not persist deployment success event.' >&2
 
 current_target=$(readlink -f "${current_link}")
 if ! find "${releases_dir}" -mindepth 1 -maxdepth 1 -type d \

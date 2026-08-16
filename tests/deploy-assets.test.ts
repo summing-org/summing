@@ -37,6 +37,10 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
   assert.match(script, /record_attempt/);
   assert.match(script, /history_limit=20/);
   assert.match(script, /install -d -o root -g summing -m 1770 "\$\{state_dir\}"/);
+  assert.match(script, /install -d -o root -g summing -m 1770 "\$\{event_dir\}"/);
+  assert.match(script, /write_deployment_event update_failed/);
+  assert.match(script, /write_deployment_event update_succeeded/);
+  assert.match(script, /chown summing:summing "\$\{temporary\}"/);
   assert.match(script, /Источник \$\{remote\} не одобрен политикой deployment/);
   assert.doesNotMatch(script, /temporary="\$\{state_file\}\.\$\$\.tmp"/);
   assert.match(script, /summing-builder must not belong to the secret-bearing summing group/);
@@ -49,6 +53,7 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
   assert.match(script, /finalize_project_environment_cutover "\$\{release_dir\}"/);
   assert.match(script, /cutover_status.*75/);
   assert.match(script, /Версия установлена; ждём Validate\/Dry run для migration cutover/);
+  assert.match(script, /"\$\{prior_status\}" = waiting/);
   assert.doesNotMatch(script, /git .*\b(?:pull|reset|checkout)\b/);
   assert.doesNotMatch(service, /summing\.env/);
   assert.match(service, /ExecStart=\/opt\/summing-current\/deploy\/summing-deploy/);

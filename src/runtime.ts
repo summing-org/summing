@@ -1,5 +1,5 @@
 import { appendFileSync, mkdirSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { Deferred, KeyedMutex, Semaphore } from "./async-primitives.js";
 import {
@@ -24,6 +24,7 @@ import {
   type StoredAttachment,
 } from "./attachment-service.js";
 import { ConfigError, type RuntimeConfig } from "./config.js";
+import { DeploymentEventNotifier } from "./deployment-event-notifier.js";
 import { HealthServer } from "./health-server.js";
 import { productionEnvironmentMigrationCoordinator } from "./project-environment-coordinator.js";
 import { helpMessage } from "./help-message.js";
@@ -364,6 +365,7 @@ export class SummingRuntime {
   readonly transcriber: AudioTranscriber;
   readonly health: HealthServer;
   readonly viewer: ProjectViewerServer;
+  readonly deploymentEvents: DeploymentEventNotifier;
   private readonly shutdown = new Deferred<void>();
   private readonly shutdownController = new AbortController();
   private stopping = false;
@@ -412,6 +414,17 @@ export class SummingRuntime {
         ? new GroqWhisperTranscriber(config.groqApiKey, config.transcriptionModel)
         : new OpenAITranscriber(config.openaiApiKey, config.transcriptionModel);
     this.health = new HealthServer("127.0.0.1", config.healthPort, () => this.status());
+    this.deploymentEvents = new DeploymentEventNotifier(
+      config.deploymentStatePath
+        ? join(dirname(config.deploymentStatePath), "events")
+        : "",
+      async (message) => {
+        await this.telegram.sendMessage(config.telegramOwnerId, message);
+      },
+      5_000,
+      config.deploymentStatePath,
+      SUMMING_VERSION,
+    );
     this.viewer = new ProjectViewerServer(
       config,
       this.state,
@@ -442,6 +455,8 @@ export class SummingRuntime {
       this.telegramBotId = Number(me.id ?? 0);
       this.telegramUsername = String(me.username ?? "").replace(/^@/, "").toLowerCase();
       console.info(`Telegram bot connected: @${this.telegramUsername || "unknown"}`);
+      await this.deploymentEvents.observeState();
+      this.deploymentEvents.start();
       if (this.config.teamModelEgressEnabled) {
         for (const sourceId of this.state.sourcesWithPendingTeamEvents()) {
           this.scheduleTeamUnderstanding(sourceId);
@@ -490,7 +505,9 @@ export class SummingRuntime {
       this.clearCodexLimitsTimer();
       this.clearTeamRetentionTimer();
       this.clearTeamUnderstandingTimers();
+      this.deploymentEvents.stop();
       await this.telegram.close();
+      await this.deploymentEvents.close();
       await this.codex.close(this.exitCode === 99);
       for (const active of this.activeByThread.values()) {
         active.status = "interrupted";

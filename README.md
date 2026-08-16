@@ -502,6 +502,11 @@ Worker никогда не делает `pull`, `reset` или checkout рабо
 активных Codex runs, атомарно переключает `/opt/summing-current` и проверяет
 SUMMING и runner. При неуспешном health check symlink и сервисы автоматически
 возвращаются на предыдущий release. Non-fast-forward обновления отклоняются.
+После успешной установки runtime отправляет администратору Telegram-событие с новой
+версией и commit. Ошибка typecheck, сборки или тестов создаёт отдельное fail-событие
+с фазой, количеством и именами упавших тестов; хвост build-журнала и секреты в
+Telegram не уходят. События лежат в durable outbox deployment-state до успешной
+доставки, при этом worker не читает `TELEGRAM_BOT_TOKEN`.
 
 ```bash
 systemctl list-timers summing-deploy.timer

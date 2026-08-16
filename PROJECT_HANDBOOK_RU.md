@@ -1,6 +1,6 @@
 # SUMMING 9.8: архитектура, эксплуатация и разработка
 
-> Версия: **9.8.2**
+> Версия: **9.8.3**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
 > Последняя сверка с кодом: **16 августа 2026 года**.
 
@@ -1322,6 +1322,17 @@ Mini App валидирует и дополнительно ограничива
 проверки актуального SHA историю не засоряют. Несовпавший approved origin теперь
 завершается явным `failed/source-verification`, а не остаётся в `checking`.
 
+После полного `succeeded` worker атомарно кладёт структурированное
+`update_succeeded` событие в `/var/lib/summing/deploy/events`; ошибки `lint` и
+`tests` создают `update_failed` с target version/SHA и уже ограниченной test
+summary. Runtime читает outbox каждые пять секунд, отправляет событие только в
+личный чат `TELEGRAM_OWNER_ID` и удаляет файл после успешного Telegram API call.
+При временной ошибке файл остаётся для повторной доставки. `logTail` намеренно не
+рендерится в Telegram. На границе обновления новый runtime сначала фиксирует
+активный attempt из `state.json` до открытия health endpoint: это позволяет ему
+сообщить об установке даже тогда, когда запустивший rollout worker был из
+предыдущего release и ещё не умел создавать outbox event.
+
 `state.json` и `history.json` принадлежат `root:summing` с режимом `0640`.
 Каталог deployment имеет sticky mode `1770`: приложение может атомарно обновлять
 свой `request.json`, но не может подменить root-owned state/history или временный
@@ -1356,6 +1367,7 @@ journalctl -u summing-deploy --since today
 sudo systemctl start summing-deploy.service
 cat /var/lib/summing/deploy/state.json
 cat /var/lib/summing/deploy/history.json
+find /var/lib/summing/deploy/events -maxdepth 1 -type f -print
 ```
 
 ### 13.8. Одноразовая миграция существующего 8.x host
@@ -1442,7 +1454,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "9.8.2",
+  "version": "9.8.3",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",
