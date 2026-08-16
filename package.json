@@ -8,10 +8,15 @@
     "node": ">=24.0.0"
   },
   "scripts": {
+    "prebuild": "node scripts/require-node-version.mjs",
     "build": "tsc -p tsconfig.json",
+    "prestart": "node scripts/require-node-version.mjs",
     "start": "node dist/src/index.js",
+    "prelint": "node scripts/require-node-version.mjs",
     "lint": "tsc -p tsconfig.json --noEmit",
+    "pretest": "node scripts/require-node-version.mjs",
     "test": "npm run build && node --test dist/tests/*.test.js",
+    "precodex:types": "node scripts/require-node-version.mjs",
     "codex:types": "codex app-server generate-ts --experimental --out .codex-protocol"
   },
   "dependencies": {

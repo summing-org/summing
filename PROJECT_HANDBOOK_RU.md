@@ -1713,6 +1713,12 @@ deploy/
 
 Локальные проверки:
 
+Репозиторий фиксирует major runtime в `.node-version`. Все lifecycle-команды
+сначала выполняют быстрый guard и отказываются компилировать или запускать тесты
+на Node.js ниже 24; это предотвращает поздние ложные падения импорта `node:sqlite`.
+В Codex перед первой npm-командой нужно проверить `node --version` и при
+необходимости активировать Node из workspace dependencies.
+
 ```bash
 make build
 make test

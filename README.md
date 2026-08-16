@@ -110,6 +110,10 @@ Team Space: создаётся при подключении командног�
 - OpenAI API key для voice/audio transcription (либо Groq API key при выборе
   Groq-провайдера).
 
+Локальные version managers читают Node major из `.node-version`. Все npm
+lifecycle-команды дополнительно выполняют быстрый runtime guard и завершаются до
+сборки или тестов, если активен Node.js ниже 24.
+
 Официальный Codex App Server поддерживает ChatGPT browser и device-code login,
 persistent threads, streaming и `turn/steer`:
 [Codex App Server documentation](https://developers.openai.com/codex/app-server).
