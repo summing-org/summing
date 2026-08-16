@@ -1,5 +1,5 @@
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 
 const SHA = /^[0-9a-f]{40}$/;
@@ -18,10 +18,41 @@ const STATUSES = new Set([
 export interface DeploymentStatus {
   available: boolean;
   status: string;
+  phase: string | null;
   message: string;
   currentSha: string | null;
   remoteSha: string | null;
+  attemptId: string | null;
+  failure: DeploymentFailure | null;
+  history: DeploymentAttempt[];
   requestedAt: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+
+export interface DeploymentTestSummary {
+  total: number | null;
+  passed: number | null;
+  failed: number | null;
+  failedTests: string[];
+}
+
+export interface DeploymentFailure {
+  kind: string;
+  phase: string;
+  exitCode: number | null;
+  logTail: string;
+  tests: DeploymentTestSummary | null;
+}
+
+export interface DeploymentAttempt {
+  attemptId: string;
+  status: string;
+  phase: string | null;
+  message: string;
+  currentSha: string | null;
+  remoteSha: string | null;
+  failure: DeploymentFailure | null;
   startedAt: string | null;
   finishedAt: string | null;
 }
@@ -48,12 +79,66 @@ function sha(value: unknown): string | null {
   return SHA.test(candidate) ? candidate : null;
 }
 
-async function readJson(path: string): Promise<Record<string, unknown> | null> {
+function record(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function boundedInteger(value: unknown): number | null {
+  return Number.isSafeInteger(value) && Number(value) >= 0 && Number(value) <= 1_000_000
+    ? Number(value)
+    : null;
+}
+
+function failure(value: unknown): DeploymentFailure | null {
+  const candidate = record(value);
+  if (!candidate) return null;
+  const rawTests = record(candidate.tests);
+  const failedTests = Array.isArray(rawTests?.failedTests)
+    ? rawTests.failedTests
+      .map((item) => text(item, 300))
+      .filter(Boolean)
+      .slice(0, 20)
+    : [];
+  return {
+    kind: text(candidate.kind, 64) || "unknown",
+    phase: text(candidate.phase, 64) || "unknown",
+    exitCode: boundedInteger(candidate.exitCode),
+    logTail: text(candidate.logTail, 12_000),
+    tests: rawTests
+      ? {
+        total: boundedInteger(rawTests.total),
+        passed: boundedInteger(rawTests.passed),
+        failed: boundedInteger(rawTests.failed),
+        failedTests,
+      }
+      : null,
+  };
+}
+
+function attempt(value: unknown): DeploymentAttempt | null {
+  const candidate = record(value);
+  if (!candidate) return null;
+  const attemptId = text(candidate.attemptId, 96);
+  const status = text(candidate.status, 32);
+  if (!attemptId || !STATUSES.has(status)) return null;
+  return {
+    attemptId,
+    status,
+    phase: text(candidate.phase, 64) || null,
+    message: text(candidate.message) || "Deployment attempt",
+    currentSha: sha(candidate.currentSha),
+    remoteSha: sha(candidate.remoteSha),
+    failure: failure(candidate.failure),
+    startedAt: timestamp(candidate.startedAt),
+    finishedAt: timestamp(candidate.finishedAt),
+  };
+}
+
+async function readJson(path: string): Promise<unknown> {
   try {
-    const value: unknown = JSON.parse(await readFile(path, "utf8"));
-    return value !== null && typeof value === "object" && !Array.isArray(value)
-      ? (value as Record<string, unknown>)
-      : null;
+    return JSON.parse(await readFile(path, "utf8")) as unknown;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     return null;
@@ -75,18 +160,25 @@ export class DeploymentController implements DeploymentControl {
       return {
         available: false,
         status: "disabled",
+        phase: null,
         message: "Автоматическое обновление не настроено",
         currentSha: null,
         remoteSha: null,
+        attemptId: null,
+        failure: null,
+        history: [],
         requestedAt: null,
         startedAt: null,
         finishedAt: null,
       };
     }
-    const [state, request] = await Promise.all([
+    const [rawState, rawRequest, rawHistory] = await Promise.all([
       readJson(this.statePath),
       readJson(this.requestPath),
+      readJson(join(dirname(this.statePath), "history.json")),
     ]);
+    const state = record(rawState);
+    const request = record(rawRequest);
     const rawStatus = text(state?.status, 32);
     const requestedAt = timestamp(request?.requestedAt);
     const startedAt = timestamp(state?.startedAt);
@@ -107,11 +199,17 @@ export class DeploymentController implements DeploymentControl {
     return {
       available: true,
       status: pendingRequest ? "requested" : STATUSES.has(rawStatus) ? rawStatus : "idle",
+      phase: pendingRequest ? "request" : text(state?.phase, 64) || null,
       message: pendingRequest
         ? "Запрос принят; ждём запуска обновления"
         : text(state?.message) || "Проверка обновлений ещё не запускалась",
       currentSha: sha(state?.currentSha),
       remoteSha: sha(state?.remoteSha),
+      attemptId: text(state?.attemptId, 96) || null,
+      failure: pendingRequest ? null : failure(state?.failure),
+      history: Array.isArray(rawHistory)
+        ? rawHistory.map(attempt).filter((item): item is DeploymentAttempt => item !== null).slice(0, 20)
+        : [],
       requestedAt,
       startedAt,
       finishedAt,

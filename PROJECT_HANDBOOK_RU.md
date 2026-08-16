@@ -1,6 +1,6 @@
-# SUMMING 9.7: архитектура, эксплуатация и разработка
+# SUMMING 9.8: архитектура, эксплуатация и разработка
 
-> Версия: **9.7.1**
+> Версия: **9.8.0**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
 > Последняя сверка с кодом: **16 августа 2026 года**.
 
@@ -1294,12 +1294,27 @@ Telegram Mini App signature и точный `TELEGRAM_OWNER_ID`; project owner �
 2. отклонить неожиданный remote URL и non-fast-forward переход;
 3. экспортировать точный commit через `git archive` во временный release;
 4. от имени отдельного `summing-builder`, не имеющего доступа к application
-   secrets и data dir, выполнить `npm ci`, lint, тесты и production prune;
+   secrets и data dir, последовательно выполнить `npm ci`, lint, тесты и
+   production prune, публикуя текущую фазу;
 5. дождаться `active = 0`, атомарно заменить symlink и перезапустить runner и
    основной сервис;
 6. проверить оба loopback health endpoints; при ошибке вернуть прежний symlink
    и повторно запустить старый release;
 7. сохранить JSON-состояние для Mini App и оставить последние пять releases.
+
+Каждая значимая завершённая попытка (`succeeded`, `failed` или migration
+`waiting`) попадает в ограниченную историю из 20 записей. Для ошибки worker
+сохраняет фазу, категорию и exit code. TAP-вывод тестов сворачивается в общее
+число passed/failed, не более 20 названий упавших тестов и очищенный хвост лога
+не более 12 000 символов. Полные application secrets в builder не передаются;
+Mini App валидирует и дополнительно ограничивает все поля перед показом. Обычные
+проверки актуального SHA историю не засоряют. Несовпавший approved origin теперь
+завершается явным `failed/source-verification`, а не остаётся в `checking`.
+
+`state.json` и `history.json` принадлежат `root:summing` с режимом `0640`.
+Каталог deployment имеет sticky mode `1770`: приложение может атомарно обновлять
+свой `request.json`, но не может подменить root-owned state/history или временный
+файл worker. Все root-записи создаются через `mktemp` и атомарный `rename`.
 
 Legacy Connections → project environment cutover использует контролируемую
 двухтактную схему. Если импорт уже существует, но установленный legacy project
@@ -1329,6 +1344,7 @@ systemctl status summing-deploy.path summing-deploy.timer summing-deploy.service
 journalctl -u summing-deploy --since today
 sudo systemctl start summing-deploy.service
 cat /var/lib/summing/deploy/state.json
+cat /var/lib/summing/deploy/history.json
 ```
 
 ### 13.8. Одноразовая миграция существующего 8.x host
@@ -1415,7 +1431,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "9.7.1",
+  "version": "9.8.0",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",

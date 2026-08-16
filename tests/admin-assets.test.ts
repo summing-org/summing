@@ -13,11 +13,18 @@ test("administrator Mini App exposes projects, bindings and global settings", ()
   assert.match(ADMIN_HTML, /уведомит владельца проекта прямо в выбранном топике/);
   assert.match(ADMIN_HTML, /Настройки SUMMING/);
   assert.match(ADMIN_HTML, /Обновиться сейчас/);
+  assert.match(ADMIN_HTML, /id="deploymentPhase"/);
+  assert.match(ADMIN_HTML, /id="deploymentFailedTests"/);
+  assert.match(ADMIN_HTML, /id="deploymentHistory"/);
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/projects/);
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/bindings/);
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/users/);
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/deployment/);
   assert.match(ADMIN_JS, /deploymentActive/);
+  assert.match(ADMIN_JS, /renderDeploymentFailure/);
+  assert.match(ADMIN_JS, /renderDeploymentHistory/);
+  assert.match(ADMIN_JS, /failure\.logTail/);
+  assert.match(ADMIN_JS, /deployment-attempt-details/);
   assert.match(ADMIN_JS, /Telegram ID:/);
   assert.match(ADMIN_JS, /Наблюдаемые пользователи топика/);
   assert.match(ADMIN_JS, /Перепривязать топик/);

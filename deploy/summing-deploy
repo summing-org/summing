@@ -13,12 +13,15 @@ releases_dir=${SUMMING_DEPLOY_RELEASES:-/opt/summing-releases}
 current_link=${SUMMING_DEPLOY_CURRENT:-/opt/summing-current}
 state_dir=${SUMMING_DEPLOY_STATE_DIR:-/var/lib/summing/deploy}
 state_file=${SUMMING_DEPLOY_STATE_FILE:-${state_dir}/state.json}
+history_file=${SUMMING_DEPLOY_HISTORY_FILE:-${state_dir}/history.json}
 remote=${SUMMING_DEPLOY_REMOTE:-origin}
 branch=${SUMMING_DEPLOY_BRANCH:-master}
 expected_remote=${SUMMING_DEPLOY_EXPECTED_REMOTE:-git@summing.github.com:summing-org/summing.git}
 keep_releases=${SUMMING_DEPLOY_KEEP_RELEASES:-5}
 drain_timeout=${SUMMING_DEPLOY_DRAIN_TIMEOUT_SEC:-1800}
 lock_file=${SUMMING_DEPLOY_LOCK_FILE:-/run/lock/summing-deploy.lock}
+history_limit=20
+deploy_report="$(dirname "${BASH_SOURCE[0]}")/summing-deploy-report"
 
 case "${remote}" in
   ''|*[!A-Za-z0-9._-]*)
@@ -66,7 +69,7 @@ if id -nG summing-builder | tr ' ' '\n' | grep -qx summing; then
 fi
 
 install -d -o root -g root -m 0711 "${releases_dir}"
-install -d -o summing -g summing -m 0700 "${state_dir}"
+install -d -o root -g summing -m 1770 "${state_dir}"
 install -d -o root -g root -m 0755 "$(dirname "${lock_file}")"
 exec 9>"${lock_file}"
 if ! flock -n 9; then
@@ -79,10 +82,16 @@ now() {
 }
 
 started_at=$(now)
+attempt_id="$(date -u +%Y%m%dT%H%M%S%3NZ)-$$"
 target_sha=
 previous_sha=
 previous_target=
 switched=0
+installed=0
+staging_dir=
+phase=initializing
+failure_kind=internal
+failure_json=null
 prior_status=
 prior_remote_sha=
 prior_finished_at=
@@ -110,25 +119,76 @@ write_state() {
   local remote_sha=${4:-}
   local finished_at=${5:-}
   local temporary
-  temporary="${state_file}.$$.tmp"
+  temporary=$(mktemp "${state_dir}/.state.XXXXXX")
   jq -n \
+    --arg attemptId "${attempt_id}" \
     --arg status "${status}" \
+    --arg phase "${phase}" \
     --arg message "${message}" \
     --arg currentSha "${current_sha}" \
     --arg remoteSha "${remote_sha}" \
     --arg startedAt "${started_at}" \
     --arg finishedAt "${finished_at}" \
+    --argjson failure "${failure_json}" \
     '{
+      attemptId: $attemptId,
       status: $status,
+      phase: $phase,
       message: $message,
       currentSha: (if $currentSha == "" then null else $currentSha end),
       remoteSha: (if $remoteSha == "" then null else $remoteSha end),
+      failure: $failure,
       startedAt: $startedAt,
       finishedAt: (if $finishedAt == "" then null else $finishedAt end)
     }' > "${temporary}"
   chown root:summing "${temporary}"
   chmod 0640 "${temporary}"
   mv -f "${temporary}" "${state_file}"
+}
+
+record_attempt() {
+  local previous temporary
+  previous=$(mktemp "${state_dir}/.history-previous.XXXXXX")
+  temporary=$(mktemp "${state_dir}/.history.XXXXXX")
+  printf '[]\n' > "${previous}"
+  if [ -f "${history_file}" ] && [ ! -L "${history_file}" ] && \
+    [ "$(stat -c %u "${history_file}" 2>/dev/null || printf 1)" = 0 ] && \
+    jq -e 'type == "array"' "${history_file}" >/dev/null 2>&1; then
+    cp -- "${history_file}" "${previous}"
+  fi
+  if ! jq -n \
+    --slurpfile current "${state_file}" \
+    --slurpfile previous "${previous}" \
+    --argjson limit "${history_limit}" \
+    '([$current[0]] + [
+      $previous[0][] | select(.attemptId != $current[0].attemptId)
+    ])[:$limit]' > "${temporary}"; then
+    rm -f -- "${previous}" "${temporary}"
+    return 1
+  fi
+  chown root:summing "${temporary}"
+  chmod 0640 "${temporary}"
+  mv -f "${temporary}" "${history_file}"
+  rm -f -- "${previous}"
+}
+
+set_simple_failure() {
+  local kind=$1
+  local code=$2
+  local detail=${3:-}
+  failure_json=$(jq -n \
+    --arg kind "${kind}" \
+    --arg phase "${phase}" \
+    --argjson exitCode "${code}" \
+    --arg logTail "${detail}" \
+    '{kind: $kind, phase: $phase, exitCode: $exitCode, logTail: $logTail, tests: null}')
+}
+
+set_builder_failure() {
+  local kind=$1
+  local code=$2
+  local log_file=$3
+  failure_json=$("${deploy_report}" "${kind}" "${phase}" "${code}" "${log_file}")
 }
 
 deployed_sha() {
@@ -202,30 +262,88 @@ wait_for_idle_runtime() {
   done
 }
 
-on_error() {
-  local line=$1
-  local code=$2
-  local message="Обновление завершилось ошибкой на строке ${line} (exit ${code})"
+fail_deployment() {
+  local code=$1
+  local message=$2
+  local failure_current_sha=${previous_sha}
   trap - ERR
   set +e
+  if [ -n "${staging_dir}" ] && [ -d "${staging_dir}" ]; then
+    rm -rf -- "${staging_dir}"
+    staging_dir=
+  fi
   if [ "${switched}" = 1 ] && [ -n "${previous_target}" ]; then
     write_state rolling_back "${message}; возвращаем предыдущий release" "${target_sha}" "${target_sha}"
     switch_current "${previous_target}"
     restart_services
     wait_for_health
     switched=0
+    installed=0
   fi
-  write_state failed "${message}" "${previous_sha}" "${target_sha}" "$(now)"
+  if [ "${installed}" = 1 ]; then failure_current_sha=${target_sha}; fi
+  write_state failed "${message}" "${failure_current_sha}" "${target_sha}" "$(now)"
+  record_attempt || printf '%s\n' 'Could not persist deployment attempt history.' >&2
   printf '%s\n' "${message}" >&2
   exit "${code}"
+}
+
+on_error() {
+  local line=$1
+  local code=$2
+  local message="Ошибка на этапе ${phase}, строка ${line} (exit ${code})"
+  if [ "${failure_json}" = null ]; then
+    set_simple_failure "${failure_kind}" "${code}" "${message}"
+  fi
+  fail_deployment "${code}" "${message}"
+}
+
+run_builder_phase() {
+  local kind=$1
+  local next_phase=$2
+  local message=$3
+  shift 3
+  local log_file command_status failed_count total_count failure_message
+  local -a pipeline_status
+  phase=${next_phase}
+  failure_kind=${kind}
+  write_state building "${message}" "${previous_sha}" "${target_sha}"
+  log_file=$(mktemp "${state_dir}/.builder-log.XXXXXX")
+  if runuser -u summing-builder -- env -i \
+    HOME=/var/lib/summing-builder \
+    USER=summing-builder \
+    LOGNAME=summing-builder \
+    PATH=/usr/local/bin:/usr/bin:/bin \
+    CI=1 \
+    bash -c 'cd "$1" && shift && exec "$@"' _ "${staging_dir}" "$@" \
+    2>&1 | tee "${log_file}"; then
+    command_status=0
+  else
+    pipeline_status=("${PIPESTATUS[@]}")
+    command_status=${pipeline_status[0]}
+    if [ "${command_status}" = 0 ]; then command_status=${pipeline_status[1]}; fi
+  fi
+  if [ "${command_status}" = 0 ]; then
+    rm -f -- "${log_file}"
+    return 0
+  fi
+  set_builder_failure "${kind}" "${command_status}" "${log_file}"
+  rm -f -- "${log_file}"
+  failed_count=$(printf '%s' "${failure_json}" | jq -r '.tests.failed // empty')
+  total_count=$(printf '%s' "${failure_json}" | jq -r '.tests.total // empty')
+  if [ "${kind}" = tests ] && [ -n "${failed_count}" ]; then
+    failure_message="Тесты не пройдены: ${failed_count}${total_count:+ из ${total_count}}"
+  else
+    failure_message="Этап ${next_phase} завершился ошибкой (exit ${command_status})"
+  fi
+  fail_deployment "${command_status}" "${failure_message}"
 }
 trap 'error_code=$?; on_error ${LINENO} "${error_code}"' ERR
 
 previous_target=$(readlink -f "${current_link}" 2>/dev/null || true)
 previous_sha=$(deployed_sha || true)
 if [ -z "${previous_target}" ] || [ ! -d "${previous_target}" ]; then
-  printf '%s\n' 'Current release symlink is missing; run deploy/activate.sh first.' >&2
-  exit 2
+  set_simple_failure runtime 2 'Current release symlink is missing; run deploy/activate.sh first.'
+  fail_deployment 2 'Текущий release symlink отсутствует; запустите deploy/activate.sh'
 fi
 if [ -f "${state_file}" ]; then
   prior_status=$(jq -r '.status // empty' "${state_file}" 2>/dev/null || true)
@@ -240,37 +358,48 @@ if [ -n "${manual_requested_at}" ] && \
   { [ -z "${prior_finished_at}" ] || [[ "${manual_requested_at}" > "${prior_finished_at}" ]]; }; then
   manual_retry=1
 fi
-write_state checking "Проверяем ${remote}/${branch}" "${previous_sha}" ""
+phase=source-verification
+failure_kind=source
+write_state checking "Проверяем источник ${remote}/${branch}" "${previous_sha}" ""
 
 actual_remote=$(git_as_summing -C "${repo_dir}" remote get-url "${remote}")
 if [ -n "${expected_remote}" ] && [ "${actual_remote}" != "${expected_remote}" ]; then
-  printf 'Refusing unexpected %s URL: %s\n' "${remote}" "${actual_remote}" >&2
-  exit 1
+  set_simple_failure source 1 \
+    "Ожидался ${expected_remote}; настроен ${actual_remote}"
+  fail_deployment 1 "Источник ${remote} не одобрен политикой deployment"
 fi
+phase=fetch
+failure_kind=fetch
+write_state checking "Получаем ${remote}/${branch}" "${previous_sha}" ""
 git_as_summing -C "${repo_dir}" fetch --prune "${remote}" \
   "+refs/heads/${branch}:refs/remotes/${remote}/${branch}"
 
+phase=resolve
 target_sha=$(git_as_summing -C "${repo_dir}" rev-parse \
   "refs/remotes/${remote}/${branch}^{commit}")
 if ! valid_sha "${target_sha}"; then
-  printf '%s\n' 'Remote branch did not resolve to a full commit SHA.' >&2
-  exit 1
+  set_simple_failure source 1 'Remote branch did not resolve to a full commit SHA.'
+  fail_deployment 1 'Remote branch не разрешился в полный commit SHA'
 fi
 if [ "${previous_sha}" = "${target_sha}" ]; then
+  phase=cutover
+  failure_kind=cutover
   cutover_status=0
   finalize_project_environment_cutover "${previous_target}" || cutover_status=$?
   if [ "${cutover_status}" = 75 ]; then
     write_state waiting \
       "Версия установлена; ждём Validate/Dry run для migration cutover" \
       "${previous_sha}" "${target_sha}" "$(now)"
+    record_attempt || printf '%s\n' 'Could not persist deployment attempt history.' >&2
     exit 0
   fi
   if [ "${cutover_status}" != 0 ]; then
-    write_state failed \
-      "Версия установлена, но завершение migration cutover не удалось" \
-      "${previous_sha}" "${target_sha}" "$(now)"
-    exit 1
+    set_simple_failure cutover "${cutover_status}" \
+      'Installed release migration cutover failed.'
+    fail_deployment "${cutover_status}" \
+      'Версия установлена, но завершение migration cutover не удалось'
   fi
+  phase=complete
   write_state idle "Установлена актуальная версия" "${previous_sha}" "${target_sha}" \
     "$(now)"
   exit 0
@@ -278,6 +407,7 @@ fi
 if [ "${prior_status}" = failed ] && \
   [ "${prior_remote_sha}" = "${target_sha}" ] && \
   [ "${manual_retry}" = 0 ]; then
+  phase=blocked
   write_state failed \
     "Предыдущая попытка не удалась; ждём новый commit или ручной повтор" \
     "${previous_sha}" \
@@ -289,28 +419,33 @@ if valid_sha "${previous_sha}" && \
   git_as_summing -C "${repo_dir}" cat-file -e "${previous_sha}^{commit}" 2>/dev/null && \
   ! git_as_summing -C "${repo_dir}" merge-base --is-ancestor \
     "${previous_sha}" "${target_sha}"; then
-  printf 'Refusing non-fast-forward deploy from %s to %s.\n' \
-    "${previous_sha}" "${target_sha}" >&2
-  exit 1
+  phase=source-verification
+  set_simple_failure source 1 \
+    "Non-fast-forward: ${previous_sha} -> ${target_sha}"
+  fail_deployment 1 'Deployment отклонён: origin/master не является fast-forward'
 fi
 
 release_dir=${releases_dir}/${target_sha}
 if [ ! -f "${release_dir}/.summing-release.json" ]; then
   staging_dir=${releases_dir}/.${target_sha}.tmp.$$
   install -d -o summing-builder -g summing-builder -m 0700 "${staging_dir}"
-  trap 'error_code=$?; rm -rf -- "${staging_dir}"; on_error ${LINENO} "${error_code}"' ERR
+  phase=archive
+  failure_kind=archive
+  write_state building "Экспортируем ${target_sha:0:12}" "${previous_sha}" "${target_sha}"
   git_as_summing -C "${repo_dir}" archive "${target_sha}" | \
     runuser -u summing-builder -- tar -x -C "${staging_dir}"
-  write_state building "Собираем и тестируем ${target_sha:0:12}" "${previous_sha}" "${target_sha}"
-  runuser -u summing-builder -- env -i \
-    HOME=/var/lib/summing-builder \
-    USER=summing-builder \
-    LOGNAME=summing-builder \
-    PATH=/usr/local/bin:/usr/bin:/bin \
-    CI=1 \
-    bash -c \
-    'cd "$1" && npm ci --no-audit --no-fund && npm run lint && npm test && npm prune --omit=dev --no-audit --no-fund' \
-    _ "${staging_dir}"
+  run_builder_phase dependencies dependencies \
+    "Устанавливаем зависимости ${target_sha:0:12}" \
+    npm ci --no-audit --no-fund
+  run_builder_phase lint lint \
+    "Проверяем типы и lint ${target_sha:0:12}" \
+    npm run lint
+  run_builder_phase tests test \
+    "Запускаем тесты ${target_sha:0:12}" \
+    npm test
+  run_builder_phase prune prune \
+    "Оставляем production dependencies ${target_sha:0:12}" \
+    npm prune --omit=dev --no-audit --no-fund
   jq -n \
     --arg sha "${target_sha}" \
     --arg createdAt "$(now)" \
@@ -319,34 +454,47 @@ if [ ! -f "${release_dir}/.summing-release.json" ]; then
   chmod -R u=rwX,g=rX,o= "${staging_dir}"
   chmod 0644 "${staging_dir}/.summing-release.json"
   mv "${staging_dir}" "${release_dir}"
-  trap 'error_code=$?; on_error ${LINENO} "${error_code}"' ERR
+  staging_dir=
 fi
 
+phase=drain
+failure_kind=runtime
 wait_for_idle_runtime
+phase=restart
+failure_kind=restart
 write_state deploying "Перезапускаем сервисы на ${target_sha:0:12}" "${previous_sha}" "${target_sha}"
 switch_current "${release_dir}"
 switched=1
 restart_services
+phase=health
+failure_kind=health
+write_state deploying "Проверяем health ${target_sha:0:12}" "${previous_sha}" "${target_sha}"
 wait_for_health
 switched=0
+installed=1
 
+phase=cutover
+failure_kind=cutover
 cutover_status=0
 finalize_project_environment_cutover "${release_dir}" || cutover_status=$?
 if [ "${cutover_status}" = 75 ]; then
   write_state waiting \
     "Версия установлена; ждём Validate/Dry run для migration cutover" \
     "${target_sha}" "${target_sha}" "$(now)"
+  record_attempt || printf '%s\n' 'Could not persist deployment attempt history.' >&2
   exit 0
 fi
 if [ "${cutover_status}" != 0 ]; then
-  write_state failed \
-    "Версия установлена, но завершение migration cutover не удалось" \
-    "${target_sha}" "${target_sha}" "$(now)"
-  exit 1
+  set_simple_failure cutover "${cutover_status}" \
+    'Installed release migration cutover failed.'
+  fail_deployment "${cutover_status}" \
+    'Версия установлена, но завершение migration cutover не удалось'
 fi
 
+phase=complete
 write_state succeeded "Обновление установлено" "${target_sha}" "${target_sha}" \
   "$(now)"
+record_attempt || printf '%s\n' 'Could not persist deployment attempt history.' >&2
 
 current_target=$(readlink -f "${current_link}")
 if ! find "${releases_dir}" -mindepth 1 -maxdepth 1 -type d \

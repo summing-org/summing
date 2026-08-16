@@ -62,9 +62,13 @@ class FakeDeployment implements DeploymentControl {
     return {
       available: true,
       status: "idle",
+      phase: "complete",
       message: "Already up to date",
       currentSha: "a".repeat(40),
       remoteSha: "a".repeat(40),
+      attemptId: "attempt-1",
+      failure: null,
+      history: [],
       requestedAt: null,
       startedAt: "2026-08-13T00:00:00Z",
       finishedAt: "2026-08-13T00:00:01Z",

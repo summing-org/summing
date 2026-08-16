@@ -70,7 +70,7 @@ fi
 install -d -o summing -g summing -m 0700 "${data_dir}"
 install -d -o summing -g summing -m 0700 "${data_dir}/codex"
 install -d -o summing -g summing -m 0700 "${data_dir}/worktrees"
-install -d -o summing -g summing -m 0700 "${deploy_state_dir}"
+install -d -o root -g summing -m 1770 "${deploy_state_dir}"
 install -d -o summing-builder -g summing-builder -m 0700 /var/lib/summing-builder
 install -d -o root -g summing -m 0750 /etc/summing
 install -d -o root -g root -m 0755 /etc/codex

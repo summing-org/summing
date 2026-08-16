@@ -142,9 +142,13 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
     assert.deepEqual(await disabledDeployment.json(), {
       available: false,
       status: "disabled",
+      phase: null,
       message: "Автоматическое обновление не настроено",
       currentSha: null,
       remoteSha: null,
+      attemptId: null,
+      failure: null,
+      history: [],
       requestedAt: null,
       startedAt: null,
       finishedAt: null,

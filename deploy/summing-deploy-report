@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "$#" -ne 4 ]; then
+  printf '%s\n' 'usage: summing-deploy-report <kind> <phase> <exit-code> <log-file>' >&2
+  exit 2
+fi
+
+kind=$1
+phase=$2
+exit_code=$3
+log_file=$4
+
+case "${kind}" in
+  ''|*[!a-z-]*) printf '%s\n' 'invalid deployment failure kind' >&2; exit 2 ;;
+esac
+case "${phase}" in
+  ''|*[!a-z-]*) printf '%s\n' 'invalid deployment phase' >&2; exit 2 ;;
+esac
+case "${exit_code}" in
+  ''|*[!0-9]*) printf '%s\n' 'invalid deployment exit code' >&2; exit 2 ;;
+esac
+if [ ! -f "${log_file}" ] || [ -L "${log_file}" ]; then
+  printf '%s\n' 'deployment log must be a regular non-symlink file' >&2
+  exit 2
+fi
+
+log_tail=$(LC_ALL=C sed $'s/\033\\[[0-9;]*[[:alpha:]]//g' "${log_file}" | \
+  tail -n 60 | cut -c 1-400)
+failed_tests=$(sed -n \
+  's/^[[:space:]]*not ok [0-9][0-9]* - //p' "${log_file}" | \
+  jq -Rsc 'split("\n") | map(select(length > 0)) | .[:20]')
+total=$(sed -n 's/^[[:space:]]*# tests \([0-9][0-9]*\)$/\1/p' "${log_file}" | tail -n 1)
+passed=$(sed -n 's/^[[:space:]]*# pass \([0-9][0-9]*\)$/\1/p' "${log_file}" | tail -n 1)
+failed=$(sed -n 's/^[[:space:]]*# fail \([0-9][0-9]*\)$/\1/p' "${log_file}" | tail -n 1)
+
+jq -n \
+  --arg kind "${kind}" \
+  --arg phase "${phase}" \
+  --argjson exitCode "${exit_code}" \
+  --arg logTail "${log_tail}" \
+  --arg total "${total}" \
+  --arg passed "${passed}" \
+  --arg failed "${failed}" \
+  --argjson failedTests "${failed_tests}" \
+  '{
+    kind: $kind,
+    phase: $phase,
+    exitCode: $exitCode,
+    logTail: ($logTail | .[-12000:]),
+    tests: (if $kind == "tests" then {
+      total: (if $total == "" then null else ($total | tonumber) end),
+      passed: (if $passed == "" then null else ($passed | tonumber) end),
+      failed: (if $failed == "" then null else ($failed | tonumber) end),
+      failedTests: $failedTests
+    } else null end)
+  }'

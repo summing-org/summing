@@ -9,6 +9,7 @@ const asset = (path: string): string => readFileSync(join(root, path), "utf8");
 
 test("deployment assets use an atomic release and one timer/path worker", () => {
   const script = asset("deploy/summing-deploy");
+  const report = asset("deploy/summing-deploy-report");
   const cutoverPath = join(root, "deploy/project-environment-cutover");
   const cutover = asset("deploy/project-environment-cutover");
   const timer = asset("deploy/summing-deploy.timer");
@@ -27,6 +28,17 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
   assert.match(script, /git_as_summing -C "\$\{repo_dir\}" fetch --prune/);
   assert.match(script, /SUMMING_DEPLOY_EXPECTED_REMOTE/);
   assert.match(script, /runuser -u summing-builder -- env -i/);
+  assert.match(script, /run_builder_phase dependencies dependencies/);
+  assert.match(script, /run_builder_phase lint lint/);
+  assert.match(script, /run_builder_phase tests test/);
+  assert.match(script, /run_builder_phase prune prune/);
+  assert.match(script, /summing-deploy-report/);
+  assert.match(report, /failedTests: \$failedTests/);
+  assert.match(script, /record_attempt/);
+  assert.match(script, /history_limit=20/);
+  assert.match(script, /install -d -o root -g summing -m 1770 "\$\{state_dir\}"/);
+  assert.match(script, /Источник \$\{remote\} не одобрен политикой deployment/);
+  assert.doesNotMatch(script, /temporary="\$\{state_file\}\.\$\$\.tmp"/);
   assert.match(script, /summing-builder must not belong to the secret-bearing summing group/);
   assert.match(script, /Предыдущая попытка не удалась; ждём новый commit или ручной повтор/);
   assert.match(script, /merge-base --is-ancestor/);
@@ -43,6 +55,7 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
   assert.match(timer, /OnUnitActiveSec=10min/);
   assert.match(path, /PathChanged=\/var\/lib\/summing\/deploy\/request\.json/);
   assert.match(activation, /systemctl start summing-deploy\.path summing-deploy\.timer/);
+  assert.match(activation, /install -d -o root -g summing -m 1770 "\$\{deploy_state_dir\}"/);
   assert.match(activation, /runner_uid=\$\(id -u summing-runner\)/);
   assert.match(activation, /sed "s\/RUNNER_UID\/\$\{runner_uid\}\/g"/);
   assert.match(activation, /\n  openssh-client\n/);
