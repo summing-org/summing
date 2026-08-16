@@ -1,6 +1,6 @@
 {
   "name": "summing",
-  "version": "9.8.0",
+  "version": "9.8.1",
   "description": "Persistent Telegram agent backed by the official Codex App Server",
   "type": "module",
   "private": true,

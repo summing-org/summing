@@ -362,12 +362,12 @@ export class ProjectViewerServer {
         repository: await scope.inspector.summary(),
         runnerAvailable: await this.runner.available(),
         administrator: this.isAdministrator(telegramUser),
+        environmentAccess: true,
       });
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/viewer/environment") {
       const scope = await this.scope(conversationId, telegramUser);
-      this.requireEnvironmentAdministrator(telegramUser);
       json(response, 200, {
         environment: await this.runner.environment(scope.project.id, scope.project.workspace),
       });
@@ -405,7 +405,6 @@ export class ProjectViewerServer {
     }
     if (request.method === "PUT" && url.pathname === "/api/viewer/environment") {
       const scope = await this.scope(conversationId, telegramUser);
-      this.requireEnvironmentAdministrator(telegramUser);
       const body = await requestBody(request, 1_100_000) as Record<string, unknown> | null;
       const text = body?.text;
       const expectedRevision = body?.expectedRevision;
@@ -605,12 +604,6 @@ export class ProjectViewerServer {
       projects,
       chats,
     };
-  }
-
-  private requireEnvironmentAdministrator(telegramUser: number): void {
-    if (!this.isAdministrator(telegramUser)) {
-      throw new ViewerHttpError(403, "project environments are available only to the administrator");
-    }
   }
 
   private requireAdministrator(telegramUser: number): void {

@@ -32,5 +32,6 @@ test("Project Viewer bounds Telegram authorization and network waits", () => {
   assert.match(VIEWER_JS, /renderEditorialPlan/);
   assert.match(VIEWER_JS, /\/api\/viewer\/environment/);
   assert.match(VIEWER_JS, /expectedRevision/);
-  assert.match(VIEWER_JS, /state\.session\.administrator/);
+  assert.match(VIEWER_JS, /state\.session\.environmentAccess/);
+  assert.match(VIEWER_JS, /activeTab\.offsetLeft/);
 });

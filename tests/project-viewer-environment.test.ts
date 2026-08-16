@@ -148,15 +148,17 @@ test("viewer edits one plaintext environment per workspace and jobs no longer re
   }
 });
 
-test("viewer keeps plaintext environments administrator-only and preserves conflicts", async () => {
+test("viewer lets a managed project owner edit only that project's environment", async () => {
   const root = mkdtempSync(join(tmpdir(), "summing-viewer-environment-access-"));
   const workspace = join(root, "workspace");
+  const otherWorkspace = join(root, "other-workspace");
   repository(workspace);
+  repository(otherWorkspace);
   const port = await freePort();
   const configPath = join(root, "config.toml");
   writeFileSync(
     configPath,
-    `[viewer]\nport = ${port}\n\n[projects.demo]\nname = "Demo"\ndefault_workspace = "repo"\n\n[projects.demo.workspaces.repo]\npath = "${workspace}"\n`,
+    `[viewer]\nport = ${port}\n\n[projects.system]\nname = "System"\ndefault_workspace = "repo"\n\n[projects.system.workspaces.repo]\npath = "${workspace}"\n`,
   );
   const config = loadConfig({
     SUMMING_DATA_DIR: join(root, "data"),
@@ -165,11 +167,27 @@ test("viewer keeps plaintext environments administrator-only and preserves confl
     TELEGRAM_OWNER_ID: "42",
   });
   const state = new StateStore(join(config.dataDir, "state.sqlite3"));
+  state.createManagedProject({
+    id: "demo",
+    name: "Demo",
+    ownerId: 99,
+    defaultWorkspaceId: "repo",
+    workspaces: [{ id: "repo", path: workspace }],
+    createdAt: Date.now() / 1_000,
+  });
+  state.createManagedProject({
+    id: "other",
+    name: "Other",
+    ownerId: 100,
+    defaultWorkspaceId: "repo",
+    workspaces: [{ id: "repo", path: otherWorkspace }],
+    createdAt: Date.now() / 1_000,
+  });
   const projects = new ProjectCatalog(config, state);
-  const conversation = state.bind(42, 1, "demo", "repo");
+  const conversation = state.bind(99, 1, "demo", "repo");
   const viewer = new ProjectViewerServer(config, state, projects);
-  Object.assign(projects, { canAccess: () => true });
   Object.assign(viewer.runner, {
+    available: async () => true,
     environment: async () => ({ text: "TOKEN=hidden\n", revision: 1, updatedAt: null }),
     saveEnvironment: async () => {
       throw new ProjectRunnerClientError("environment changed; reload before saving", 409);
@@ -178,19 +196,45 @@ test("viewer keeps plaintext environments administrator-only and preserves confl
   const endpoint = `http://127.0.0.1:${port}`;
   try {
     await viewer.start();
-    const forbidden = await fetch(
-      `${endpoint}/api/viewer/environment?conversation=${conversation.id}`,
-      { headers: { "x-telegram-init-data": signedInitData("bot-token", 99) } },
+    const ownerHeaders = { "x-telegram-init-data": signedInitData("bot-token", 99) };
+    const session = await fetch(
+      `${endpoint}/api/viewer/session?conversation=${conversation.id}`,
+      { headers: ownerHeaders },
     );
-    assert.equal(forbidden.status, 403);
-    assert.doesNotMatch(await forbidden.text(), /TOKEN=hidden/);
+    assert.equal(session.status, 200);
+    const sessionPayload = await session.json() as {
+      administrator: boolean;
+      environmentAccess: boolean;
+    };
+    assert.equal(sessionPayload.administrator, false);
+    assert.equal(sessionPayload.environmentAccess, true);
+
+    const allowed = await fetch(
+      `${endpoint}/api/viewer/environment?conversation=${conversation.id}`,
+      { headers: ownerHeaders },
+    );
+    assert.equal(allowed.status, 200);
+
+    const otherOwnerForbidden = await fetch(
+      `${endpoint}/api/viewer/environment?conversation=${conversation.id}`,
+      { headers: { "x-telegram-init-data": signedInitData("bot-token", 100) } },
+    );
+    assert.equal(otherOwnerForbidden.status, 403);
+    assert.doesNotMatch(await otherOwnerForbidden.text(), /TOKEN=hidden/);
+
+    const participantForbidden = await fetch(
+      `${endpoint}/api/viewer/environment?conversation=${conversation.id}`,
+      { headers: { "x-telegram-init-data": signedInitData("bot-token", 101) } },
+    );
+    assert.equal(participantForbidden.status, 403);
+    assert.doesNotMatch(await participantForbidden.text(), /TOKEN=hidden/);
 
     const conflict = await fetch(
       `${endpoint}/api/viewer/environment?conversation=${conversation.id}`,
       {
         method: "PUT",
         headers: {
-          "x-telegram-init-data": signedInitData("bot-token", 42),
+          ...ownerHeaders,
           "content-type": "application/json",
         },
         body: JSON.stringify({ text: "TOKEN=new\n", expectedRevision: 1 }),
