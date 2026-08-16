@@ -49,6 +49,35 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
   assert.match(script, /mv -Tf "\$\{next_link\}" "\$\{current_link\}"/);
   assert.match(script, /rolling_back/);
   assert.match(script, /wait_for_idle_runtime/);
+  assert.match(script, /sync_project_runner_configs\(\)/);
+  assert.match(script, /assets=\("\$\{release\}"\/deploy\/\*\.runner\.json\)/);
+  assert.match(script, /Managed runner config must not be a symlink/);
+  assert.match(script, /\. \+ \{envPath: \$envPath\}/);
+  assert.match(script, /runner_config_backup_dir=\$\(mktemp -d \/run\/summing-runner-configs/);
+  assert.match(script, /restore_project_runner_configs\(\)/);
+  assert.match(script, /if ! restore_project_runner_configs; then/);
+  assert.match(script, /mv -f -- "\$\{candidate\}" "\$\{target\}"/);
+  assert.match(script, /sync_project_runner_configs "\$\{previous_target\}"/);
+  assert.match(script, /sync_project_runner_configs "\$\{release_dir\}"/);
+  const unchangedRelease = script.indexOf('if [ "${previous_sha}" = "${target_sha}" ]; then');
+  const unchangedSync = script.indexOf(
+    'sync_project_runner_configs "${previous_target}"',
+    unchangedRelease,
+  );
+  const unchangedCutover = script.indexOf(
+    'finalize_project_environment_cutover "${previous_target}"',
+    unchangedRelease,
+  );
+  assert.ok(unchangedRelease >= 0 && unchangedSync > unchangedRelease);
+  assert.ok(unchangedCutover > unchangedSync, "same-SHA checks must repair configs before cutover");
+  const releaseSwitch = script.indexOf('switch_current "${release_dir}"');
+  const releaseSync = script.indexOf(
+    'sync_project_runner_configs "${release_dir}"',
+    releaseSwitch,
+  );
+  const releaseRestart = script.indexOf("restart_services", releaseSync);
+  assert.ok(releaseSwitch >= 0 && releaseSync > releaseSwitch);
+  assert.ok(releaseRestart > releaseSync, "new configs must be installed before runner restart");
   assert.match(script, /finalize_project_environment_cutover "\$\{previous_target\}"/);
   assert.match(script, /finalize_project_environment_cutover "\$\{release_dir\}"/);
   assert.match(script, /cutover_status.*75/);

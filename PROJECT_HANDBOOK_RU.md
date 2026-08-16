@@ -1473,7 +1473,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "9.8.5",
+  "version": "9.8.6",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",

@@ -93,6 +93,9 @@ previous_target=
 switched=0
 installed=0
 staging_dir=
+runner_config_temporary=
+runner_config_backup_dir=
+runner_configs_changed=0
 phase=initializing
 failure_kind=internal
 failure_json=null
@@ -259,6 +262,140 @@ switch_current() {
   mv -Tf "${next_link}" "${current_link}"
 }
 
+sync_project_runner_configs() {
+  local release=$1
+  local config_dir=/etc/summing-runner/projects
+  local asset project_id target legacy_env_path candidate
+  local -a assets=()
+
+  runner_configs_changed=0
+  if ! id summing-runner >/dev/null 2>&1 || [ ! -d "${config_dir}" ]; then
+    return 0
+  fi
+
+  shopt -s nullglob
+  assets=("${release}"/deploy/*.runner.json)
+  shopt -u nullglob
+  for asset in "${assets[@]}"; do
+    project_id=$(basename "${asset}" .runner.json)
+    case "${project_id}" in
+      ''|[!a-z0-9]*|*[!a-z0-9-]*)
+        printf 'Invalid managed runner project id: %s\n' "${project_id}" >&2
+        return 2
+        ;;
+    esac
+    if ! jq -e '
+      type == "object" and
+      (
+        (((.configPath? | type) == "string") and (has("configSourcePaths") | not)) or
+        (((.configSourcePaths? | type) == "array") and
+          (.configSourcePaths | length) > 0 and
+          all(.configSourcePaths[]; type == "string") and
+          (has("configPath") | not))
+      )
+    ' "${asset}" >/dev/null; then
+      printf 'Managed runner config is invalid: %s\n' "${asset}" >&2
+      return 2
+    fi
+
+    target=${config_dir}/${project_id}.json
+    if [ -L "${target}" ]; then
+      printf 'Managed runner config must not be a symlink: %s\n' "${target}" >&2
+      return 2
+    fi
+    if [ -e "${target}" ] && [ ! -f "${target}" ]; then
+      printf 'Managed runner config must be a regular file: %s\n' "${target}" >&2
+      return 2
+    fi
+    legacy_env_path=
+    if [ -f "${target}" ]; then
+      legacy_env_path=$(jq -r '.envPath // empty' "${target}" 2>/dev/null || true)
+    fi
+
+    candidate=$(mktemp "${config_dir}/.${project_id}.XXXXXX")
+    runner_config_temporary=${candidate}
+    if [ -n "${legacy_env_path}" ]; then
+      if ! jq --arg envPath "${legacy_env_path}" '. + {envPath: $envPath}' \
+        "${asset}" > "${candidate}"; then
+        rm -f -- "${candidate}"
+        runner_config_temporary=
+        return 2
+      fi
+    elif ! jq . "${asset}" > "${candidate}"; then
+      rm -f -- "${candidate}"
+      runner_config_temporary=
+      return 2
+    fi
+
+    if [ -f "${target}" ] && cmp -s "${candidate}" "${target}"; then
+      rm -f -- "${candidate}"
+      runner_config_temporary=
+      continue
+    fi
+    if [ -z "${runner_config_backup_dir}" ]; then
+      runner_config_backup_dir=$(mktemp -d /run/summing-runner-configs.XXXXXX)
+      chmod 0700 "${runner_config_backup_dir}"
+    fi
+    if [ ! -e "${runner_config_backup_dir}/${project_id}.json" ] && \
+      [ ! -e "${runner_config_backup_dir}/${project_id}.missing" ]; then
+      if [ -f "${target}" ]; then
+        cp -p -- "${target}" "${runner_config_backup_dir}/${project_id}.json"
+      else
+        : > "${runner_config_backup_dir}/${project_id}.missing"
+      fi
+    fi
+    chown root:summing "${candidate}"
+    chmod 0640 "${candidate}"
+    mv -f -- "${candidate}" "${target}"
+    runner_config_temporary=
+    runner_configs_changed=1
+  done
+}
+
+restore_project_runner_configs() {
+  local config_dir=/etc/summing-runner/projects
+  local backup marker project_id target
+  local -a backups=() markers=()
+
+  if [ -z "${runner_config_backup_dir}" ]; then return 0; fi
+  shopt -s nullglob
+  backups=("${runner_config_backup_dir}"/*.json)
+  markers=("${runner_config_backup_dir}"/*.missing)
+  shopt -u nullglob
+  for backup in "${backups[@]}"; do
+    project_id=$(basename "${backup}" .json)
+    target=${config_dir}/${project_id}.json
+    if [ -L "${target}" ]; then
+      printf 'Refusing to restore a symlinked runner config: %s\n' "${target}" >&2
+      return 2
+    fi
+    install -o root -g summing -m 0640 "${backup}" "${target}"
+  done
+  for marker in "${markers[@]}"; do
+    project_id=$(basename "${marker}" .missing)
+    target=${config_dir}/${project_id}.json
+    if [ -L "${target}" ]; then
+      printf 'Refusing to remove a symlinked runner config: %s\n' "${target}" >&2
+      return 2
+    fi
+    rm -f -- "${target}"
+  done
+  rm -f -- "${backups[@]}" "${markers[@]}"
+  rmdir "${runner_config_backup_dir}"
+  runner_config_backup_dir=
+}
+
+discard_project_runner_config_backup() {
+  local -a backup_files=()
+  if [ -z "${runner_config_backup_dir}" ]; then return 0; fi
+  shopt -s nullglob
+  backup_files=("${runner_config_backup_dir}"/*)
+  shopt -u nullglob
+  if [ "${#backup_files[@]}" -gt 0 ]; then rm -f -- "${backup_files[@]}"; fi
+  rmdir "${runner_config_backup_dir}"
+  runner_config_backup_dir=
+}
+
 finalize_project_environment_cutover() {
   local release=$1
   local hook=${release}/deploy/project-environment-cutover
@@ -315,19 +452,39 @@ fail_deployment() {
   local code=$1
   local message=$2
   local failure_current_sha=${previous_sha}
+  local restore_runner_configs=0
   trap - ERR
   set +e
   if [ -n "${staging_dir}" ] && [ -d "${staging_dir}" ]; then
     rm -rf -- "${staging_dir}"
     staging_dir=
   fi
-  if [ "${switched}" = 1 ] && [ -n "${previous_target}" ]; then
+  if [ -n "${runner_config_temporary}" ]; then
+    rm -f -- "${runner_config_temporary}"
+    runner_config_temporary=
+  fi
+  if { [ "${switched}" = 1 ] && [ -n "${previous_target}" ]; } || \
+    [ -n "${runner_config_backup_dir}" ]; then
     write_state rolling_back "${message}; возвращаем предыдущий release" "${target_sha}" "${target_sha}"
+  fi
+  if [ "${switched}" = 1 ] && [ -n "${previous_target}" ]; then
     switch_current "${previous_target}"
+  fi
+  if [ -n "${runner_config_backup_dir}" ]; then
+    restore_runner_configs=1
+    if ! restore_project_runner_configs; then
+      printf '%s\n' 'Could not restore managed runner configs during rollback.' >&2
+    fi
+  fi
+  if [ "${switched}" = 1 ] && [ -n "${previous_target}" ]; then
     restart_services
     wait_for_health
     switched=0
     installed=0
+  elif [ "${restore_runner_configs}" = 1 ] && \
+    systemctl is-enabled --quiet summing-runner.service 2>/dev/null; then
+    systemctl restart summing-runner.service
+    wait_for_health
   fi
   if [ "${installed}" = 1 ]; then failure_current_sha=${target_sha}; fi
   write_state failed "${message}" "${failure_current_sha}" "${target_sha}" "$(now)"
@@ -442,6 +599,16 @@ target_version=$(git_as_summing -C "${repo_dir}" show \
   "${target_sha}:package.json" 2>/dev/null | jq -r '.version // empty' 2>/dev/null || true)
 if ! valid_version "${target_version}"; then target_version=; fi
 if [ "${previous_sha}" = "${target_sha}" ]; then
+  phase=sync
+  failure_kind=runtime
+  sync_project_runner_configs "${previous_target}"
+  if [ "${runner_configs_changed}" = 1 ] && \
+    systemctl is-enabled --quiet summing-runner.service 2>/dev/null; then
+    write_state deploying "Обновляем конфигурацию Project runner" \
+      "${previous_sha}" "${target_sha}"
+    systemctl restart summing-runner.service
+    wait_for_health
+  fi
   phase=cutover
   failure_kind=cutover
   cutover_status=0
@@ -451,6 +618,7 @@ if [ "${previous_sha}" = "${target_sha}" ]; then
       "Версия установлена; ждём Validate/Dry run для migration cutover" \
       "${previous_sha}" "${target_sha}" "$(now)"
     record_attempt || printf '%s\n' 'Could not persist deployment attempt history.' >&2
+    discard_project_runner_config_backup
     exit 0
   fi
   if [ "${cutover_status}" != 0 ]; then
@@ -470,6 +638,7 @@ if [ "${previous_sha}" = "${target_sha}" ]; then
     write_state idle "Установлена актуальная версия" "${previous_sha}" "${target_sha}" \
       "$(now)"
   fi
+  discard_project_runner_config_backup
   exit 0
 fi
 if [ "${prior_status}" = failed ] && \
@@ -533,6 +702,10 @@ failure_kind=restart
 write_state deploying "Перезапускаем сервисы на ${target_sha:0:12}" "${previous_sha}" "${target_sha}"
 switch_current "${release_dir}"
 switched=1
+phase=sync
+failure_kind=runtime
+sync_project_runner_configs "${release_dir}"
+phase=restart
 restart_services
 phase=health
 failure_kind=health
@@ -550,6 +723,7 @@ if [ "${cutover_status}" = 75 ]; then
     "Версия установлена; ждём Validate/Dry run для migration cutover" \
     "${target_sha}" "${target_sha}" "$(now)"
   record_attempt || printf '%s\n' 'Could not persist deployment attempt history.' >&2
+  discard_project_runner_config_backup
   exit 0
 fi
 if [ "${cutover_status}" != 0 ]; then
@@ -565,6 +739,7 @@ write_state succeeded "Обновление установлено" "${target_sh
 record_attempt || printf '%s\n' 'Could not persist deployment attempt history.' >&2
 write_deployment_event update_succeeded 'Обновление установлено' || \
   printf '%s\n' 'Could not persist deployment success event.' >&2
+discard_project_runner_config_backup
 
 current_target=$(readlink -f "${current_link}")
 if ! find "${releases_dir}" -mindepth 1 -maxdepth 1 -type d \
