@@ -390,8 +390,8 @@ sudo /opt/summing/deploy/install-project-operations.sh
 ```
 
 Installer создаёт отдельного `summing-runner`, rootless Docker с лимитом build
-cache 8 ГБ, приватный AES-ключ для project env, HTTPS proxy, project config/data
-и timer unit. Пользователь `summing` не получает Docker socket. При первом
+cache 8 ГБ, приватный AES-ключ для project env, HTTPS proxy, project runtime
+policy/data и timer unit. Пользователь `summing` не получает Docker socket. При первом
 переходе static env и raw credentials из legacy Connections автоматически
 объединяются в encrypted store. Затем runner выполняет Validate и Dry run на
 одной env revision; только успешная проверка разрешает следующему deploy tick

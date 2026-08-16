@@ -63,6 +63,10 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
   assert.match(activation, /install -d -o root -g summing -m 1770 "\$\{deploy_state_dir\}"/);
   assert.match(activation, /runner_uid=\$\(id -u summing-runner\)/);
   assert.match(activation, /sed "s\/RUNNER_UID\/\$\{runner_uid\}\/g"/);
+  assert.match(activation, /runner_project_config=\/etc\/summing-runner\/projects\/ash-seo\.json/);
+  assert.match(activation, /Runner project config must not be a symlink/);
+  assert.match(activation, /\. \+ \{envPath: \$envPath\}/);
+  assert.match(activation, /deploy\/ash-seo\.runner\.json/);
   assert.match(activation, /\n  openssh-client\n/);
   assert.match(cloudInit, /\n  - openssh-client\n/);
   assert.doesNotMatch(activation, /systemctl restart summing-secrets\.service/);
@@ -128,6 +132,11 @@ test("runner environment deployment keeps its encryption key private and one HTT
   assert.match(caddy, /reverse_proxy 127\.0\.0\.1:8766/);
   assert.match(installer, /Keeping the legacy Connections route until environment verification succeeds/);
   assert.match(installer, /\. \+ \{envPath: \$envPath\}/);
+  assert.doesNotMatch(installer, /ash-seo\.config\.json/);
+  assert.deepEqual(
+    JSON.parse(asset("deploy/ash-seo.runner.json")).configSourcePaths,
+    ["config.json", "config.example.json"],
+  );
   assert.match(service, /SUMMING_RUNNER_SCHEDULES=\/etc\/summing-runner\/schedules/);
 });
 

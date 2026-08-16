@@ -129,14 +129,6 @@ if [ ! -f /etc/summing-runner/projects/ash-seo.env ]; then
     /etc/summing-runner/projects/ash-seo.env
 fi
 
-ash_repo=/var/lib/summing/data/repositories/ash-seo/ash-seo
-if [ ! -f /etc/summing-runner/projects/ash-seo.config.json ]; then
-  temporary_config=$(mktemp)
-  runuser -u summing -- git -C "${ash_repo}" show "${ash_seo_revision}:config.example.json" > "${temporary_config}"
-  install -o root -g "${runner_user}" -m 0644 \
-    "${temporary_config}" /etc/summing-runner/projects/ash-seo.config.json
-  rm -f "${temporary_config}"
-fi
 sed "s/replace_me/${ash_seo_revision}/" "${repo_dir}/deploy/ash-seo.schedule.json" \
   > /etc/summing-runner/schedules/ash-seo.json
 chown root:summing /etc/summing-runner/schedules/ash-seo.json

@@ -908,6 +908,14 @@ rootless Docker daemon. Пользователь `summing` не получает
 Unix socket принимаются только project id, одна из четырёх фиксированных
 операций и Git archive до 50 МБ. Runner не читает conversation worktree: SUMMING
 сам создаёт immutable archive выбранной ревизии и передаёт его в запросе.
+Application config выбирается из того же распакованного archive по root-managed
+списку `configSourcePaths` и монтируется в контейнер read-only. Для `ash-seo`
+сначала используется `config.json`, а для старых pinned revisions допускается
+`config.example.json`; постоянная копия `/etc/summing-runner/projects/ash-seo.config.json`
+не является runtime source. Поэтому code SHA, config и env revision образуют один
+проверяемый job snapshot, а изменение Project config не требует ручной синхронизации
+дублирующего host-файла. Старый абсолютный `configPath` сохранён только как
+совместимый режим для других root-managed Project.
 Контейнер запускается read-only, без capabilities, с `no-new-privileges`, PID,
 CPU и memory limits; writable остаётся только project data bind mount.
 
@@ -1465,7 +1473,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "9.8.3",
+  "version": "9.8.5",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",

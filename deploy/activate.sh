@@ -199,6 +199,27 @@ if id summing-runner >/dev/null 2>&1 && [ -f /etc/systemd/system/summing-runner.
   install -o root -g root -m 0644 \
     "${repo_dir}/deploy/summing-ash-seo.timer" \
     /etc/systemd/system/summing-ash-seo.timer
+  install -d -o root -g summing -m 0750 /etc/summing-runner/projects
+  runner_project_config=/etc/summing-runner/projects/ash-seo.json
+  legacy_env_path=
+  if [ -L "${runner_project_config}" ]; then
+    printf '%s\n' 'Runner project config must not be a symlink.' >&2
+    exit 2
+  fi
+  if [ -f "${runner_project_config}" ]; then
+    legacy_env_path=$(jq -r '.envPath // empty' "${runner_project_config}")
+  fi
+  if [ -n "${legacy_env_path}" ]; then
+    compatible_runner_config=$(mktemp /run/ash-seo-runner.XXXXXX)
+    jq --arg envPath "${legacy_env_path}" '. + {envPath: $envPath}' \
+      "${repo_dir}/deploy/ash-seo.runner.json" > "${compatible_runner_config}"
+    install -o root -g summing -m 0640 \
+      "${compatible_runner_config}" "${runner_project_config}"
+    rm -f "${compatible_runner_config}"
+  else
+    install -o root -g summing -m 0640 \
+      "${repo_dir}/deploy/ash-seo.runner.json" "${runner_project_config}"
+  fi
 fi
 systemctl daemon-reload
 if systemctl is-enabled --quiet summing-runner.service 2>/dev/null; then

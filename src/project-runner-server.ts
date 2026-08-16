@@ -8,6 +8,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -50,8 +51,12 @@ const ARTIFACTS = new Map([
   ["report.html", "text/html"],
 ]);
 
+type RunnerProjectConfigSource =
+  | { kind: "host"; path: string }
+  | { kind: "snapshot"; paths: readonly string[] };
+
 interface RunnerProjectConfig {
-  configPath: string;
+  config: RunnerProjectConfigSource;
   dataPath: string;
   environmentBootstrap: ReadonlyMap<string, string>;
   network: boolean;
@@ -88,6 +93,17 @@ function safeAbsolutePath(value: unknown, name: string): string {
   const path = String(value ?? "");
   if (!path || !isAbsolute(path)) throw new Error(`${name} must be an absolute path`);
   return resolve(path);
+}
+
+function safeSnapshotPath(value: unknown, name: string): string {
+  if (typeof value !== "string" || !/^[A-Za-z0-9._/-]+$/.test(value) || isAbsolute(value)) {
+    throw new Error(`${name} must be a safe relative path`);
+  }
+  const segments = value.split("/");
+  if (segments.some((segment) => !segment || segment === "." || segment === "..")) {
+    throw new Error(`${name} must be a safe relative path`);
+  }
+  return value;
 }
 
 async function jsonBody(request: IncomingMessage): Promise<Record<string, unknown>> {
@@ -492,8 +508,28 @@ export class ProjectRunnerServer {
     if (raw.envPath !== undefined && !environmentBootstrap.has("repo")) {
       environmentBootstrap.set("repo", safeAbsolutePath(raw.envPath, "envPath"));
     }
+    const hostConfig = raw.configPath === undefined
+      ? null
+      : safeAbsolutePath(raw.configPath, "configPath");
+    let snapshotConfigs: string[] | null = null;
+    if (raw.configSourcePaths !== undefined) {
+      if (!Array.isArray(raw.configSourcePaths) || raw.configSourcePaths.length === 0 ||
+        raw.configSourcePaths.length > 10) {
+        throw new Error("configSourcePaths must contain 1-10 relative paths");
+      }
+      snapshotConfigs = raw.configSourcePaths.map((value, index) =>
+        safeSnapshotPath(value, `configSourcePaths[${index}]`));
+      if (new Set(snapshotConfigs).size !== snapshotConfigs.length) {
+        throw new Error("configSourcePaths must not contain duplicates");
+      }
+    }
+    if ((hostConfig === null) === (snapshotConfigs === null)) {
+      throw new Error("exactly one of configPath or configSourcePaths is required");
+    }
     return {
-      configPath: safeAbsolutePath(raw.configPath, "configPath"),
+      config: hostConfig === null
+        ? { kind: "snapshot", paths: snapshotConfigs! }
+        : { kind: "host", path: hostConfig },
       dataPath: safeAbsolutePath(raw.dataPath, "dataPath"),
       environmentBootstrap,
       network: raw.network === true,
@@ -731,7 +767,7 @@ export class ProjectRunnerServer {
     source: string,
     logPath: string,
   ): Promise<{ code: number }> {
-    if (!existsSync(project.configPath)) throw new Error(`project config is missing: ${project.configPath}`);
+    const configPath = this.runtimeConfigPath(project, source);
     mkdirSync(project.dataPath, { recursive: true, mode: 0o700 });
     if (job.action === "dry-run") {
       const root = resolve(project.dataPath, "dry-runs");
@@ -759,7 +795,7 @@ export class ProjectRunnerServer {
       "--tmpfs", "/tmp:rw,noexec,nosuid,size=134217728",
       "--env", "CONFIG_PATH=/run/config.json",
       "--env", "HISTORY_PATH=/app/data/history.json",
-      "--volume", `${project.configPath}:/run/config.json:ro`,
+      "--volume", `${configPath}:/run/config.json:ro`,
       "--volume", `${project.dataPath}:/app/data`,
     ];
       if (access.envPath) args.push("--env-file", access.envPath);
@@ -791,6 +827,30 @@ export class ProjectRunnerServer {
         access.redactions.fill("");
       }
     }
+  }
+
+  private runtimeConfigPath(project: RunnerProjectConfig, source: string): string {
+    if (project.config.kind === "host") {
+      if (!existsSync(project.config.path) || !lstatSync(project.config.path).isFile()) {
+        throw new Error(`project config is missing or not a regular file: ${project.config.path}`);
+      }
+      return project.config.path;
+    }
+    const sourceRoot = realpathSync(source);
+    for (const relativePath of project.config.paths) {
+      const candidate = resolve(sourceRoot, relativePath);
+      if (!existsSync(candidate)) continue;
+      if (!lstatSync(candidate).isFile()) {
+        throw new Error(`snapshot project config is not a regular file: ${relativePath}`);
+      }
+      if (realpathSync(candidate) !== candidate) {
+        throw new Error(`snapshot project config must not traverse symlinks: ${relativePath}`);
+      }
+      return candidate;
+    }
+    throw new Error(
+      `project config is missing from source snapshot: ${project.config.paths.join(", ")}`,
+    );
   }
 
   private runtimeAccess(job: RunnerJob, logPath: string): RuntimeAccess {

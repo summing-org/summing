@@ -86,18 +86,18 @@ test("runner snapshots an encrypted workspace environment and injects one tempor
   execFileSync("git", ["-C", repository, "config", "user.name", "Test"]);
   execFileSync("git", ["-C", repository, "config", "user.email", "test@example.test"]);
   writeFileSync(join(repository, "Dockerfile"), "FROM scratch\n");
+  writeFileSync(join(repository, "app.json"), "{}\n");
   execFileSync("git", ["-C", repository, "add", "."]);
   execFileSync("git", ["-C", repository, "commit", "-m", "image"]);
   writeFileSync(
     join(configRoot, "demo.json"),
     JSON.stringify({
-      configPath: join(root, "app.json"),
+      configSourcePaths: ["missing.json", "app.json"],
       dataPath: appData,
       environmentBootstrap: { repo: join(root, "app.env") },
       network: true,
     }),
   );
-  writeFileSync(join(root, "app.json"), "{}\n");
   writeFileSync(
     join(root, "app.env"),
     "DRY_RUN=true\nLOG_LEVEL=test\nAPI_TOKEN=bootstrap-secret-123456789\n",
@@ -185,6 +185,11 @@ exit 0
     assert.match(await client.log("demo", dryRun.id), /application said key=\[REDACTED\]/);
     const args = readFileSync(dockerArgs, "utf8");
     assert.match(args, new RegExp(`SUMMING_JOB_ID=${dryRun.id}`));
+    assert.match(
+      args,
+      new RegExp(`/projects/demo/runs/${dryRun.id}/source/app\\.json:/run/config\\.json:ro`),
+    );
+    assert.doesNotMatch(args, /missing\.json:\/run\/config\.json/);
     const envFiles = args.split("\n").filter((value, index, all) => all[index - 1] === "--env-file");
     assert.equal(envFiles.length, 1);
     assert.equal(existsSync(envFiles[0]!), false);
@@ -202,6 +207,49 @@ exit 0
     assert.equal(existsSync(join(runs, malformedId)), true);
     assert.equal(existsSync(join(runs, queuedId)), true);
   } finally {
+    await server.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runner rejects unsafe or ambiguous project config sources", async () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-runner-config-source-"));
+  const configRoot = join(root, "config");
+  const socket = join(root, "runner.sock");
+  mkdirSync(configRoot);
+  const server = new ProjectRunnerServer(
+    socket,
+    join(root, "data"),
+    configRoot,
+    "/bin/false",
+    Buffer.alloc(32, 8),
+  );
+  const reported: string[] = [];
+  const originalConsoleError = console.error;
+  console.error = (...values: unknown[]): void => {
+    reported.push(values.map(String).join(" "));
+  };
+  try {
+    await server.start();
+    const client = new ProjectRunnerClient(socket);
+    const writeConfig = (value: Record<string, unknown>): void => writeFileSync(
+      join(configRoot, "demo.json"),
+      JSON.stringify({ dataPath: join(root, "app-data"), ...value }),
+    );
+
+    writeConfig({ configSourcePaths: ["../app.json"] });
+    await assert.rejects(client.environment("demo", "repo"), /internal runner error/);
+    assert.match(reported.pop() ?? "", /must be a safe relative path/);
+
+    writeConfig({ configSourcePaths: ["app.json", "app.json"] });
+    await assert.rejects(client.environment("demo", "repo"), /internal runner error/);
+    assert.match(reported.pop() ?? "", /must not contain duplicates/);
+
+    writeConfig({ configPath: join(root, "app.json"), configSourcePaths: ["app.json"] });
+    await assert.rejects(client.environment("demo", "repo"), /internal runner error/);
+    assert.match(reported.pop() ?? "", /exactly one of configPath or configSourcePaths is required/);
+  } finally {
+    console.error = originalConsoleError;
     await server.close();
     rmSync(root, { recursive: true, force: true });
   }
