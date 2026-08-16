@@ -36,12 +36,15 @@ test("SUMMING is the only product identity in repository assets", () => {
   assert.equal(packageJson.name, "summing");
   assert.equal(packageJson.version, SUMMING_VERSION);
   assert.equal(readFileSync(join(root, "VERSION"), "utf8").trim(), SUMMING_VERSION);
-  assert.match(readFileSync(join(root, "README.md"), "utf8"), /^# SUMMING 9\.5$/m);
+  assert.match(
+    readFileSync(join(root, "README.md"), "utf8"),
+    new RegExp(`^# SUMMING ${SUMMING_VERSION.split(".").slice(0, 2).join("\\.")}$`, "m"),
+  );
 });
 
 test("the bot profile always preserves the complete SUMMING version", () => {
   const description = summingProfileDescription("x".repeat(200));
 
   assert.equal(description.length, 120);
-  assert.match(description, / · SUMMING 9\.5\.4$/);
+  assert.ok(description.endsWith(` · SUMMING ${SUMMING_VERSION}`));
 });

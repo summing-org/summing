@@ -6,6 +6,7 @@ import test from "node:test";
 import { ProjectConfig, RuntimeConfig, type WorkspaceConfig } from "../src/config.js";
 import { SummingRuntime } from "../src/runtime.js";
 import type { TelegramObject } from "../src/telegram-api.js";
+import { SUMMING_VERSION, SUMMING_VERSION_LABEL } from "../src/version.js";
 
 function runtimeFixture(): { root: string; runtime: SummingRuntime } {
   const root = mkdtempSync(join(tmpdir(), "summing-runtime-limits-"));
@@ -72,12 +73,12 @@ test("administrator reads VPS limits and refreshes the bot profile", async () =>
     assert.match(replies.at(-1) ?? "", /Codex limits на VPS/);
     assert.match(replies.at(-1) ?? "", /Неделя: 60% осталось/);
     assert.match(profiles.at(-1) ?? "", /^🟢 Codex: неделя 60%/);
-    assert.match(profiles.at(-1) ?? "", / · SUMMING 9\.5\.4$/);
+    assert.ok((profiles.at(-1) ?? "").endsWith(` · ${SUMMING_VERSION_LABEL}`));
     assert.equal(
       (runtime.status().codex_limits as Record<string, unknown>).weekly_remaining_percent,
       60,
     );
-    assert.equal(runtime.status().version, "9.7.0");
+    assert.equal(runtime.status().version, SUMMING_VERSION);
 
     await handleMessage({
       message_id: 2,
@@ -85,7 +86,7 @@ test("administrator reads VPS limits and refreshes the bot profile", async () =>
       from: { id: 1 },
       chat: { id: 1, type: "private" },
     });
-    assert.match(replies.at(-1) ?? "", /^SUMMING: 9\.5\.4$/m);
+    assert.ok((replies.at(-1) ?? "").split("\n").includes(`SUMMING: ${SUMMING_VERSION}`));
   } finally {
     runtime.requestStop();
     runtime.state.close();

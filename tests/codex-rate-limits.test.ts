@@ -5,6 +5,7 @@ import {
   codexLimitsProfileText,
   parseCodexRateLimits,
 } from "../src/codex-rate-limits.js";
+import { SUMMING_VERSION_LABEL } from "../src/version.js";
 
 test("selects the weekly Codex window and renders remaining usage", () => {
   const snapshot = parseCodexRateLimits(
@@ -28,10 +29,9 @@ test("selects the weekly Codex window and renders remaining usage", () => {
   assert.equal(snapshot.windows.length, 2);
   assert.equal(snapshot.weekly?.kind, "secondary");
   assert.equal(snapshot.weekly?.remainingPercent, 68);
-  assert.match(
-    codexLimitsProfileText(snapshot, "UTC"),
-    /^🟢 Codex: неделя 68% · сброс .* · SUMMING 9\.5\.4$/,
-  );
+  const profile = codexLimitsProfileText(snapshot, "UTC");
+  assert.match(profile, /^🟢 Codex: неделя 68% · сброс .*/);
+  assert.ok(profile.endsWith(` · ${SUMMING_VERSION_LABEL}`));
   const message = codexLimitsMessage(snapshot, "UTC");
   assert.match(message, /5 ч\.: 80% осталось/);
   assert.match(message, /Неделя: 68% осталось/);
@@ -78,7 +78,7 @@ test("shows an explicit unknown state when a weekly window is absent", () => {
   assert.equal(snapshot.weekly, null);
   assert.equal(
     codexLimitsProfileText(snapshot, "UTC"),
-    "⚪ Codex: недельный лимит недоступен · SUMMING 9.7.0",
+    `⚪ Codex: недельный лимит недоступен · ${SUMMING_VERSION_LABEL}`,
   );
   assert.match(codexLimitsMessage(snapshot, "UTC"), /Недельное окно App Server не вернул/);
 });
