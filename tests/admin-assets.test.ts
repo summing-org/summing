@@ -12,6 +12,9 @@ test("administrator Mini App exposes projects, bindings and global settings", ()
   assert.match(ADMIN_HTML, /Telegram Bot API не отдаёт полный список/);
   assert.match(ADMIN_HTML, /уведомит владельца проекта прямо в выбранном топике/);
   assert.match(ADMIN_HTML, /Настройки SUMMING/);
+  assert.match(ADMIN_HTML, /data-admin-section="overview"/);
+  assert.match(ADMIN_HTML, /data-admin-section="system"/);
+  assert.match(ADMIN_HTML, /id="systemPanel"[^>]+role="tabpanel"/);
   assert.match(ADMIN_HTML, /Обновиться сейчас/);
   assert.match(ADMIN_HTML, /id="deploymentPhase"/);
   assert.match(ADMIN_HTML, /id="deploymentFailedTests"/);
@@ -23,6 +26,8 @@ test("administrator Mini App exposes projects, bindings and global settings", ()
   assert.match(ADMIN_JS, /deploymentActive/);
   assert.match(ADMIN_JS, /renderDeploymentFailure/);
   assert.match(ADMIN_JS, /renderDeploymentHistory/);
+  assert.match(ADMIN_JS, /activateAdminSection/);
+  assert.match(ADMIN_JS, /state\.section==="system"/);
   assert.match(ADMIN_JS, /failure\.logTail/);
   assert.match(ADMIN_JS, /deployment-attempt-details/);
   assert.match(ADMIN_JS, /Telegram ID:/);
@@ -31,4 +36,6 @@ test("administrator Mini App exposes projects, bindings and global settings", ()
   assert.match(ADMIN_CSS, /@media\(max-width:520px\)/);
   assert.match(ADMIN_CSS, /--accent:#ff2e6b/);
   assert.match(ADMIN_CSS, /\.deployment-card/);
+  assert.match(ADMIN_CSS, /\.admin-tabs/);
+  assert.match(ADMIN_CSS, /\.admin-panel\.active/);
 });
