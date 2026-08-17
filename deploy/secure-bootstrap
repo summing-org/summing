@@ -18,6 +18,7 @@ origin=
 source_key=
 expected_commit=
 consume_inputs=0
+bundle_verify_dir=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --bundle) bundle=${2:-}; shift 2 ;;
@@ -31,7 +32,15 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+remove_bundle_verify_dir() {
+  case "${bundle_verify_dir}" in
+    /run/summing-bundle-verify.*) find "${bundle_verify_dir}" -depth -delete ;;
+  esac
+  bundle_verify_dir=
+}
+
 consume_install_inputs() {
+  remove_bundle_verify_dir
   if [ "${consume_inputs}" -ne 1 ]; then return; fi
   case "${secrets}" in /run/*) rm -f -- "${secrets}" ;; esac
   case "${source_key}" in /run/*) rm -f -- "${source_key}" ;; esac
@@ -99,10 +108,14 @@ fi
 if [ -n "${source_key}" ]; then
   private_regular_file "${source_key}" 'Source deploy key'
 fi
-if ! git bundle verify "${bundle}" >/dev/null; then
+bundle_verify_dir=$(mktemp -d /run/summing-bundle-verify.XXXXXX)
+chmod 0700 "${bundle_verify_dir}"
+git init --bare "${bundle_verify_dir}" >/dev/null
+if ! git -C "${bundle_verify_dir}" bundle verify "${bundle}" >/dev/null; then
   printf '%s\n' 'Release bundle verification failed.' >&2
   exit 2
 fi
+remove_bundle_verify_dir
 if ! jq -e 'type == "object"' "${secrets}" >/dev/null; then
   printf '%s\n' 'Secrets manifest must contain one JSON object.' >&2
   exit 2

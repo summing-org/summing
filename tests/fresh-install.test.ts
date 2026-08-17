@@ -125,7 +125,8 @@ test("provisioning and secure bootstrap assets keep application secrets out of m
   assert.doesNotMatch(cloudInit, /TELEGRAM_BOT_TOKEN=|OPENAI_API_KEY=|SUMMING_S3_SECRET_ACCESS_KEY=/);
   assert.match(bootstrap, /Refusing clean install over existing durable state/);
   assert.match(bootstrap, /Trusted cloud-init provisioning marker is missing or unsafe/);
-  assert.match(bootstrap, /git bundle verify/);
+  assert.match(bootstrap, /git init --bare "\$\{bundle_verify_dir\}"/);
+  assert.match(bootstrap, /git -C "\$\{bundle_verify_dir\}" bundle verify/);
   assert.match(bootstrap, /SUMMING_DEPLOY_EXPECTED_REMOTE=\$\{origin\}/);
   assert.match(bootstrap, /consume_install_inputs/);
   assert.match(bootstrap, /trap consume_install_inputs EXIT/);
@@ -150,6 +151,7 @@ test("provisioning and secure bootstrap assets keep application secrets out of m
   assert.match(provisioner, /Host provisioning requires Ubuntu 24\.04/);
   assert.match(provisioner, /Host provisioning requires x86_64/);
   assert.match(provisioner, /Refusing to provision over existing SUMMING state/);
+  assert.match(provisioner, /install -d -o summing -g summing -m 0750 \/var\/lib\/summing/);
   assert.match(provisioner, /node_version=v24\.18\.0/);
   assert.match(provisioner, /SHASUMS256\.txt/);
   assert.match(provisioner, /ufw allow "\$\{ssh_port\}\/tcp"/);

@@ -125,6 +125,7 @@ if ! id summing >/dev/null 2>&1; then
     summing
 fi
 
+install -d -o summing -g summing -m 0750 /var/lib/summing
 install -d -o summing -g summing -m 0700 /var/lib/summing/data
 install -d -o summing -g summing -m 0700 /var/lib/summing/data/codex
 install -d -o summing -g summing -m 0700 /var/lib/summing/data/worktrees
