@@ -37,6 +37,8 @@ test("administrator Mini App exposes projects, bindings and global settings", ()
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/onboarding/);
   assert.match(ADMIN_JS, /renderOnboarding/);
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/mtproto\/connectors/);
+  assert.match(ADMIN_JS, /Подключение к Telegram запущено/);
+  assert.doesNotMatch(ADMIN_JS, /Ожидается код Telegram/);
   assert.match(ADMIN_JS, /Не отправлено уведомление о sync/);
   assert.match(ADMIN_JS, /state!=="paused"&&status\.collector\.state!=="failed"/);
   assert.match(ADMIN_JS, /deploymentActive/);

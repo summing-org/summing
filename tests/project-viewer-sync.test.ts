@@ -77,7 +77,7 @@ test("owner-only Admin API exposes MTProto, consent and source sync actions", as
       calls.push(["authorize", { ...input, apiHash: "[redacted]" }]);
       return {
         connectorId: "11111111-1111-4111-8111-111111111111",
-        state: "wait_code",
+        state: "starting",
         passwordHint: "",
         expiresAt: 999,
         error: "",
@@ -164,6 +164,7 @@ test("owner-only Admin API exposes MTProto, consent and source sync actions", as
       body: JSON.stringify({ apiId: 123, apiHash: "a".repeat(32), phone: "+79990000000" }),
     });
     assert.equal(created.status, 201);
+    assert.equal((await created.json() as { state: string }).state, "starting");
 
     const consent = await fetch(`${endpoint}/api/viewer/admin/knowledge/consents`, {
       method: "POST",

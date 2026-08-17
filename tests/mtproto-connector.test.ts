@@ -17,6 +17,8 @@ test("MTProto vault encrypts API secrets and derives a distinct TDLib key per co
     assert.equal(vault.decrypt(encrypted), secret);
     assert.notEqual(vault.databaseKey("connector-a"), vault.databaseKey("connector-b"));
     assert.equal(vault.databaseKey("connector-a"), vault.databaseKey("connector-a"));
+    assert.match(vault.databaseKey("connector-a"), /^[A-Za-z0-9+/]{43}=$/);
+    assert.equal(Buffer.from(vault.databaseKey("connector-a"), "base64").length, 32);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -21,7 +21,7 @@ tdl.configure({ tdjson: getTdjson(), verbosityLevel: 1 });
 
 export interface MtprotoAuthorizationStatus {
   connectorId: string;
-  state: "wait_code" | "wait_password" | "ready" | "failed";
+  state: "starting" | "wait_code" | "wait_password" | "ready" | "failed";
   passwordHint: string;
   expiresAt: number;
   error: string;
@@ -76,7 +76,7 @@ export class MtprotoSecretVault {
 
   databaseKey(connectorId: string): string {
     return Buffer.from(hkdfSync("sha256", this.key, connectorId, "summing-tdlib-db", 32))
-      .toString("base64url");
+      .toString("base64");
   }
 }
 
@@ -156,7 +156,7 @@ export class MtprotoConnectorManager {
     const challenge: AuthorizationChallenge = {
       connectorId,
       phone,
-      state: "wait_code",
+      state: "starting",
       passwordHint: "",
       expiresAt: Date.now() / 1_000 + 600,
       error: "",
