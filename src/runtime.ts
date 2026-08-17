@@ -697,7 +697,7 @@ export class SummingRuntime {
       if (!record(this.accountState.account)) {
         this.codexLimitsState = null;
         await this.updateCodexLimitsProfile(
-          summingProfileDescription("⚪ Codex: требуется /login"),
+          summingProfileDescription("Codex: нужен /login"),
         );
         return null;
       }

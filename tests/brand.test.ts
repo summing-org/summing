@@ -42,9 +42,9 @@ test("SUMMING is the only product identity in repository assets", () => {
   );
 });
 
-test("the bot profile always preserves the complete SUMMING version", () => {
+test("the bot profile starts with the complete SUMMING version", () => {
   const description = summingProfileDescription("x".repeat(200));
 
   assert.equal(description.length, 120);
-  assert.ok(description.endsWith(` · SUMMING ${SUMMING_VERSION}`));
+  assert.ok(description.startsWith(`SUMMING ${SUMMING_VERSION} · `));
 });

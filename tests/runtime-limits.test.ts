@@ -72,8 +72,10 @@ test("administrator reads VPS limits and refreshes the bot profile", async () =>
     });
     assert.match(replies.at(-1) ?? "", /Codex limits на VPS/);
     assert.match(replies.at(-1) ?? "", /Неделя: 60% осталось/);
-    assert.match(profiles.at(-1) ?? "", /^🟢 Codex: неделя 60%/);
-    assert.ok((profiles.at(-1) ?? "").endsWith(` · ${SUMMING_VERSION_LABEL}`));
+    assert.equal(
+      profiles.at(-1),
+      `${SUMMING_VERSION_LABEL} · Codex: 60% · до 21 авг., 00:20 GMT+3`,
+    );
     assert.equal(
       (runtime.status().codex_limits as Record<string, unknown>).weekly_remaining_percent,
       60,

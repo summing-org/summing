@@ -81,12 +81,6 @@ export function parseCodexRateLimits(
   return { capturedAt, windows, weekly };
 }
 
-function statusEmoji(remainingPercent: number): string {
-  if (remainingPercent >= 30) return "🟢";
-  if (remainingPercent >= 10) return "🟡";
-  return "🔴";
-}
-
 function resetText(resetsAt: number, timeZone: string): string {
   return new Intl.DateTimeFormat("ru-RU", {
     timeZone,
@@ -119,11 +113,10 @@ export function codexLimitsProfileText(
 ): string {
   const weekly = snapshot.weekly;
   if (!weekly) {
-    return summingProfileDescription("⚪ Codex: недельный лимит недоступен");
+    return summingProfileDescription("Codex: нет данных");
   }
   return summingProfileDescription(
-    `${statusEmoji(weekly.remainingPercent)} Codex: неделя ${weekly.remainingPercent}% · ` +
-      `сброс ${resetText(weekly.resetsAt, timeZone)}`,
+    `Codex: ${weekly.remainingPercent}% · до ${resetText(weekly.resetsAt, timeZone)}`,
   );
 }
 
