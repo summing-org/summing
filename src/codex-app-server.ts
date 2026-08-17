@@ -411,6 +411,7 @@ export class CodexAppServer extends EventEmitter {
     const runtimeMemoryPath = resolve(runtimePath, "memory");
     const runtimeTempPath = resolve(cwd, ".summing-runtime", "tmp");
     const runtimeAttachmentsPath = resolve(runtimePath, "attachments");
+    const runtimeOutboxPath = resolve(runtimePath, "outbox");
     const workspaceRoots: JsonRecord = { ".": "read" };
     const projects: JsonRecord = {};
     for (const root of new Set([readableRoot, resolve(cwd)])) {
@@ -443,6 +444,7 @@ export class CodexAppServer extends EventEmitter {
       filesystem[runtimeMemoryPath] = "write";
       filesystem[runtimeTempPath] = "write";
       filesystem[runtimeAttachmentsPath] = "read";
+      filesystem[runtimeOutboxPath] = "write";
     } else {
       filesystem[resolve(readableRoot, ".git")] = "deny";
       filesystem[runtimePath] = "deny";

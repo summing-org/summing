@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import {
   existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
+  readdirSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -181,6 +183,7 @@ test("conversation gets a persistent worktree and project memory", async () => {
       true,
       new Map([["demo", project]]),
     );
+    Object.defineProperty(config, "maximumAttachmentBytes", { value: 16 });
     const manager = new WorkspaceManager(config);
     manager.initialize();
     const conversation: Conversation = {
@@ -214,6 +217,42 @@ test("conversation gets a persistent worktree and project memory", async () => {
     writeFileSync(legacyMemory, "legacy runtime memory\n");
     await manager.prepare(conversation, project, workspace);
     assert.equal(existsSync(legacyMemory), false);
+    const context = readFileSync(
+      join(prepared.path, ".summing-runtime", "CONTEXT.md"),
+      "utf8",
+    );
+    assert.match(context, /write each final deliverable/);
+    assert.match(context, /combined size must not exceed 16 bytes/);
+    const outbox = join(prepared.path, ".summing-runtime", "outbox");
+    const outboxOutside = join(root, "outbox-outside.txt");
+    writeFileSync(outboxOutside, "outside\n");
+    writeFileSync(join(outbox, "report.pdf"), Uint8Array.from([1, 2, 3, 4]));
+    writeFileSync(join(outbox, "too-large.txt"), "x".repeat(17));
+    mkdirSync(join(outbox, "nested"));
+    symlinkSync(outboxOutside, join(outbox, "outside-link.txt"));
+    linkSync(outboxOutside, join(outbox, "outside-hardlink.txt"));
+    const collected = manager.collectOutbox(prepared);
+    assert.deepEqual(
+      collected.documents.map((document) => ({
+        fileName: document.fileName,
+        mimeType: document.mimeType,
+        size: document.size,
+        data: [...document.data],
+      })),
+      [{
+        fileName: "report.pdf",
+        mimeType: "application/pdf",
+        size: 4,
+        data: [1, 2, 3, 4],
+      }],
+    );
+    assert.equal(collected.warnings.length, 4);
+    assert.ok(collected.warnings.some((warning) => warning.includes("too-large.txt")));
+    assert.ok(collected.warnings.some((warning) => warning.includes("nested")));
+    assert.ok(collected.warnings.some((warning) => warning.includes("outside-link.txt")));
+    assert.ok(collected.warnings.some((warning) => warning.includes("outside-hardlink.txt")));
+    await manager.prepare(conversation, project, workspace);
+    assert.deepEqual(readdirSync(outbox), []);
     const localMemory = join(
       prepared.path,
       ".summing-runtime",

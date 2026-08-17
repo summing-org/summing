@@ -3408,6 +3408,9 @@ export class SummingRuntime {
       showCodexWorkLog(active);
       await stream.flush(fallback);
       this.state.finishRun(runId, active.status, active.response, active.error);
+      if (access === "write" && active.status === "completed") {
+        await this.deliverOutboxDocuments(prepared, conversation, replyTo);
+      }
       const conflict =
         access === "write"
           ? await this.workspaces.mergeProjectMemory(project.id, prepared)
@@ -3456,6 +3459,64 @@ export class SummingRuntime {
           this.attachments.remove(inputs.flatMap((input) => input.attachments));
         }
         releaseWorkspace?.();
+      }
+    }
+  }
+
+  private async deliverOutboxDocuments(
+    prepared: PreparedWorkspace,
+    conversation: Conversation,
+    replyTo: number,
+  ): Promise<void> {
+    let collection;
+    try {
+      collection = this.workspaces.collectOutbox(prepared);
+    } catch (error) {
+      console.error("could not inspect Telegram outbox", error);
+      try {
+        await this.telegram.sendMessage(
+          conversation.chatId,
+          "⚠️ Созданные файлы не отправлены: runtime outbox не прошёл проверку безопасности.",
+          { topicId: conversation.topicId, replyTo },
+        );
+      } catch (reportError) {
+        console.error("could not report unsafe Telegram outbox", reportError);
+      }
+      return;
+    }
+    const warnings = [...collection.warnings];
+    for (const document of collection.documents) {
+      try {
+        await this.telegram.sendChatAction(
+          conversation.chatId,
+          "upload_document",
+          conversation.topicId,
+        );
+      } catch (error) {
+        console.warn(`could not show upload action for ${document.entryName}`, error);
+      }
+      try {
+        await this.telegram.sendDocument(
+          conversation.chatId,
+          document.data,
+          document.fileName,
+          document.mimeType,
+          { topicId: conversation.topicId, replyTo },
+        );
+      } catch (error) {
+        console.error(`could not send outbox document ${document.entryName}`, error);
+        warnings.push(`${document.fileName}: Telegram не принял файл`);
+      }
+    }
+    if (warnings.length > 0) {
+      try {
+        await this.telegram.sendMessage(
+          conversation.chatId,
+          `⚠️ Часть созданных файлов не отправлена:\n${warnings.map((warning) => `• ${warning}`).join("\n")}`,
+          { topicId: conversation.topicId, replyTo },
+        );
+      } catch (error) {
+        console.error("could not report Telegram outbox delivery warnings", error);
       }
     }
   }

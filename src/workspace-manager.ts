@@ -11,12 +11,13 @@ import {
   realpathSync,
   readdirSync,
   renameSync,
+  rmSync,
   statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { opendir } from "node:fs/promises";
-import { basename, relative, resolve, sep } from "node:path";
+import { basename, extname, relative, resolve, sep } from "node:path";
 import { spawn } from "node:child_process";
 import type { ProjectConfig, RuntimeConfig, WorkspaceConfig } from "./config.js";
 import type { StoredAttachment } from "./attachment-service.js";
@@ -37,11 +38,54 @@ export interface MaterializedAttachment {
   kind: StoredAttachment["kind"];
 }
 
+export interface OutboundDocument {
+  entryName: string;
+  fileName: string;
+  mimeType: string;
+  size: number;
+  data: Uint8Array;
+}
+
+export interface OutboxCollection {
+  documents: OutboundDocument[];
+  warnings: string[];
+}
+
 export class WorkspaceError extends Error {}
 
 const LEGACY_IDENTITY = "Sum" + "mate";
 const LEGACY_RUNTIME_DIRECTORY = `.${LEGACY_IDENTITY.toLowerCase()}-runtime`;
 const LEGACY_BRANCH_PREFIX = LEGACY_IDENTITY.toLowerCase();
+const MAX_OUTBOX_DOCUMENTS = 10;
+
+const OUTBOX_MIME_TYPES = new Map([
+  [".csv", "text/csv"],
+  [".docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"],
+  [".html", "text/html"],
+  [".jpeg", "image/jpeg"],
+  [".jpg", "image/jpeg"],
+  [".json", "application/json"],
+  [".md", "text/markdown"],
+  [".pdf", "application/pdf"],
+  [".png", "image/png"],
+  [".pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"],
+  [".txt", "text/plain"],
+  [".webp", "image/webp"],
+  [".xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"],
+  [".zip", "application/zip"],
+]);
+
+function telegramFileName(value: string): string {
+  const sanitized = value
+    .replace(/[\u0000-\u001f\u007f]/g, "_")
+    .trim()
+    .slice(0, 200);
+  return sanitized || "document";
+}
+
+function outboxMimeType(fileName: string): string {
+  return OUTBOX_MIME_TYPES.get(extname(fileName).toLowerCase()) ?? "application/octet-stream";
+}
 
 interface ProcessResult {
   code: number;
@@ -346,6 +390,68 @@ export class WorkspaceManager {
     });
   }
 
+  collectOutbox(prepared: PreparedWorkspace): OutboxCollection {
+    const outbox = resolve(prepared.path, ".summing-runtime", "outbox");
+    const outboxStat = lstatSync(outbox);
+    if (outboxStat.isSymbolicLink() || !outboxStat.isDirectory()) {
+      throw new WorkspaceError(`refusing unsafe runtime outbox: ${outbox}`);
+    }
+    const documents: OutboundDocument[] = [];
+    const warnings: string[] = [];
+    let totalBytes = 0;
+    for (const entry of readdirSync(outbox, { withFileTypes: true }).sort((left, right) =>
+      left.name.localeCompare(right.name)
+    )) {
+      const displayName = telegramFileName(entry.name);
+      if (!entry.isFile()) {
+        warnings.push(`${displayName}: разрешены только обычные файлы без каталогов и symlink`);
+        continue;
+      }
+      if (documents.length >= MAX_OUTBOX_DOCUMENTS) {
+        warnings.push(`${displayName}: превышен лимит ${MAX_OUTBOX_DOCUMENTS} файлов за run`);
+        continue;
+      }
+      const path = resolve(outbox, entry.name);
+      const descriptor = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+      try {
+        const opened = fstatSync(descriptor);
+        if (!opened.isFile() || opened.nlink !== 1) {
+          warnings.push(`${displayName}: небезопасный тип файла`);
+          continue;
+        }
+        if (opened.size > this.config.maximumAttachmentBytes) {
+          warnings.push(
+            `${displayName}: размер превышает лимит ${this.config.maximumAttachmentBytes} байт`,
+          );
+          continue;
+        }
+        if (totalBytes + opened.size > this.config.maximumAttachmentBytes) {
+          warnings.push(
+            `${displayName}: совокупный размер файлов превышает ` +
+              `${this.config.maximumAttachmentBytes} байт`,
+          );
+          continue;
+        }
+        const data = readFileSync(descriptor);
+        if (data.byteLength !== opened.size) {
+          warnings.push(`${displayName}: файл изменился во время чтения`);
+          continue;
+        }
+        totalBytes += data.byteLength;
+        documents.push({
+          entryName: entry.name,
+          fileName: displayName,
+          mimeType: outboxMimeType(entry.name),
+          size: data.byteLength,
+          data: Uint8Array.from(data),
+        });
+      } finally {
+        closeSync(descriptor);
+      }
+    }
+    return { documents, warnings };
+  }
+
   private async gitRoot(path: string, signal?: AbortSignal): Promise<string | null> {
     const result = await runProcess("git", ["-C", path, "rev-parse", "--show-toplevel"], 60_000, signal);
     return result.code === 0 ? realpathSync(result.stdout.trim()) : null;
@@ -504,9 +610,11 @@ export class WorkspaceManager {
     const memoryDir = resolve(runtimeDir, "memory");
     const tempDir = resolve(runtimeDir, "tmp");
     const attachmentsDir = resolve(runtimeDir, "attachments");
+    const outboxDir = resolve(runtimeDir, "outbox");
     this.ensureRuntimeDirectory(memoryDir, 0o700);
     this.ensureRuntimeDirectory(tempDir, 0o700);
     this.ensureRuntimeDirectory(attachmentsDir, 0o700);
+    this.resetRuntimeDirectory(outboxDir, 0o700);
     const legacyMemoryPath = resolve(runtimeDir, "PROJECT_MEMORY.md");
     if (existsSync(legacyMemoryPath)) {
       // Version 8.3.0 stored this generated snapshot directly under runtimeDir.
@@ -531,8 +639,22 @@ export class WorkspaceManager {
         "If this run establishes a durable project fact, append it to " +
         "`.summing-runtime/memory/PROJECT_MEMORY.md`. Do not rewrite or delete existing memory. " +
         "Conversation-specific details belong in the Codex thread, not in project memory. " +
-        "Change SUMMING itself only when the administrator directly asks.\n",
+        "Change SUMMING itself only when the administrator directly asks.\n\n" +
+        "## Telegram file delivery\n\n" +
+        "When the user asks for a generated or downloadable file, write each final deliverable " +
+        "as a regular file directly inside `.summing-runtime/outbox/`. SUMMING uploads those " +
+        "files to Telegram after a successful run. Do not place directories, symlinks, temporary " +
+        "work, extracted input, or more than 10 files there. Their combined size must not exceed " +
+        `${this.config.maximumAttachmentBytes} bytes. Never describe a local filesystem path as ` +
+        "a clickable or externally accessible link.\n",
     );
+  }
+
+  private resetRuntimeDirectory(path: string, mode: number): void {
+    this.ensureRuntimeDirectory(path, mode);
+    for (const entry of readdirSync(path)) {
+      rmSync(resolve(path, entry), { recursive: true, force: true });
+    }
   }
 
   private ensureRuntimeDirectory(path: string, mode: number): void {

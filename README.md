@@ -76,6 +76,9 @@ Team Space: создаётся при подключении командног�
 - Telegram documents до 20 МБ скачиваются в приватный spool и перед Run
   копируются в исключённый из Git `.summing-runtime/attachments`; ZIP сначала
   инспектируется как архив и не распаковывается автоматически на хосте;
+- готовые документы editor-run складывает в `.summing-runtime/outbox`, после чего
+  runtime проверяет обычный файл, symlink/hardlink boundary, число и совокупный
+  размер и отправляет его пользователю через Telegram `sendDocument`;
 - voice/audio по умолчанию транскрибируются через OpenAI `gpt-transcribe`;
   Groq Whisper доступен как опция, в Codex передаётся только текст, а локальный
   аудиофайл удаляется;

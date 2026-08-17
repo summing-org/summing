@@ -136,6 +136,7 @@ test("thread and turn requests use official v2 shapes", async (context) => {
           "/tmp/project/workspace/.summing-runtime/memory": "write",
           "/tmp/project/workspace/.summing-runtime/tmp": "write",
           "/tmp/project/workspace/.summing-runtime/attachments": "read",
+          "/tmp/project/workspace/.summing-runtime/outbox": "write",
           "/tmp/project-git": "write",
           "/tmp/project-git/worktrees/project-workspace": "write",
           [canonicalReleaseBin]: "read",
@@ -285,6 +286,7 @@ test("thread and turn requests use official v2 shapes", async (context) => {
   assert.equal(emptyFilesystem["/tmp/empty-project/.summing-runtime/memory"], "write");
   assert.equal(emptyFilesystem["/tmp/empty-project/.summing-runtime/tmp"], "write");
   assert.equal(emptyFilesystem["/tmp/empty-project/.summing-runtime/attachments"], "read");
+  assert.equal(emptyFilesystem["/tmp/empty-project/.summing-runtime/outbox"], "write");
   const writeProfile = ((threadParams.config as JsonRecord).permissions as JsonRecord)[
     "summing-project"
   ] as JsonRecord;

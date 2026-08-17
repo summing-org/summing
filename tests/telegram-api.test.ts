@@ -60,6 +60,50 @@ test("sendMessage supports HTML mentions in a Telegram topic", async () => {
   }
 });
 
+test("sendDocument uploads bytes as multipart and preserves Telegram reply scope", async () => {
+  const api = new TelegramAPI("secret-token");
+  const originalFetch = globalThis.fetch;
+  let requestedUrl = "";
+  globalThis.fetch = async (input, init) => {
+    requestedUrl = String(input);
+    assert.equal(init?.method, "POST");
+    assert.ok(init?.body instanceof FormData);
+    const form = init.body;
+    assert.equal(form.get("chat_id"), "-10042");
+    assert.equal(form.get("message_thread_id"), "17");
+    assert.equal(
+      form.get("reply_parameters"),
+      JSON.stringify({ message_id: 18, allow_sending_without_reply: true }),
+    );
+    const document = form.get("document");
+    assert.ok(document instanceof Blob);
+    assert.equal(document.type, "application/pdf");
+    assert.equal((document as Blob & { name: string }).name, "report.pdf");
+    assert.deepEqual([...new Uint8Array(await document.arrayBuffer())], [1, 2, 3, 4]);
+    return new Response(JSON.stringify({ ok: true, result: { message_id: 19 } }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  try {
+    assert.equal(
+      await api.sendDocument(
+        -10042,
+        Uint8Array.from([1, 2, 3, 4]),
+        "report.pdf",
+        "application/pdf",
+        { topicId: 17, replyTo: 18 },
+      ),
+      19,
+    );
+    assert.equal(requestedUrl, "https://api.telegram.org/botsecret-token/sendDocument");
+  } finally {
+    globalThis.fetch = originalFetch;
+    await api.close();
+  }
+});
+
 test("editMessage forwards Telegram HTML parse mode", async () => {
   const api = new TelegramAPI("token");
   let payload: Record<string, unknown> = {};

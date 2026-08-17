@@ -28,16 +28,14 @@ export class TelegramAPI {
     this.controller.abort();
   }
 
-  async call(method: string, payload: TelegramObject): Promise<unknown> {
+  private async request(method: string, init: () => RequestInit): Promise<unknown> {
     for (let attempt = 0; attempt < 4; attempt += 1) {
       let response: Response;
       let data: TelegramObject | null;
       try {
         if (this.closed) throw new TelegramError("Telegram client is closed");
         response = await fetch(`${this.baseUrl}/${method}`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(payload),
+          ...init(),
           signal: AbortSignal.any([this.controller.signal, AbortSignal.timeout(70_000)]),
         });
         data = record(await response.json());
@@ -62,6 +60,14 @@ export class TelegramAPI {
       return data.result;
     }
     throw new TelegramError(`Telegram ${method} exhausted retries`);
+  }
+
+  async call(method: string, payload: TelegramObject): Promise<unknown> {
+    return this.request(method, () => ({
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    }));
   }
 
   async getUpdates(offset: number | null): Promise<TelegramObject[]> {
@@ -171,7 +177,44 @@ export class TelegramAPI {
     return messageId;
   }
 
-  async sendChatAction(chatId: number, action: "typing", topicId = 0): Promise<void> {
+  async sendDocument(
+    chatId: number,
+    data: Uint8Array,
+    fileName: string,
+    mimeType: string,
+    options: {
+      topicId?: number;
+      replyTo?: number;
+    } = {},
+  ): Promise<number> {
+    const buffer = new ArrayBuffer(data.byteLength);
+    new Uint8Array(buffer).set(data);
+    const document = new Blob([buffer], { type: mimeType || "application/octet-stream" });
+    const result = record(await this.request("sendDocument", () => {
+      const form = new FormData();
+      form.set("chat_id", String(chatId));
+      form.set("document", document, fileName);
+      if (options.topicId) form.set("message_thread_id", String(options.topicId));
+      if (options.replyTo) {
+        form.set("reply_parameters", JSON.stringify({
+          message_id: options.replyTo,
+          allow_sending_without_reply: true,
+        }));
+      }
+      return { method: "POST", body: form };
+    }));
+    const messageId = Number(result?.message_id);
+    if (!Number.isInteger(messageId) || messageId <= 0) {
+      throw new TelegramError("sendDocument did not return message_id");
+    }
+    return messageId;
+  }
+
+  async sendChatAction(
+    chatId: number,
+    action: "typing" | "upload_document",
+    topicId = 0,
+  ): Promise<void> {
     const payload: TelegramObject = { chat_id: chatId, action };
     if (topicId) payload.message_thread_id = topicId;
     await this.call("sendChatAction", payload);
