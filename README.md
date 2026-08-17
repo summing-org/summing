@@ -73,9 +73,10 @@ Team Space: создаётся при подключении командног�
 - ответы участникам идут через отдельный persistent read-only thread без записи,
   сети, web search, plugins/connectors и доступа к runtime memory или файлам
   секретов;
-- Telegram documents до 20 МБ скачиваются в приватный spool и перед Run
-  копируются в исключённый из Git `.summing-runtime/attachments`; ZIP сначала
-  инспектируется как архив и не распаковывается автоматически на хосте;
+- Telegram-фото и documents до 20 МБ скачиваются в приватный spool и перед Run
+  копируются в исключённый из Git `.summing-runtime/attachments`; фотографии
+  передаются Codex как visual input, HEIC/HEIF предварительно преобразуются в JPEG,
+  а ZIP сначала инспектируется как архив и не распаковывается автоматически на хосте;
 - готовые документы editor-run складывает в `.summing-runtime/outbox`, после чего
   runtime проверяет обычный файл, symlink/hardlink boundary, число и совокупный
   размер и отправляет его пользователю через Telegram `sendDocument`;

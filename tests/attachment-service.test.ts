@@ -12,7 +12,7 @@ import {
 } from "../src/attachment-service.js";
 import { TelegramAPI } from "../src/telegram-api.js";
 
-test("recognizes Telegram documents, native audio, and audio documents", () => {
+test("recognizes Telegram documents, audio, photos, and image documents", () => {
   assert.equal(
     telegramAttachment({
       message_id: 1,
@@ -45,6 +45,33 @@ test("recognizes Telegram documents, native audio, and audio documents", () => {
     })?.kind,
     "audio",
   );
+  assert.deepEqual(
+    telegramAttachment({
+      message_id: 4,
+      photo: [
+        { file_id: "small", width: 90, height: 90, file_size: 400 },
+        { file_id: "large", width: 1280, height: 960, file_size: 7_000 },
+      ],
+    }),
+    {
+      kind: "image",
+      fileId: "large",
+      fileName: "photo-4.jpg",
+      mimeType: "image/jpeg",
+      announcedSize: 7_000,
+    },
+  );
+  assert.equal(
+    telegramAttachment({
+      message_id: 5,
+      document: {
+        file_id: "iphone-photo",
+        file_name: "IMG_2410.HEIC",
+        mime_type: "image/heic",
+      },
+    })?.kind,
+    "image",
+  );
 });
 
 test("stores Telegram attachments in the private spool and removes them", async () => {
@@ -75,6 +102,44 @@ test("stores Telegram attachments in the private spool and removes them", async 
     assert.ok(existsSync(attachment.filePath));
     service.remove([attachment]);
     assert.equal(existsSync(attachment.filePath), false);
+  } finally {
+    await telegram.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("converts HEIC image documents to JPEG before storing them", async () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-heic-attachments-"));
+  const telegram = new TelegramAPI("token");
+  telegram.downloadFile = async () => ({
+    data: new Uint8Array([0, 0, 0, 24]),
+    filePath: "documents/IMG_2410.HEIC",
+    fileSize: 4,
+  });
+  let converterInput: number[] = [];
+  const service = new AttachmentService(telegram, root, 20, async (data) => {
+    converterInput = [...data];
+    return new Uint8Array([0xff, 0xd8, 0xff, 0xd9]);
+  });
+  try {
+    const attachment = await service.download(
+      {
+        message_id: 8,
+        document: {
+          file_id: "heic-file",
+          file_name: "IMG_2410.HEIC",
+          mime_type: "image/heic",
+          file_size: 4,
+        },
+      },
+      "tg-heic",
+    );
+    assert.ok(attachment);
+    assert.deepEqual(converterInput, [0, 0, 0, 24]);
+    assert.equal(attachment.kind, "image");
+    assert.equal(attachment.fileName, "IMG_2410.jpg");
+    assert.equal(attachment.mimeType, "image/jpeg");
+    assert.equal(attachment.size, 4);
   } finally {
     await telegram.close();
     rmSync(root, { recursive: true, force: true });

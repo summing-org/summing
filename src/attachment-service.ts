@@ -9,9 +9,10 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, extname, relative, resolve, sep } from "node:path";
+import { convertHeicToJpeg, type HeicConverter } from "./heic-converter.js";
 import { TelegramAPI, TelegramError, type TelegramObject } from "./telegram-api.js";
 
-export type AttachmentKind = "document" | "audio";
+export type AttachmentKind = "document" | "audio" | "image";
 
 export interface StoredAttachment {
   kind: AttachmentKind;
@@ -47,6 +48,35 @@ const AUDIO_EXTENSIONS = new Set([
   ".webm",
 ]);
 
+const IMAGE_EXTENSIONS = new Set([
+  ".gif",
+  ".heic",
+  ".heif",
+  ".jpeg",
+  ".jpg",
+  ".png",
+  ".webp",
+]);
+
+const IMAGE_MIME_TYPES = new Set([
+  "image/gif",
+  "image/heic",
+  "image/heic-sequence",
+  "image/heif",
+  "image/heif-sequence",
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+]);
+
+const HEIC_EXTENSIONS = new Set([".heic", ".heif"]);
+const HEIC_MIME_TYPES = new Set([
+  "image/heic",
+  "image/heic-sequence",
+  "image/heif",
+  "image/heif-sequence",
+]);
+
 function record(value: unknown): TelegramObject | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as TelegramObject)
@@ -76,9 +106,44 @@ function inferExtension(mimeType: string): string {
     "audio/webm": ".webm",
     "application/pdf": ".pdf",
     "application/zip": ".zip",
+    "image/gif": ".gif",
+    "image/heic": ".heic",
+    "image/heic-sequence": ".heic",
+    "image/heif": ".heif",
+    "image/heif-sequence": ".heif",
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
     "text/plain": ".txt",
   };
   return extensions[normalized] ?? "";
+}
+
+function largestTelegramPhoto(message: TelegramObject): TelegramObject | null {
+  if (!Array.isArray(message.photo)) return null;
+  let largest: TelegramObject | null = null;
+  for (const item of message.photo) {
+    const photo = record(item);
+    if (!photo || typeof photo.file_id !== "string") continue;
+    const pixels = Number(photo.width ?? 0) * Number(photo.height ?? 0);
+    const largestPixels = Number(largest?.width ?? 0) * Number(largest?.height ?? 0);
+    const size = Number(photo.file_size ?? 0);
+    const largestSize = Number(largest?.file_size ?? 0);
+    if (!largest || pixels > largestPixels || (pixels === largestPixels && size > largestSize)) {
+      largest = photo;
+    }
+  }
+  return largest;
+}
+
+function isHeic(fileName: string, mimeType: string): boolean {
+  return HEIC_MIME_TYPES.has(mimeType) || HEIC_EXTENSIONS.has(extname(fileName).toLowerCase());
+}
+
+function jpegFileName(fileName: string): string {
+  const extension = extname(fileName);
+  const stem = extension ? fileName.slice(0, -extension.length) : fileName;
+  return safeFileName(`${stem || "photo"}.jpg`, "photo.jpg");
 }
 
 export function telegramAttachment(message: TelegramObject): TelegramFileCandidate | null {
@@ -86,16 +151,25 @@ export function telegramAttachment(message: TelegramObject): TelegramFileCandida
   const voice = record(message.voice);
   const audio = record(message.audio);
   const document = record(message.document);
-  const value = voice ?? audio ?? document;
+  const photo = largestTelegramPhoto(message);
+  const value = voice ?? audio ?? document ?? photo;
   if (!value || typeof value.file_id !== "string") return null;
-  const mimeType = String(value.mime_type ?? "application/octet-stream").trim().toLowerCase();
+  const nativeImage = Boolean(photo && value === photo);
+  const mimeType = nativeImage
+    ? "image/jpeg"
+    : String(value.mime_type ?? "application/octet-stream").trim().toLowerCase();
   const originalName = String(value.file_name ?? "").trim();
-  const extension = extname(originalName).toLowerCase() || inferExtension(mimeType);
+  const extension = extname(originalName).toLowerCase() || inferExtension(mimeType) ||
+    (nativeImage ? ".jpg" : "");
   const nativeAudio = Boolean(voice || audio);
-  const kind: AttachmentKind = nativeAudio || mimeType.startsWith("audio/") || AUDIO_EXTENSIONS.has(extension)
-    ? "audio"
-    : "document";
-  const fallback = `${kind === "audio" ? "audio" : "document"}-${messageId || "telegram"}${extension}`;
+  const kind: AttachmentKind =
+    nativeAudio || mimeType.startsWith("audio/") || AUDIO_EXTENSIONS.has(extension)
+      ? "audio"
+      : nativeImage || IMAGE_MIME_TYPES.has(mimeType) || IMAGE_EXTENSIONS.has(extension)
+        ? "image"
+        : "document";
+  const fallbackPrefix = kind === "audio" ? "audio" : kind === "image" ? "photo" : "document";
+  const fallback = `${fallbackPrefix}-${messageId || "telegram"}${extension}`;
   return {
     kind,
     fileId: value.file_id,
@@ -112,6 +186,7 @@ export class AttachmentService {
     readonly telegram: TelegramAPI,
     readonly dataDir: string,
     readonly maximumBytes = 20_000_000,
+    readonly heicConverter: HeicConverter = convertHeicToJpeg,
   ) {
     this.spoolRoot = resolve(dataDir, "attachments");
   }
@@ -134,19 +209,36 @@ export class AttachmentService {
       }
       throw error;
     }
-    const extension = extname(candidate.fileName) || extname(downloaded.filePath);
-    const fileName = safeFileName(candidate.fileName, `telegram-file${extension}`);
+    let data = downloaded.data;
+    let mimeType = candidate.mimeType;
+    let candidateName = candidate.fileName;
+    if (candidate.kind === "image" && isHeic(candidate.fileName, candidate.mimeType)) {
+      try {
+        data = await this.heicConverter(downloaded.data);
+      } catch {
+        throw new AttachmentError(
+          "Не удалось преобразовать HEIC/HEIF в JPEG. Попробуйте отправить фото через «Фото или видео».",
+        );
+      }
+      mimeType = "image/jpeg";
+      candidateName = jpegFileName(candidate.fileName);
+    }
+    if (data.byteLength > this.maximumBytes) {
+      throw new AttachmentError("Файл слишком большой: Telegram-бот может обработать не более 20 МБ.");
+    }
+    const extension = extname(candidateName) || extname(downloaded.filePath);
+    const fileName = safeFileName(candidateName, `telegram-file${extension}`);
     this.ensurePrivateDirectory(this.spoolRoot);
     const conversationDir = resolve(this.spoolRoot, conversationId);
     this.ensurePrivateDirectory(conversationDir);
     const path = resolve(conversationDir, `${randomUUID()}-${fileName}`);
-    writeFileSync(path, downloaded.data, { flag: "wx", mode: 0o600 });
+    writeFileSync(path, data, { flag: "wx", mode: 0o600 });
     return {
       kind: candidate.kind,
       fileName,
-      mimeType: candidate.mimeType,
+      mimeType,
       filePath: path,
-      size: downloaded.fileSize,
+      size: data.byteLength,
     };
   }
 

@@ -69,6 +69,7 @@ interface WorkspacePermissionOptions {
 interface TurnOptions
   extends Pick<WorkspacePermissionOptions, "gitMetadataRoots" | "readableRoots" | "readOnly"> {
   effort?: string;
+  localImagePaths?: string[];
   model?: string;
   networkAccess?: boolean;
   outputSchema?: JsonRecord;
@@ -369,9 +370,13 @@ export class CodexAppServer extends EventEmitter {
     cwd: string,
     options: TurnOptions = {},
   ): Promise<string> {
+    const input: JsonRecord[] = [{ type: "text", text: prompt }];
+    for (const path of new Set(options.localImagePaths ?? [])) {
+      input.push({ type: "localImage", path: resolve(path) });
+    }
     const params: JsonRecord = {
       threadId,
-      input: [{ type: "text", text: prompt }],
+      input,
       cwd,
       runtimeWorkspaceRoots: this.runtimeWorkspaceRoots(cwd, options),
       approvalPolicy: "never",

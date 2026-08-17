@@ -3390,6 +3390,9 @@ export class SummingRuntime {
           effort: this.config.effort,
           networkAccess: access === "write" && this.config.networkAccess,
           gitMetadataRoots: prepared.gitMetadataRoots,
+          localImagePaths: materializedAttachments
+            .filter((attachment) => attachment.kind === "image")
+            .map((attachment) => resolve(prepared.path, attachment.relativePath)),
           readableRoots: [prepared.readableRoot],
           readOnly: access === "read-only",
         },
@@ -3536,6 +3539,9 @@ export class SummingRuntime {
         `- \`${attachment.relativePath}\` (${attachment.mimeType || "unknown MIME"}, ` +
           `${attachment.size} bytes, original name: ${JSON.stringify(attachment.fileName)})`,
       );
+    }
+    if (attachments.some((attachment) => attachment.kind === "image")) {
+      lines.push("Image attachments are also supplied to the turn as visual inputs.");
     }
     lines.push(
       "Inspect these files as needed. For archives, list entries before reading them. " +

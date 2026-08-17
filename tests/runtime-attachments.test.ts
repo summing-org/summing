@@ -52,6 +52,15 @@ test("voice is transcribed through the configured provider while documents remai
         size: 4,
       };
     }
+    if (message.photo) {
+      return {
+        kind: "image",
+        fileName: "photo-13.jpg",
+        mimeType: "image/jpeg",
+        filePath: join(root, "photo-13.jpg"),
+        size: 8,
+      };
+    }
     return {
       kind: "document",
       fileName: "source.zip",
@@ -95,8 +104,18 @@ test("voice is transcribed through the configured provider while documents remai
         file_size: 27,
       },
     });
+    await handleMessage({
+      message_id: 13,
+      from: { id: 1 },
+      chat: { id: 1, type: "private" },
+      caption: "Добавь к фото смартфон",
+      photo: [
+        { file_id: "photo-small", width: 90, height: 90, file_size: 2 },
+        { file_id: "photo-large", width: 1280, height: 960, file_size: 8 },
+      ],
+    });
     const pending = runtime.state.pendingAll(conversation.id);
-    assert.equal(pending.length, 3);
+    assert.equal(pending.length, 4);
     assert.match(pending[0]?.text ?? "", /Транскрипция аудио «voice\.ogg»/);
     assert.match(pending[0]?.text ?? "", /Нужно проверить этот архив/);
     assert.deepEqual(pending[0]?.attachments, []);
@@ -107,6 +126,8 @@ test("voice is transcribed through the configured provider while documents remai
     assert.equal(pending[1]?.text, "Посмотри эту программу");
     assert.deepEqual(pending[1]?.attachments.map((item) => item.fileName), ["source.zip"]);
     assert.match(pending[2]?.text ?? "", /Изучи приложенный файл «source\.zip»/);
+    assert.equal(pending[3]?.text, "Добавь к фото смартфон");
+    assert.deepEqual(pending[3]?.attachments.map((item) => item.kind), ["image"]);
   } finally {
     runtime.state.close();
     await runtime.telegram.close();

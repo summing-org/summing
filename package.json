@@ -1,6 +1,6 @@
 {
   "name": "summing",
-  "version": "9.8.7",
+  "version": "9.8.8",
   "description": "Persistent Telegram agent backed by the official Codex App Server",
   "type": "module",
   "private": true,
@@ -20,9 +20,11 @@
     "codex:types": "codex app-server generate-ts --experimental --out .codex-protocol"
   },
   "dependencies": {
+    "heic-convert": "^2.1.0",
     "smol-toml": "^1.7.1"
   },
   "devDependencies": {
+    "@types/heic-convert": "^2.1.1",
     "@types/node": "^24.13.3",
     "typescript": "^5.9.3"
   },

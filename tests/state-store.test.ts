@@ -33,10 +33,10 @@ test("binding, input queues, and Telegram offset", () => {
       55,
       "ambient",
       [{
-        kind: "document",
-        fileName: "source.zip",
-        mimeType: "application/zip",
-        filePath: "/private/spool/source.zip",
+        kind: "image",
+        fileName: "owner-photo.jpg",
+        mimeType: "image/jpeg",
+        filePath: "/private/spool/owner-photo.jpg",
         size: 27,
       }],
       { fileName: "voice.ogg", text: "Проверить транскрипцию" },
@@ -55,7 +55,7 @@ test("binding, input queues, and Telegram offset", () => {
       [
         [steerId, "write", 0, "direct", [], null],
         [followId, "write", 0, "direct", [], null],
-        [viewerId, "read-only", 55, "ambient", ["source.zip"], "voice.ogg"],
+        [viewerId, "read-only", 55, "ambient", ["owner-photo.jpg"], "voice.ogg"],
       ],
     );
     assert.deepEqual(store.pendingAll(conversation.id)[2]?.audioTranscript, {

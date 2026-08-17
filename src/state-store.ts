@@ -284,7 +284,9 @@ function storedAttachments(value: unknown): StoredAttachment[] {
     if (item === null || typeof item !== "object" || Array.isArray(item)) continue;
     const candidate = item as Record<string, unknown>;
     if (
-      (candidate.kind !== "document" && candidate.kind !== "audio") ||
+      (candidate.kind !== "document" &&
+        candidate.kind !== "audio" &&
+        candidate.kind !== "image") ||
       typeof candidate.fileName !== "string" ||
       typeof candidate.mimeType !== "string" ||
       typeof candidate.filePath !== "string" ||

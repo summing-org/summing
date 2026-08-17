@@ -105,6 +105,10 @@ test("thread and turn requests use official v2 shapes", async (context) => {
   };
   const turnId = await client.startTurn(threadId, "inspect", "/tmp/project/workspace", {
     ...permissionOptions,
+    localImagePaths: [
+      "/tmp/project/workspace/.summing-runtime/attachments/photo.jpg",
+      "/tmp/project/workspace/.summing-runtime/attachments/photo.jpg",
+    ],
     outputSchema,
   });
   assert.deepEqual([threadId, turnId], ["thread-1", "turn-1"]);
@@ -185,6 +189,13 @@ test("thread and turn requests use official v2 shapes", async (context) => {
     "/tmp/project-git/worktrees/project-workspace",
   ]);
   assert.deepEqual(turnParams.outputSchema, outputSchema);
+  assert.deepEqual(turnParams.input, [
+    { type: "text", text: "inspect" },
+    {
+      type: "localImage",
+      path: "/tmp/project/workspace/.summing-runtime/attachments/photo.jpg",
+    },
+  ]);
   assert.equal(Object.hasOwn(turnParams, "environments"), false);
 
   await client.resumeThread(threadId, "/tmp/project/workspace", permissionOptions);
