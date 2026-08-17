@@ -52,6 +52,26 @@ valid_marker() {
     [ "$(stat -c '%u:%a' "${marker}" 2>/dev/null || true)" = "0:600" ]
 }
 
+normalize_summing_account() {
+  local uid account_home account_shell
+  uid=$(id -u summing)
+  if [ "${uid}" -eq 0 ]; then
+    printf '%s\n' 'The summing service account must not be root.' >&2
+    exit 2
+  fi
+  account_home=$(getent passwd summing | cut -d: -f6)
+  account_shell=$(getent passwd summing | cut -d: -f7)
+  if [ "${account_home}" != /var/lib/summing ] || \
+    [ "${account_shell}" != /usr/sbin/nologin ]; then
+    if pgrep -u summing >/dev/null 2>&1; then
+      printf '%s\n' 'Stop processes owned by summing before normalizing its service account.' >&2
+      exit 2
+    fi
+    usermod --home /var/lib/summing --shell /usr/sbin/nologin summing
+  fi
+  install -d -o summing -g summing -m 0750 /var/lib/summing
+}
+
 if [ -e "${marker}" ] || [ -L "${marker}" ]; then
   if ! valid_marker; then
     printf '%s\n' 'Existing provisioning marker is unsafe.' >&2
@@ -62,6 +82,7 @@ if [ -e "${marker}" ] || [ -L "${marker}" ]; then
     printf '%s\n' 'Provisioning marker exists but the host is incomplete.' >&2
     exit 2
   fi
+  normalize_summing_account
   existing_node_major=$(node -p 'Number(process.versions.node.split(".")[0])')
   if [ "${existing_node_major}" -lt 24 ]; then
     printf '%s\n' 'Provisioning marker exists but Node.js is older than 24.' >&2
@@ -124,8 +145,8 @@ if ! id summing >/dev/null 2>&1; then
     --shell /usr/sbin/nologin \
     summing
 fi
+normalize_summing_account
 
-install -d -o summing -g summing -m 0750 /var/lib/summing
 install -d -o summing -g summing -m 0700 /var/lib/summing/data
 install -d -o summing -g summing -m 0700 /var/lib/summing/data/codex
 install -d -o summing -g summing -m 0700 /var/lib/summing/data/worktrees

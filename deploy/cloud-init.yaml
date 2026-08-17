@@ -76,7 +76,13 @@ write_files:
           --shell /usr/sbin/nologin \
           summing
       fi
+      if [ "$(id -u summing)" -eq 0 ]; then
+        printf '%s\n' 'The summing service account must not be root.' >&2
+        exit 2
+      fi
+      usermod --home /var/lib/summing --shell /usr/sbin/nologin summing
 
+      install -d -o summing -g summing -m 0750 /var/lib/summing
       install -d -o summing -g summing -m 0700 /var/lib/summing/data
       install -d -o summing -g summing -m 0700 /var/lib/summing/data/codex
       install -d -o summing -g summing -m 0700 /var/lib/summing/data/worktrees

@@ -22,6 +22,7 @@ target=
 secrets=
 origin=
 source_key=
+source_hostname=
 identity=
 ssh_port=22
 provision=0
@@ -96,6 +97,28 @@ case "${origin}" in
     fi
     ;;
 esac
+case "${origin}" in
+  ssh://*@*/*)
+    source_alias=${origin#ssh://*@}
+    source_alias=${source_alias%%/*}
+    source_alias=${source_alias%%:*}
+    ;;
+  *@*:*)
+    source_alias=${origin#*@}
+    source_alias=${source_alias%%:*}
+    ;;
+  *) source_alias= ;;
+esac
+if [ -n "${source_alias}" ]; then
+  source_hostname=$(ssh -G "${source_alias}" 2>/dev/null | \
+    awk '$1 == "hostname" { print $2; exit }')
+  case "${source_hostname}" in
+    *[!A-Za-z0-9.-]*|'')
+      printf '%s\n' 'Could not derive a safe source HostName from local SSH configuration.' >&2
+      exit 2
+      ;;
+  esac
+fi
 
 private_mode() {
   local path=$1 mode
@@ -243,7 +266,10 @@ remote_args=(
 if [ -n "${source_key}" ]; then
   scp -q "${scp_args[@]}" "${source_key}" "${target}:${remote_dir}/source-key"
   ssh "${ssh_args[@]}" "${target}" chmod 0600 "${remote_dir}/source-key"
-  remote_args+=(--source-key "${remote_dir}/source-key")
+  remote_args+=(
+    --source-key "${remote_dir}/source-key"
+    --source-hostname "${source_hostname}"
+  )
 fi
 printf -v remote_command '%q ' "${remote_args[@]}"
 ssh "${ssh_args[@]}" "${target}" "${remote_command}"

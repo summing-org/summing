@@ -7,6 +7,7 @@ Usage: secure-bootstrap --bundle FILE --secrets FILE --origin URL [options]
 
 Options:
   --source-key FILE       SSH deploy key used only for the SUMMING source origin
+  --source-hostname HOST  Real SSH host behind an operator-side origin alias
   --expected-commit SHA   Require this exact release commit
   --consume-inputs        Delete /run installer inputs whenever bootstrap exits
 EOF
@@ -16,15 +17,19 @@ bundle=
 secrets=
 origin=
 source_key=
+source_hostname=
 expected_commit=
 consume_inputs=0
 bundle_verify_dir=
+caddy_candidate=
+install_summary=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --bundle) bundle=${2:-}; shift 2 ;;
     --secrets) secrets=${2:-}; shift 2 ;;
     --origin) origin=${2:-}; shift 2 ;;
     --source-key) source_key=${2:-}; shift 2 ;;
+    --source-hostname) source_hostname=${2:-}; shift 2 ;;
     --expected-commit) expected_commit=${2:-}; shift 2 ;;
     --consume-inputs) consume_inputs=1; shift ;;
     --help|-h) usage; exit 0 ;;
@@ -41,6 +46,8 @@ remove_bundle_verify_dir() {
 
 consume_install_inputs() {
   remove_bundle_verify_dir
+  case "${caddy_candidate}" in /run/summing-Caddyfile.*) rm -f -- "${caddy_candidate}" ;; esac
+  case "${install_summary}" in /run/summing-install-summary.*) rm -f -- "${install_summary}" ;; esac
   if [ "${consume_inputs}" -ne 1 ]; then return; fi
   case "${secrets}" in /run/*) rm -f -- "${secrets}" ;; esac
   case "${source_key}" in /run/*) rm -f -- "${source_key}" ;; esac
@@ -107,6 +114,12 @@ if [ -L "${bundle}" ] || [ ! -f "${bundle}" ]; then
 fi
 if [ -n "${source_key}" ]; then
   private_regular_file "${source_key}" 'Source deploy key'
+  case "${source_hostname}" in
+    *[!A-Za-z0-9.-]*)
+      printf '%s\n' 'Source HostName must contain only DNS hostname or IPv4 characters.' >&2
+      exit 2
+      ;;
+  esac
 fi
 bundle_verify_dir=$(mktemp -d /run/summing-bundle-verify.XXXXXX)
 chmod 0700 "${bundle_verify_dir}"
@@ -123,6 +136,9 @@ installation_id=$(jq -er '.installationId' "${secrets}")
 case "${installation_id}" in
   *[!a-z0-9-]*|'') printf '%s\n' 'Invalid installationId.' >&2; exit 2 ;;
 esac
+caddy_candidate=$(mktemp /run/summing-Caddyfile.XXXXXX)
+install_summary=$(mktemp /run/summing-install-summary.XXXXXX)
+chmod 0600 "${caddy_candidate}" "${install_summary}"
 
 repo_dir=/opt/summing
 state_dir=/var/lib/summing
@@ -131,7 +147,6 @@ install_state_dir=/var/lib/summing-install
 install_state=${install_state_dir}/install-state.json
 env_file=/etc/summing/summing.env
 config_file=${data_dir}/config.toml
-caddy_candidate=/run/summing-Caddyfile
 deploy_env_file=/etc/summing/deploy.env
 
 if [ ! -f "${install_state}" ]; then
@@ -234,11 +249,13 @@ if [ -n "${source_key}" ]; then
     printf '%s\n' 'Could not derive a safe SSH host from source origin.' >&2
     exit 2
   fi
+  if [ -z "${source_hostname}" ]; then source_hostname=${source_host}; fi
   install -d -o summing -g summing -m 0700 /var/lib/summing/.ssh
   install -o summing -g summing -m 0400 "${source_key}" /var/lib/summing/.ssh/source_deploy_key
   ssh_config=$(mktemp /var/lib/summing/.ssh/config.XXXXXX)
   printf '%s\n' \
     "Host ${source_host}" \
+    "  HostName ${source_hostname}" \
     '  IdentityFile /var/lib/summing/.ssh/source_deploy_key' \
     '  IdentitiesOnly yes' \
     '  StrictHostKeyChecking accept-new' \
@@ -254,7 +271,7 @@ fi
   --env-output "${env_file}" \
   --config-output "${config_file}" \
   --caddy-output "${caddy_candidate}" \
-  >/run/summing-install-summary.json
+  >"${install_summary}"
 chown root:summing "${env_file}"
 chmod 0640 "${env_file}"
 chown summing:summing "${config_file}"
@@ -265,7 +282,7 @@ if [ -s "${caddy_candidate}" ]; then
     printf '%s\n' 'Caddy is required when viewer.domain is configured.' >&2
     exit 2
   fi
-  caddy validate --config "${caddy_candidate}"
+  caddy validate --config "${caddy_candidate}" --adapter caddyfile
   install -o root -g root -m 0644 "${caddy_candidate}" /etc/caddy/Caddyfile
   systemctl enable caddy.service
   systemctl restart caddy.service

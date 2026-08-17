@@ -121,6 +121,7 @@ test("provisioning and secure bootstrap assets keep application secrets out of m
   }
   assert.match(cloudInit, /\n  - caddy\n/);
   assert.match(cloudInit, /\/etc\/summing\/provisioned/);
+  assert.match(cloudInit, /usermod --home \/var\/lib\/summing --shell \/usr\/sbin\/nologin summing/);
   assert.match(cloudInit, /ufw allow 443\/tcp/);
   assert.doesNotMatch(cloudInit, /TELEGRAM_BOT_TOKEN=|OPENAI_API_KEY=|SUMMING_S3_SECRET_ACCESS_KEY=/);
   assert.match(bootstrap, /Refusing clean install over existing durable state/);
@@ -129,9 +130,13 @@ test("provisioning and secure bootstrap assets keep application secrets out of m
   assert.match(bootstrap, /git -C "\$\{bundle_verify_dir\}" bundle verify/);
   assert.match(bootstrap, /install -o summing -g summing -m 0600 "\$\{bundle\}" "\$\{staged_bundle\}"/);
   assert.match(bootstrap, /sudo -u summing git clone --no-local "\$\{staged_bundle\}"/);
+  assert.match(bootstrap, /caddy validate --config "\$\{caddy_candidate\}" --adapter caddyfile/);
+  assert.match(bootstrap, /"  HostName \$\{source_hostname\}"/);
   assert.match(bootstrap, /SUMMING_DEPLOY_EXPECTED_REMOTE=\$\{origin\}/);
   assert.match(bootstrap, /consume_install_inputs/);
   assert.match(bootstrap, /trap consume_install_inputs EXIT/);
+  assert.match(bootstrap, /mktemp \/run\/summing-Caddyfile\.XXXXXX/);
+  assert.match(bootstrap, /mktemp \/run\/summing-install-summary\.XXXXXX/);
   assert.match(bootstrap, /curl --fail --silent --show-error http:\/\/127\.0\.0\.1:8765\/health/);
   assert.doesNotMatch(bootstrap, /rm\s+-rf/);
   assert.match(installer, /Refusing to install from a checkout with tracked changes/);
@@ -150,10 +155,13 @@ test("provisioning and secure bootstrap assets keep application secrets out of m
   assert.match(installer, /git bundle create "\$\{bundle\}" HEAD/);
   assert.match(installer, /cloud-init status --wait/);
   assert.match(installer, /--consume-inputs/);
+  assert.match(installer, /ssh -G "\$\{source_alias\}"/);
+  assert.match(installer, /--source-hostname "\$\{source_hostname\}"/);
   assert.match(provisioner, /Host provisioning requires Ubuntu 24\.04/);
   assert.match(provisioner, /Host provisioning requires x86_64/);
   assert.match(provisioner, /Refusing to provision over existing SUMMING state/);
   assert.match(provisioner, /install -d -o summing -g summing -m 0750 \/var\/lib\/summing/);
+  assert.match(provisioner, /usermod --home \/var\/lib\/summing --shell \/usr\/sbin\/nologin summing/);
   assert.match(provisioner, /node_version=v24\.18\.0/);
   assert.match(provisioner, /SHASUMS256\.txt/);
   assert.match(provisioner, /ufw allow "\$\{ssh_port\}\/tcp"/);
