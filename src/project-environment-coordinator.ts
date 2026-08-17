@@ -53,7 +53,11 @@ async function completedJob(
       .find((candidate) => candidate.id === jobId);
     if (!job) throw new Error(`migration verification job ${jobId} disappeared`);
     if (job.status === "completed") return job;
-    if (job.status === "failed" || job.status === "cancelled") {
+    if (
+      job.status === "failed" ||
+      job.status === "cancelled" ||
+      job.status === "interrupted"
+    ) {
       throw new Error(`${job.action} migration verification failed${job.error ? `: ${job.error}` : ""}`);
     }
     if (Date.now() >= deadline) throw new Error(`${job.action} migration verification timed out`);

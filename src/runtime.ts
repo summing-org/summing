@@ -515,7 +515,19 @@ export class SummingRuntime {
       resolve(config.dataDir, "runner-control.sqlite3"),
       this.projects,
       this.viewer.runner,
-      async (projectId, message) => {
+      async (projectId, message, conversationId) => {
+        if (conversationId) {
+          const conversation = this.state.get(conversationId);
+          if (conversation.projectId !== projectId) {
+            throw new Error("runner notification conversation changed project scope");
+          }
+          await this.telegram.sendMessage(
+            conversation.chatId,
+            `Раннер ${projectId}: ${message}`,
+            { topicId: conversation.topicId },
+          );
+          return;
+        }
         await Promise.allSettled(
           this.projects.owners(projectId).map((ownerId) =>
             this.telegram.sendMessage(ownerId, `⚠️ Раннер ${projectId}: ${message}`),

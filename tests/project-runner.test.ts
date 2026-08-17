@@ -169,10 +169,20 @@ exit 0
       /changed from revision 1 to 2/,
     );
 
-    const build = await client.submit("demo", "repo", "build", revision, archive);
+    const idempotencyKey = "b".repeat(64);
+    const [build, duplicateBuild] = await Promise.all([
+      client.submit("demo", "repo", "build", revision, archive, { idempotencyKey }),
+      client.submit("demo", "repo", "build", revision, archive, { idempotencyKey }),
+    ]);
+    assert.equal(duplicateBuild.id, build.id);
+    assert.equal(build.idempotencyKey, idempotencyKey);
     const buildCompleted = await completedJob(client, "demo", "repo", build.id);
     assert.equal(buildCompleted.status, "completed");
     assert.equal(buildCompleted.trigger, "manual");
+    await assert.rejects(
+      client.submit("demo", "repo", "validate", revision, archive, { idempotencyKey }),
+      /idempotency key was reused for a different runner job/,
+    );
 
     const scheduleId = randomUUID();
     const scheduledFor = "2026-08-17T06:00:00.000Z";
@@ -379,7 +389,7 @@ test("runner rejects unsafe or ambiguous project config sources", async () => {
   }
 });
 
-test("runner bounds terminal job history on startup without deleting active or malformed state", () => {
+test("runner marks unfinished jobs interrupted on startup and retains recovery evidence", () => {
   const root = mkdtempSync(join(tmpdir(), "summing-runner-retention-"));
   const dataRoot = join(root, "data");
   const runs = join(dataRoot, "projects", "demo", "runs");
@@ -396,9 +406,16 @@ test("runner bounds terminal job history on startup without deleting active or m
       Buffer.alloc(32, 5),
     );
 
-    assert.equal(readdirSync(runs).length, 102);
+    assert.equal(readdirSync(runs).length, 101);
     assert.equal(existsSync(join(runs, queuedId)), true);
     assert.equal(existsSync(join(runs, malformedId)), true);
+    const recovered = JSON.parse(
+      readFileSync(join(runs, queuedId, "job.json"), "utf8"),
+    ) as { status: string; error: string; completedAt?: string };
+    assert.equal(recovered.status, "interrupted");
+    assert.equal(recovered.error, "runner restarted before the job completed");
+    assert.ok(recovered.completedAt);
+    assert.match(readFileSync(join(runs, queuedId, "job.log"), "utf8"), /not restarted automatically/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

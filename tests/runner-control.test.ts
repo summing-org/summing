@@ -161,11 +161,13 @@ test("schedule changes require a later-turn confirmation and execute each occurr
     await control.tick();
     await control.tick();
     assert.equal(submissions.length, 1);
-    assert.deepEqual(submissions[0], {
+    const { idempotencyKey: scheduleRequestKey, ...scheduleMetadata } = submissions[0]!;
+    assert.deepEqual(scheduleMetadata, {
       trigger: "schedule",
       scheduleId: stored.id,
       scheduledFor: "2026-08-17T05:50:00.000Z",
     });
+    assert.match(scheduleRequestKey ?? "", /^[0-9a-f]{64}$/);
 
     now = Date.parse("2026-08-18T05:50:00.000Z");
     await control.tick();
@@ -175,6 +177,108 @@ test("schedule changes require a later-turn confirmation and execute each occurr
     const inspection = await control.inspect(context("turn-3"));
     assert.equal(inspection.queued.length, 1);
     assert.equal(inspection.schedules[0]?.lastExecution?.status, "skipped");
+  } finally {
+    control.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("manual tool calls deduplicate jobs, expose an overview, and notify their conversation once", async () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-runner-manual-watch-"));
+  const repository = join(root, "repo");
+  mkdirSync(repository);
+  execFileSync("git", ["init", "--initial-branch=master", repository]);
+  execFileSync("git", ["-C", repository, "config", "user.name", "Test"]);
+  execFileSync("git", ["-C", repository, "config", "user.email", "test@example.test"]);
+  writeFileSync(join(repository, "README.md"), "test\n");
+  execFileSync("git", ["-C", repository, "add", "."]);
+  execFileSync("git", ["-C", repository, "commit", "-m", "initial"]);
+
+  let now = Date.parse("2026-08-17T06:00:00.000Z");
+  const jobs: RunnerJob[] = [];
+  const submissions: RunnerSubmissionMetadata[] = [];
+  const notifications: Array<{ projectId: string; message: string; conversationId?: string }> = [];
+  const runner = {
+    available: async () => true,
+    jobs: async () => jobs,
+    submit: async (
+      projectId: string,
+      workspaceId: string,
+      action: RunnerJob["action"],
+      revision: string,
+      _archive: Buffer,
+      metadata: RunnerSubmissionMetadata,
+    ) => {
+      submissions.push(metadata);
+      const existing = jobs.find((job) => job.idempotencyKey === metadata.idempotencyKey);
+      if (existing) return existing;
+      const job: RunnerJob = {
+        id: "80d40abc-663c-4795-af9c-833e8beccc92",
+        projectId,
+        workspaceId,
+        action,
+        revision,
+        trigger: "manual",
+        ...(metadata.idempotencyKey ? { idempotencyKey: metadata.idempotencyKey } : {}),
+        status: "queued",
+        createdAt: new Date(now).toISOString(),
+      };
+      jobs.push(job);
+      return job;
+    },
+  } as unknown as ProjectRunnerClient;
+  const control = new RunnerControlPlane(
+    join(root, "control.sqlite3"),
+    {} as ProjectCatalog,
+    runner,
+    async (projectId, message, conversationId) => {
+      notifications.push({
+        projectId,
+        message,
+        ...(conversationId ? { conversationId } : {}),
+      });
+    },
+    () => now,
+  );
+  const manualContext = { ...context("turn-manual"), repositoryPath: repository };
+  const call = {
+    threadId: "thread",
+    turnId: "turn-manual",
+    callId: "call-manual-retry",
+    namespace: "runner",
+    tool: "start",
+    arguments: { action: "run" },
+  };
+  try {
+    const first = await executeRunnerTool(control, manualContext, call);
+    const second = await executeRunnerTool(control, manualContext, call);
+    const firstJob = JSON.parse(first.contentItems[0]!.text) as RunnerJob;
+    const secondJob = JSON.parse(second.contentItems[0]!.text) as RunnerJob;
+    assert.equal(firstJob.id, secondJob.id);
+    assert.equal(jobs.length, 1);
+    assert.equal(submissions.length, 1);
+    assert.match(submissions[0]?.idempotencyKey ?? "", /^[0-9a-f]{64}$/);
+
+    const queuedInspection = await control.inspect(manualContext);
+    assert.equal(queuedInspection.overview.state, "queued");
+    assert.equal(queuedInspection.overview.queuedCount, 1);
+    assert.match(queuedInspection.overview.summary, /в очереди 1/);
+
+    jobs[0]!.status = "completed";
+    jobs[0]!.completedAt = new Date(now + 10_000).toISOString();
+    now += 15_000;
+    await control.tick();
+    await control.tick();
+    assert.deepEqual(notifications, [{
+      projectId: "demo",
+      conversationId: "conversation-1",
+      message: `Ручной запуск «run» (${jobs[0]!.id}) завершён успешно.`,
+    }]);
+
+    const completedInspection = await control.inspect(manualContext);
+    assert.equal(completedInspection.overview.state, "idle");
+    assert.equal(completedInspection.overview.lastResult?.id, jobs[0]!.id);
+    assert.match(completedInspection.overview.summary, /ничего не запущено/);
   } finally {
     control.close();
     rmSync(root, { recursive: true, force: true });

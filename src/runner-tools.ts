@@ -26,8 +26,9 @@ export const RUNNER_DYNAMIC_TOOLS: DynamicToolNamespaceSpec[] = [{
       type: "function",
       name: "inspect",
       description:
-        "Read the live runner state, active and queued jobs, recent outcomes, schedules, and " +
-        "artifact availability. Always call this before answering what is running or scheduled.",
+        "Read the host-generated runner overview, active and queued jobs, recent outcomes, " +
+        "schedules, and artifact availability. Always call this before answering what is " +
+        "running or scheduled.",
       inputSchema: { ...OBJECT_SCHEMA, properties: {} },
     },
     {
@@ -35,7 +36,8 @@ export const RUNNER_DYNAMIC_TOOLS: DynamicToolNamespaceSpec[] = [{
       name: "start",
       description:
         "Start one job only when the user explicitly asks to run an action. Live run requires a " +
-        "clean committed worktree; other actions use an isolated repository snapshot.",
+        "clean committed worktree; other actions use an isolated repository snapshot. Repeated " +
+        "delivery of the same tool call returns the already accepted job.",
       inputSchema: {
         ...OBJECT_SCHEMA,
         properties: {
@@ -232,7 +234,11 @@ export async function executeRunnerTool(
     case "inspect":
       return result(await control.inspect(context));
     case "start":
-      return result(await control.startJob(context, requiredString(args, "action") as RunnerAction));
+      return result(await control.startJob(
+        context,
+        requiredString(args, "action") as RunnerAction,
+        call.callId,
+      ));
     case "cancel":
       return result(await control.cancelJob(context, requiredString(args, "jobId")));
     case "job_log":

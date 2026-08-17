@@ -42,6 +42,7 @@ const PROJECT_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const WORKSPACE_ID = PROJECT_ID;
 const JOB_ID = /^[0-9a-f-]{36}$/;
 const SCHEDULE_ID = JOB_ID;
+const IDEMPOTENCY_KEY = /^[0-9a-f]{64}$/;
 const REVISION = /^[0-9a-f]{40}$/;
 const MAX_ARCHIVE_BYTES = 50_000_000;
 const MAX_ARTIFACT_BYTES = 8_000_000;
@@ -253,6 +254,7 @@ export class ProjectRunnerServer {
   private readonly migrationTargets: ReadonlyMap<string, LegacyEnvironmentMigrationTarget>;
   private readonly importedMigrations = new Set<string>();
   private readonly migrationImports = new Map<string, Promise<EnvironmentMigrationMarker>>();
+  private readonly pendingSubmissions = new Map<string, Promise<RunnerJob>>();
 
   constructor(
     readonly socketPath: string,
@@ -282,6 +284,7 @@ export class ProjectRunnerServer {
       const metadata = lstatSync(path);
       if (metadata.isFile() && !metadata.isSymbolicLink()) rmSync(path);
     }
+    this.recoverInterruptedJobs();
     this.pruneStoredJobDirectories();
   }
 
@@ -413,6 +416,7 @@ export class ProjectRunnerServer {
       const trigger = (url.searchParams.get("trigger") ?? "manual") as RunnerJobTrigger;
       const scheduleId = url.searchParams.get("schedule") ?? "";
       const scheduledFor = url.searchParams.get("scheduled_for") ?? "";
+      const idempotencyKey = url.searchParams.get("idempotency_key") ?? "";
       if (!PROJECT_ID.test(projectId) || !WORKSPACE_ID.test(workspaceId)) {
         throw new RunnerHttpError(400, "invalid project or workspace id");
       }
@@ -421,6 +425,9 @@ export class ProjectRunnerServer {
       }
       if (!REVISION.test(revision)) throw new RunnerHttpError(400, "invalid revision");
       if (!RUNNER_TRIGGERS.has(trigger)) throw new RunnerHttpError(400, "invalid runner trigger");
+      if (idempotencyKey && !IDEMPOTENCY_KEY.test(idempotencyKey)) {
+        throw new RunnerHttpError(400, "invalid idempotency key");
+      }
       if (trigger === "schedule") {
         if (!SCHEDULE_ID.test(scheduleId) || !scheduledFor || !Number.isFinite(Date.parse(scheduledFor))) {
           throw new RunnerHttpError(400, "invalid runner schedule metadata");
@@ -428,38 +435,45 @@ export class ProjectRunnerServer {
       } else if (scheduleId || scheduledFor) {
         throw new RunnerHttpError(400, "manual jobs cannot contain schedule metadata");
       }
-      const project = this.projectConfig(projectId);
-      const job: RunnerJob = {
-        id: randomUUID(),
+      const commonMetadata = {
         projectId,
         workspaceId,
         action,
         revision,
         trigger,
-        ...(trigger === "schedule" ? { scheduleId, scheduledFor: new Date(scheduledFor).toISOString() } : {}),
-        status: "queued",
-        createdAt: new Date().toISOString(),
+        ...(idempotencyKey ? { idempotencyKey } : {}),
       };
-      const directory = this.jobDirectory(projectId, job.id);
-      mkdirSync(directory, { recursive: true, mode: 0o700 });
+      const metadata: Omit<RunnerJob, "id" | "status" | "createdAt"> = trigger === "schedule"
+        ? { ...commonMetadata, scheduleId, scheduledFor: new Date(scheduledFor).toISOString() }
+        : commonMetadata;
+      if (!idempotencyKey) {
+        json(response, 202, { job: await this.acceptJob(request, this.projectConfig(projectId), metadata) });
+        return;
+      }
+      const submissionKey = `${projectId}\0${workspaceId}\0${idempotencyKey}`;
+      const existing = this.idempotentJob(projectId, workspaceId, idempotencyKey);
+      if (existing) {
+        request.resume();
+        this.assertSameSubmission(existing, metadata);
+        json(response, 200, { job: existing, deduplicated: true });
+        return;
+      }
+      const pending = this.pendingSubmissions.get(submissionKey);
+      if (pending) {
+        request.resume();
+        const job = await pending;
+        this.assertSameSubmission(job, metadata);
+        json(response, 200, { job, deduplicated: true });
+        return;
+      }
+      const submission = this.acceptJob(request, this.projectConfig(projectId), metadata);
+      this.pendingSubmissions.set(submissionKey, submission);
       try {
-        await this.receiveArchive(request, resolve(directory, "source.tar"));
-        if (action !== "build") {
-          job.environmentRevision = this.environments.writeJobSnapshot(
-            projectId,
-            workspaceId,
-            job.id,
-            resolve(directory, "environment.json"),
-            project.environmentBootstrap.get(workspaceId),
-          );
+        json(response, 202, { job: await submission });
+      } finally {
+        if (this.pendingSubmissions.get(submissionKey) === submission) {
+          this.pendingSubmissions.delete(submissionKey);
         }
-        this.saveJob(job);
-        this.queue.push(job);
-        void this.processQueue();
-        json(response, 202, { job });
-      } catch (error) {
-        rmSync(directory, { recursive: true, force: true });
-        throw error;
       }
       return;
     }
@@ -564,6 +578,84 @@ export class ProjectRunnerServer {
       await new Promise<void>((resolveEnd) => output.end(resolveEnd));
     }
     if (bytes !== announced) throw new RunnerHttpError(400, "source archive is incomplete");
+  }
+
+  private async acceptJob(
+    request: IncomingMessage,
+    project: RunnerProjectConfig,
+    metadata: Omit<RunnerJob, "id" | "status" | "createdAt">,
+  ): Promise<RunnerJob> {
+    const job: RunnerJob = {
+      id: randomUUID(),
+      ...metadata,
+      status: "queued",
+      createdAt: new Date().toISOString(),
+    };
+    const directory = this.jobDirectory(job.projectId, job.id);
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    try {
+      await this.receiveArchive(request, resolve(directory, "source.tar"));
+      if (job.action !== "build") {
+        job.environmentRevision = this.environments.writeJobSnapshot(
+          job.projectId,
+          job.workspaceId,
+          job.id,
+          resolve(directory, "environment.json"),
+          project.environmentBootstrap.get(job.workspaceId),
+        );
+      }
+      this.saveJob(job);
+      this.queue.push(job);
+      void this.processQueue();
+      return job;
+    } catch (error) {
+      rmSync(directory, { recursive: true, force: true });
+      throw error;
+    }
+  }
+
+  private idempotentJob(
+    projectId: string,
+    workspaceId: string,
+    idempotencyKey: string,
+  ): RunnerJob | null {
+    const directory = resolve(this.dataRoot, "projects", projectId, "runs");
+    if (!existsSync(directory) || !lstatSync(directory).isDirectory()) return null;
+    for (const entry of readdirSync(directory)) {
+      if (!JOB_ID.test(entry)) continue;
+      try {
+        const job = JSON.parse(
+          readFileSync(resolve(directory, entry, "job.json"), "utf8"),
+        ) as RunnerJob;
+        if (
+          job.id === entry &&
+          job.projectId === projectId &&
+          (job.workspaceId ?? "repo") === workspaceId &&
+          job.idempotencyKey === idempotencyKey
+        ) {
+          return { ...job, trigger: job.trigger ?? "manual" };
+        }
+      } catch {
+        // Malformed operator-recovery state is intentionally ignored.
+      }
+    }
+    return null;
+  }
+
+  private assertSameSubmission(
+    job: RunnerJob,
+    expected: Omit<RunnerJob, "id" | "status" | "createdAt">,
+  ): void {
+    if (
+      job.projectId !== expected.projectId ||
+      (job.workspaceId ?? "repo") !== expected.workspaceId ||
+      job.action !== expected.action ||
+      (job.trigger ?? "manual") !== expected.trigger ||
+      (job.scheduleId ?? "") !== (expected.scheduleId ?? "") ||
+      (job.scheduledFor ?? "") !== (expected.scheduledFor ?? "")
+    ) {
+      throw new RunnerHttpError(409, "idempotency key was reused for a different runner job");
+    }
   }
 
   private projectConfig(projectId: string): RunnerProjectConfig {
@@ -724,12 +816,24 @@ export class ProjectRunnerServer {
     ) {
       throw new RunnerHttpError(404, "runner job not found in this workspace");
     }
-    if (!new Set(["queued", "running", "cancelling", "cancelled", "completed", "failed"])
+    if (!new Set([
+      "queued",
+      "running",
+      "cancelling",
+      "cancelled",
+      "completed",
+      "failed",
+      "interrupted",
+    ])
       .has(stored.status)) {
       throw new RunnerHttpError(409, "runner job status is malformed");
     }
     if (stored.status === "cancelled") return stored;
-    if (stored.status === "completed" || stored.status === "failed") {
+    if (
+      stored.status === "completed" ||
+      stored.status === "failed" ||
+      stored.status === "interrupted"
+    ) {
       throw new RunnerHttpError(409, `runner job is already ${stored.status}`);
     }
     if (stored.status === "running" || stored.status === "cancelling") {
@@ -1154,18 +1258,19 @@ export class ProjectRunnerServer {
             job.projectId !== projectId ||
             (job.status !== "completed" &&
               job.status !== "failed" &&
-              job.status !== "cancelled") ||
+              job.status !== "cancelled" &&
+              job.status !== "interrupted") ||
             typeof job.createdAt !== "string"
           ) {
             return [];
           }
-          return [{ id: entry, createdAt: job.createdAt }];
+          return [{ id: entry, retentionAt: job.completedAt ?? job.createdAt }];
         } catch {
           return [];
         }
       })
       .sort((left, right) =>
-        right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id));
+        right.retentionAt.localeCompare(left.retentionAt) || right.id.localeCompare(left.id));
     for (const job of terminal.slice(JOB_RETENTION)) {
       rmSync(resolve(root, job.id), { recursive: true, force: true });
     }
@@ -1176,6 +1281,46 @@ export class ProjectRunnerServer {
     if (!existsSync(root) || !lstatSync(root).isDirectory()) return;
     for (const projectId of readdirSync(root)) {
       if (PROJECT_ID.test(projectId)) this.pruneJobDirectories(projectId);
+    }
+  }
+
+  private recoverInterruptedJobs(): void {
+    const root = resolve(this.dataRoot, "projects");
+    if (!existsSync(root) || !lstatSync(root).isDirectory()) return;
+    const completedAt = new Date().toISOString();
+    for (const projectId of readdirSync(root)) {
+      if (!PROJECT_ID.test(projectId)) continue;
+      const runs = resolve(root, projectId, "runs");
+      if (!existsSync(runs) || !lstatSync(runs).isDirectory()) continue;
+      for (const entry of readdirSync(runs)) {
+        if (!JOB_ID.test(entry)) continue;
+        const directory = resolve(runs, entry);
+        const metadataPath = resolve(directory, "job.json");
+        try {
+          const job = JSON.parse(readFileSync(metadataPath, "utf8")) as RunnerJob;
+          if (
+            job.id !== entry ||
+            job.projectId !== projectId ||
+            !new Set(["queued", "running", "cancelling"]).has(job.status)
+          ) {
+            continue;
+          }
+          job.status = "interrupted";
+          job.completedAt = completedAt;
+          job.error = "runner restarted before the job completed";
+          this.saveJob(job);
+          writeFileSync(
+            resolve(directory, "job.log"),
+            `[${completedAt}] INTERRUPTED runner restarted; job was not restarted automatically\n`,
+            { flag: "a", mode: 0o600 },
+          );
+          rmSync(resolve(directory, "source"), { recursive: true, force: true });
+          rmSync(resolve(directory, "source.tar"), { force: true });
+          rmSync(resolve(directory, "environment.json"), { force: true });
+        } catch {
+          // Preserve malformed operator-recovery state for manual inspection.
+        }
+      }
     }
   }
 

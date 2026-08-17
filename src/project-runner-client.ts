@@ -11,6 +11,7 @@ export interface RunnerSubmissionMetadata {
   trigger?: RunnerJobTrigger;
   scheduleId?: string;
   scheduledFor?: string;
+  idempotencyKey?: string;
 }
 
 export type RunnerJobStatus =
@@ -19,7 +20,8 @@ export type RunnerJobStatus =
   | "cancelling"
   | "cancelled"
   | "completed"
-  | "failed";
+  | "failed"
+  | "interrupted";
 
 export interface RunnerJob {
   id: string;
@@ -30,6 +32,7 @@ export interface RunnerJob {
   trigger?: RunnerJobTrigger;
   scheduleId?: string;
   scheduledFor?: string;
+  idempotencyKey?: string;
   status: RunnerJobStatus;
   createdAt: string;
   startedAt?: string;
@@ -152,6 +155,7 @@ export class ProjectRunnerClient {
     if (metadata.trigger) query.set("trigger", metadata.trigger);
     if (metadata.scheduleId) query.set("schedule", metadata.scheduleId);
     if (metadata.scheduledFor) query.set("scheduled_for", metadata.scheduledFor);
+    if (metadata.idempotencyKey) query.set("idempotency_key", metadata.idempotencyKey);
     const result = await this.call<{ job: RunnerJob }>(
       "POST",
       `/jobs?${query.toString()}`,

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -19,6 +19,7 @@ const SCHEDULE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}
 const CLOCK_TIME = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 const MAXIMUM_ARTIFACT_TOOL_CHARACTERS = 64_000;
 const MAXIMUM_LOG_TOOL_CHARACTERS = 64_000;
+const MANUAL_JOB_TERMINAL_STATUSES = new Set(["completed", "cancelled", "failed", "interrupted"]);
 
 type Row = Record<string, unknown>;
 
@@ -124,6 +125,15 @@ export interface RunnerScheduleView extends RunnerSchedule {
 
 export interface RunnerInspection {
   available: boolean;
+  overview: {
+    state: "unavailable" | "idle" | "queued" | "running";
+    summary: string;
+    activeCount: number;
+    queuedCount: number;
+    enabledScheduleCount: number;
+    nextScheduledAt: string | null;
+    lastResult: RunnerJob | null;
+  };
   active: RunnerJob[];
   queued: RunnerJob[];
   recent: RunnerJob[];
@@ -137,10 +147,36 @@ export interface RunnerArtifactView {
   artifacts: RunnerArtifact[];
 }
 
+interface RunnerJobWatch {
+  jobId: string;
+  projectId: string;
+  workspaceId: string;
+  conversationId: string;
+  action: RunnerAction;
+  lastStatus: RunnerJob["status"];
+  createdAt: string;
+  updatedAt: string;
+  notifiedAt: string | null;
+}
+
 export class RunnerControlError extends Error {}
 
 function iso(epochMilliseconds: number): string {
   return new Date(epochMilliseconds).toISOString();
+}
+
+function idempotencyKey(...parts: string[]): string {
+  return createHash("sha256").update(JSON.stringify(parts)).digest("hex");
+}
+
+function manualJobNotification(job: RunnerJob): string {
+  const target = `Ручной запуск «${job.action}» (${job.id})`;
+  if (job.status === "completed") return `${target} завершён успешно.`;
+  if (job.status === "cancelled") return `${target} отменён.`;
+  if (job.status === "interrupted") {
+    return `${target} прерван из-за перезапуска раннера и не был перезапущен автоматически.`;
+  }
+  return `${target} завершился с ошибкой${job.error ? `: ${job.error}` : "."}`;
 }
 
 function parseJson<T>(value: unknown, field: string): T {
@@ -333,6 +369,19 @@ export class RunnerControlStore {
       );
       CREATE INDEX IF NOT EXISTS runner_control_audit_scope
         ON runner_control_audit(project_id, workspace_id, created_at DESC, id DESC);
+      CREATE TABLE IF NOT EXISTS runner_job_watches (
+        job_id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        action TEXT NOT NULL CHECK(action IN ('build', 'validate', 'dry-run', 'run')),
+        last_status TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        notified_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS runner_job_watches_pending
+        ON runner_job_watches(notified_at, project_id, workspace_id, created_at);
       CREATE TABLE IF NOT EXISTS runner_artifact_plans (
         token TEXT PRIMARY KEY,
         project_id TEXT NOT NULL,
@@ -636,6 +685,58 @@ export class RunnerControlStore {
     `).all() as Row[]).map((row) => this.toExecution(row));
   }
 
+  watchJob(context: RunnerControlContext, job: RunnerJob, nowMilliseconds: number): void {
+    const timestamp = iso(nowMilliseconds);
+    this.db.prepare(`
+      INSERT OR IGNORE INTO runner_job_watches
+        (job_id, project_id, workspace_id, conversation_id, action, last_status,
+         created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      job.id,
+      context.projectId,
+      context.workspaceId,
+      context.conversationId,
+      job.action,
+      job.status,
+      timestamp,
+      timestamp,
+    );
+  }
+
+  pendingJobWatches(): RunnerJobWatch[] {
+    return (this.db.prepare(`
+      SELECT * FROM runner_job_watches
+      WHERE notified_at IS NULL
+      ORDER BY created_at, job_id
+    `).all() as Row[]).map((row) => ({
+      jobId: String(row.job_id),
+      projectId: String(row.project_id),
+      workspaceId: String(row.workspace_id),
+      conversationId: String(row.conversation_id),
+      action: String(row.action) as RunnerAction,
+      lastStatus: String(row.last_status) as RunnerJob["status"],
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+      notifiedAt: row.notified_at === null ? null : String(row.notified_at),
+    }));
+  }
+
+  updateJobWatch(job: RunnerJob, nowMilliseconds: number): void {
+    this.db.prepare(`
+      UPDATE runner_job_watches SET last_status = ?, updated_at = ? WHERE job_id = ?
+    `).run(job.status, iso(nowMilliseconds), job.id);
+  }
+
+  markJobWatchNotified(jobId: string, nowMilliseconds: number): void {
+    const timestamp = iso(nowMilliseconds);
+    this.db.prepare(`
+      UPDATE runner_job_watches
+      SET notified_at = ?, updated_at = ?
+      WHERE job_id = ? AND notified_at IS NULL
+    `).run(timestamp, timestamp, jobId);
+  }
+
   lastExecution(scheduleId: string): RunnerScheduleExecution | null {
     const row = this.db.prepare(`
       SELECT * FROM runner_schedule_executions
@@ -716,7 +817,11 @@ export class RunnerControlPlane {
     storePath: string,
     readonly projects: ProjectCatalog,
     readonly runner: ProjectRunnerClient,
-    readonly notify: (projectId: string, message: string) => Promise<void> = async () => {},
+    readonly notify: (
+      projectId: string,
+      message: string,
+      conversationId?: string,
+    ) => Promise<void> = async () => {},
     readonly now: () => number = Date.now,
     readonly intervalMilliseconds = 15_000,
   ) {
@@ -767,11 +872,41 @@ export class RunnerControlPlane {
       nextRunAt: schedule.enabled ? nextScheduleOccurrence(schedule, this.now()) : null,
       lastExecution: this.store.lastExecution(schedule.id),
     }));
+    const recent = jobs.filter((job) => !ACTIVE_JOB_STATUSES.has(job.status)).slice(0, 10);
+    const enabledScheduleCount = schedules.filter((schedule) => schedule.enabled).length;
+    const nextScheduledAt = schedules
+      .flatMap((schedule) => schedule.nextRunAt ? [schedule.nextRunAt] : [])
+      .sort()[0] ?? null;
+    const state = !available
+      ? "unavailable"
+      : active.length > 0
+        ? "running"
+        : queued.length > 0
+          ? "queued"
+          : "idle";
+    const summary = state === "unavailable"
+      ? "Раннер недоступен."
+      : state === "running"
+        ? `Сейчас выполняется ${active.length} запуск(ов); в очереди ${queued.length}.`
+        : state === "queued"
+          ? `Активного запуска нет; в очереди ${queued.length}.`
+          : nextScheduledAt
+            ? `Сейчас ничего не запущено; ближайший запуск по расписанию ${nextScheduledAt}.`
+            : "Сейчас ничего не запущено и активных расписаний нет.";
     return {
       available,
+      overview: {
+        state,
+        summary,
+        activeCount: active.length,
+        queuedCount: queued.length,
+        enabledScheduleCount,
+        nextScheduledAt,
+        lastResult: recent[0] ?? null,
+      },
       active,
       queued,
-      recent: jobs.filter((job) => !ACTIVE_JOB_STATUSES.has(job.status)).slice(0, 10),
+      recent,
       schedules,
       artifacts: jobs
         .filter((job) => Number(job.artifactCount ?? 0) > 0)
@@ -785,11 +920,31 @@ export class RunnerControlPlane {
     };
   }
 
-  async startJob(context: RunnerControlContext, action: RunnerAction): Promise<RunnerJob> {
+  async startJob(
+    context: RunnerControlContext,
+    action: RunnerAction,
+    requestId: string,
+  ): Promise<RunnerJob> {
     if (!(new Set<RunnerAction>(["build", "validate", "dry-run", "run"])).has(action)) {
       throw new RunnerControlError("runner action is invalid");
     }
     if (!(await this.runner.available())) throw new RunnerControlError("runner is unavailable");
+    const requestKey = idempotencyKey(
+      "manual",
+      context.projectId,
+      context.workspaceId,
+      context.conversationId,
+      requestId,
+    );
+    const existing = (await this.runner.jobs(context.projectId, context.workspaceId))
+      .find((job) => job.idempotencyKey === requestKey);
+    if (existing) {
+      if (existing.action !== action || (existing.trigger ?? "manual") !== "manual") {
+        throw new RunnerControlError("runner request id was reused for a different job");
+      }
+      this.store.watchJob(context, existing, this.now());
+      return existing;
+    }
     const inspector = new GitInspector(context.repositoryPath);
     const repository = await inspector.summary();
     if (action === "run" && repository.dirty) {
@@ -805,8 +960,12 @@ export class RunnerControlPlane {
       action,
       revision,
       archive,
-      { trigger: "manual" },
+      {
+        trigger: "manual",
+        idempotencyKey: requestKey,
+      },
     );
+    this.store.watchJob(context, job, this.now());
     this.store.audit(context, "runner.start", job.id, { action, revision }, this.now());
     return job;
   }
@@ -1056,6 +1215,7 @@ export class RunnerControlPlane {
     this.ticking = true;
     try {
       await this.refreshExecutions();
+      await this.refreshWatchedJobs();
       if (!(await this.runner.available())) return;
       for (const schedule of this.store.enabledSchedules()) {
         const occurrence = dueScheduleOccurrence(schedule, this.now());
@@ -1101,6 +1261,13 @@ export class RunnerControlPlane {
           trigger: "schedule",
           scheduleId: schedule.id,
           scheduledFor: execution.scheduledFor,
+          idempotencyKey: idempotencyKey(
+            "schedule",
+            schedule.projectId,
+            schedule.workspaceId,
+            schedule.id,
+            execution.occurrenceKey,
+          ),
         },
       );
       this.store.updateExecution(
@@ -1150,7 +1317,9 @@ export class RunnerControlPlane {
       for (const execution of executions) {
         const job = jobs.find((candidate) => candidate.id === execution.jobId);
         if (!job) continue;
-        const status = job.status as RunnerScheduleExecutionStatus;
+        const status: RunnerScheduleExecutionStatus = job.status === "interrupted"
+          ? "failed"
+          : job.status;
         if (status === execution.status) continue;
         this.store.updateExecution(
           execution.id,
@@ -1171,6 +1340,37 @@ export class RunnerControlPlane {
                 `${job.error ? `: ${job.error}` : ""}`,
             );
           }
+        }
+      }
+    }
+  }
+
+  private async refreshWatchedJobs(): Promise<void> {
+    const grouped = new Map<string, RunnerJobWatch[]>();
+    for (const watch of this.store.pendingJobWatches()) {
+      const key = `${watch.projectId}\0${watch.workspaceId}`;
+      const entries = grouped.get(key) ?? [];
+      entries.push(watch);
+      grouped.set(key, entries);
+    }
+    for (const [key, watches] of grouped) {
+      const [projectId, workspaceId] = key.split("\0") as [string, string];
+      let jobs: RunnerJob[];
+      try {
+        jobs = await this.runner.jobs(projectId, workspaceId);
+      } catch {
+        continue;
+      }
+      for (const watch of watches) {
+        const job = jobs.find((candidate) => candidate.id === watch.jobId);
+        if (!job) continue;
+        if (job.status !== watch.lastStatus) this.store.updateJobWatch(job, this.now());
+        if (!MANUAL_JOB_TERMINAL_STATUSES.has(job.status)) continue;
+        try {
+          await this.notify(projectId, manualJobNotification(job), watch.conversationId);
+          this.store.markJobWatchNotified(job.id, this.now());
+        } catch (error) {
+          console.warn(`could not notify conversation about runner job ${job.id}`, error);
         }
       }
     }
