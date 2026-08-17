@@ -10,6 +10,7 @@ import {
   type RuntimeConfig,
   type WorkspaceConfig,
 } from "./config.js";
+import { ensureProjectMemory } from "./project-memory.js";
 import { StateStore, type ManagedProject } from "./state-store.js";
 
 interface ProcessResult {
@@ -229,6 +230,7 @@ export class ProjectCatalog {
       workspaceId,
       new Map([[workspaceId, workspace]]),
     );
+    ensureProjectMemory(this.config.dataDir, project);
     const stored: ManagedProject = {
       id: projectId,
       name: project.name,

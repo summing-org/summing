@@ -3304,7 +3304,6 @@ export class SummingRuntime {
             ? await this.projects.createLocal(parts[0], parts[1], parts[2], signal)
             : await this.projects.cloneRemote(parts[0], parts[1], parts[2], parts[3]!, signal);
         if (signal.aborted) return;
-        this.workspaces.ensureProjectMemory(project);
         const workspace = project.workspace();
         await this.reply(
           chatId,

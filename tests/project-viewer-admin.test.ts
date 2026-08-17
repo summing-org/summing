@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -236,6 +236,10 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
     assert.equal(created.status, 201, await created.text());
     assert.equal(projects.owner("client"), 42);
     assert.deepEqual(projects.owners("client"), [42]);
+    assert.equal(
+      readFileSync(join(dataDir, "projects", "client", "memory.md"), "utf8"),
+      "# Project memory: client\n\n",
+    );
 
     const deniedOwnerUpdate = await fetch(`${endpoint}/api/viewer/admin/project-owners`, {
       method: "PUT",

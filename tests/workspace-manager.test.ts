@@ -188,6 +188,7 @@ test("conversation gets a persistent worktree and project memory", async () => {
     Object.defineProperty(config, "maximumAttachmentBytes", { value: 16 });
     const manager = new WorkspaceManager(config);
     manager.initialize();
+    rmSync(manager.projectMemoryPath(project.id));
     const conversation: Conversation = {
       id: "tg-abc",
       chatId: -1,
@@ -203,6 +204,10 @@ test("conversation gets a persistent worktree and project memory", async () => {
       worktreePath: null,
     };
     const prepared = await manager.prepare(conversation, project, workspace);
+    assert.equal(
+      readFileSync(manager.projectMemoryPath(project.id), "utf8"),
+      "# Project memory: Demo\n\n",
+    );
     assert.notEqual(prepared.path, source);
     assert.equal(prepared.path.split("/").at(-1), "web");
     assert.equal(prepared.readableRoot, join(root, "worktrees", conversation.id));

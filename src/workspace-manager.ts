@@ -21,6 +21,10 @@ import { basename, extname, relative, resolve, sep } from "node:path";
 import { spawn } from "node:child_process";
 import type { ProjectConfig, RuntimeConfig, WorkspaceConfig } from "./config.js";
 import type { StoredAttachment } from "./attachment-service.js";
+import {
+  ensureProjectMemory as provisionProjectMemory,
+  projectMemoryPath as resolveProjectMemoryPath,
+} from "./project-memory.js";
 import type { Conversation } from "./state-store.js";
 
 export interface PreparedWorkspace {
@@ -179,15 +183,11 @@ export class WorkspaceManager {
   }
 
   ensureProjectMemory(project: ProjectConfig): void {
-    const memoryPath = this.projectMemoryPath(project.id);
-    mkdirSync(resolve(memoryPath, ".."), { recursive: true });
-    if (!existsSync(memoryPath)) {
-      writeFileSync(memoryPath, `# Project memory: ${project.name}\n\n`, "utf8");
-    }
+    provisionProjectMemory(this.config.dataDir, project);
   }
 
   projectMemoryPath(projectId: string): string {
-    return resolve(this.projectsRoot, projectId, "memory.md");
+    return resolveProjectMemoryPath(this.config.dataDir, projectId);
   }
 
   async runLockKey(
@@ -244,6 +244,7 @@ export class WorkspaceManager {
         throw new WorkspaceError(`workspace subdirectory is absent from worktree: ${path}`);
       }
     }
+    this.ensureProjectMemory(project);
     const memory = readFileSync(this.projectMemoryPath(project.id), "utf8");
     this.migrateRuntimeDirectory(path);
     this.writeContext(path, project, workspace, memory);

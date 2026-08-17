@@ -62,6 +62,10 @@ test("creates a persistent managed Git repository and enforces project ownership
     assert.equal(project.workspace().path, repository);
     assert.equal(git(repository, "branch", "--show-current"), "main");
     assert.ok(git(repository, "rev-parse", "HEAD"));
+    assert.equal(
+      readFileSync(join(config.dataDir, "projects", "client_name", "memory.md"), "utf8"),
+      "# Project memory: client_name\n\n",
+    );
     assert.equal(catalog.canAccess(42, "client_name"), true);
     assert.equal(catalog.canAccess(42, "summing"), false);
     assert.deepEqual(catalog.visibleTo(42).map((entry) => entry.project.id), ["client_name"]);
@@ -113,6 +117,10 @@ test("clones an existing repository into the managed project root", async () => 
     const catalog = new ProjectCatalog(config, state);
     const project = await catalog.cloneRemote("cloned", 77, "backend", source);
     assert.equal(readFileSync(join(project.workspace().path, "README.md"), "utf8"), "managed clone\n");
+    assert.equal(
+      readFileSync(join(config.dataDir, "projects", "cloned", "memory.md"), "utf8"),
+      "# Project memory: cloned\n\n",
+    );
     assert.equal(catalog.owner("cloned"), 77);
 
     const emptyRemote = join(root, "empty.git");
