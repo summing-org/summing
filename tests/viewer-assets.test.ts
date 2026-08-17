@@ -21,6 +21,11 @@ test("Project Viewer bounds Telegram authorization and network waits", () => {
   assert.doesNotMatch(VIEWER_HTML, /Обновиться сейчас/);
   assert.doesNotMatch(VIEWER_JS, /\/api\/viewer\/deployment/);
   assert.match(VIEWER_HTML, /id="artifactPanel"/);
+  assert.match(VIEWER_HTML, /data-tab="runs">Правки агента</);
+  assert.match(VIEWER_HTML, /data-tab="launch">Раннер</);
+  assert.match(VIEWER_HTML, /ИЗОЛИРОВАННЫЙ РАННЕР/);
+  assert.match(VIEWER_HTML, /Очередь раннера/);
+  assert.match(VIEWER_HTML, /id="cancelJob"[^>]*>Остановить</);
   assert.match(VIEWER_HTML, /id="artifactReport"[^>]+sandbox/);
   assert.match(VIEWER_HTML, /href="\/logo\.svg"/);
   assert.match(VIEWER_LOGO_SVG, /fill="#FF3366"/);
@@ -28,6 +33,8 @@ test("Project Viewer bounds Telegram authorization and network waits", () => {
   assert.match(VIEWER_CSS, /--primary:#7c9bb7/);
   assert.match(VIEWER_CSS, /data-theme="light"/);
   assert.match(VIEWER_JS, /\/api\/viewer\/job-artifacts/);
+  assert.match(VIEWER_JS, /\/api\/viewer\/jobs\/cancel/);
+  assert.match(VIEWER_JS, /cancelling:"останавливается"/);
   assert.match(VIEWER_JS, /data-download/);
   assert.match(VIEWER_JS, /renderEditorialPlan/);
   assert.match(VIEWER_JS, /\/api\/viewer\/environment/);

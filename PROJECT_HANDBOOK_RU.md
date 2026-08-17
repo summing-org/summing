@@ -1,6 +1,6 @@
 # SUMMING 9.8: архитектура, эксплуатация и разработка
 
-> Версия: **9.8.8**
+> Версия: **9.8.9**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
 > Последняя сверка с кодом: **17 августа 2026 года**.
 
@@ -935,6 +935,14 @@ worktree. `run` требует чистый committed `HEAD`. Периодиче
 `/etc/summing-runner/schedules/<project>.json`, поэтому всегда закреплён на
 явном полном SHA и не меняется от последующих commits самопроизвольно.
 
+Project Viewer разделяет два вида истории: **Правки агента** показывают patch
+между snapshot до и после Codex-задачи, а **Раннер** управляет изолированными
+Build / Validate / Dry run / Live run jobs. Queued job можно удалить из очереди,
+running job проходит через `cancelling` в `cancelled`: runner прерывает текущую
+команду, затем точечно выполняет `docker rm --force` только для контейнера с
+именем, полученным из project id и UUID job. Завершённые и упавшие jobs отменять
+нельзя; повторная отмена уже cancelled job идемпотентна.
+
 ## 10. Telegram-команды
 
 | Команда | Поведение |
@@ -1484,7 +1492,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "9.8.8",
+  "version": "9.8.9",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",

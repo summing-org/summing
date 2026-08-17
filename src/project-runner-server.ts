@@ -78,6 +78,8 @@ class RunnerHttpError extends Error {
   }
 }
 
+class RunnerCommandCancelledError extends Error {}
+
 function json(response: ServerResponse, status: number, value: unknown): void {
   const body = JSON.stringify(value);
   response.writeHead(status, {
@@ -140,9 +142,14 @@ function run(
     logPath?: string;
     timeoutMs?: number;
     redactions?: string[];
+    signal?: AbortSignal;
   },
 ): Promise<CommandResult> {
   return new Promise((resolveRun, reject) => {
+    if (options.signal?.aborted) {
+      reject(new RunnerCommandCancelledError("runner command cancelled"));
+      return;
+    }
     const child = spawn(executable, args, {
       cwd: options.cwd,
       env: options.env ?? process.env,
@@ -154,6 +161,8 @@ function run(
       ? createWriteStream(options.logPath, { flags: "a", mode: 0o600 })
       : null;
     const secrets = (options.redactions ?? []).filter(Boolean).sort((left, right) => right.length - left.length);
+    let cancelled = false;
+    let forceKillTimer: NodeJS.Timeout | null = null;
     let pendingLog = "";
     const redact = (value: string): string => {
       let result = value;
@@ -188,21 +197,39 @@ function run(
     };
     child.stdout.on("data", record);
     child.stderr.on("data", record);
+    const cancel = (): void => {
+      if (cancelled) return;
+      cancelled = true;
+      child.kill("SIGTERM");
+      forceKillTimer = setTimeout(() => child.kill("SIGKILL"), 5_000);
+      forceKillTimer.unref();
+    };
+    options.signal?.addEventListener("abort", cancel, { once: true });
+    const cleanup = (): void => {
+      options.signal?.removeEventListener("abort", cancel);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+    };
     const timer = setTimeout(
       () => child.kill("SIGKILL"),
       options.timeoutMs ?? 600_000,
     );
     child.once("error", (error) => {
       clearTimeout(timer);
+      cleanup();
       if (pendingLog) emit(pendingLog);
       log?.end();
-      reject(error);
+      reject(cancelled ? new RunnerCommandCancelledError("runner command cancelled") : error);
     });
     child.once("close", (code) => {
       clearTimeout(timer);
+      cleanup();
       if (pendingLog) emit(pendingLog);
       log?.end();
-      resolveRun({ code: code ?? 1, output: output.join("") });
+      if (cancelled) {
+        reject(new RunnerCommandCancelledError("runner command cancelled"));
+      } else {
+        resolveRun({ code: code ?? 1, output: output.join("") });
+      }
     });
   });
 }
@@ -211,6 +238,7 @@ export class ProjectRunnerServer {
   private server: Server | null = null;
   private readonly queue: RunnerJob[] = [];
   private processing = false;
+  private activeJob: { job: RunnerJob; controller: AbortController } | null = null;
   private readonly environments: ProjectEnvironmentStore;
   private readonly runtimeEnvironmentRoot: string;
   private ready: boolean;
@@ -414,6 +442,21 @@ export class ProjectRunnerServer {
       }
       return;
     }
+    if (request.method === "POST" && url.pathname === "/jobs/cancel") {
+      const projectId = url.searchParams.get("project") ?? "";
+      const workspaceId = url.searchParams.get("workspace") ?? "";
+      const jobId = url.searchParams.get("job") ?? "";
+      if (
+        !PROJECT_ID.test(projectId) ||
+        !WORKSPACE_ID.test(workspaceId) ||
+        !JOB_ID.test(jobId)
+      ) {
+        throw new RunnerHttpError(400, "invalid runner cancellation scope");
+      }
+      this.projectConfig(projectId);
+      json(response, 200, { job: await this.cancelJob(projectId, workspaceId, jobId) });
+      return;
+    }
     if (request.method === "GET" && url.pathname === "/jobs") {
       const projectId = url.searchParams.get("project") ?? "";
       const workspaceId = url.searchParams.get("workspace") ?? "";
@@ -592,12 +635,93 @@ export class ProjectRunnerServer {
 
   private storedJob(projectId: string, jobId: string): RunnerJob {
     const path = resolve(this.jobDirectory(projectId, jobId), "job.json");
-    if (!existsSync(path)) throw new RunnerHttpError(404, "migration verification job not found");
+    if (!existsSync(path)) throw new RunnerHttpError(404, "runner job not found");
     try {
       return JSON.parse(readFileSync(path, "utf8")) as RunnerJob;
     } catch {
-      throw new RunnerHttpError(409, "migration verification job is malformed");
+      throw new RunnerHttpError(409, "runner job is malformed");
     }
+  }
+
+  private async cancelJob(
+    projectId: string,
+    workspaceId: string,
+    jobId: string,
+  ): Promise<RunnerJob> {
+    const active = this.activeJob;
+    if (active?.job.id === jobId && active.job.projectId === projectId) {
+      if (active.job.workspaceId !== workspaceId) {
+        throw new RunnerHttpError(404, "runner job not found in this workspace");
+      }
+      if (active.job.status !== "cancelling") {
+        active.job.status = "cancelling";
+        active.job.cancelRequestedAt = new Date().toISOString();
+        this.saveJob(active.job);
+        writeFileSync(
+          resolve(this.jobDirectory(projectId, jobId), "job.log"),
+          `[${active.job.cancelRequestedAt}] cancellation requested\n`,
+          { flag: "a", mode: 0o600 },
+        );
+        active.controller.abort();
+      }
+      return active.job;
+    }
+
+    const queuedIndex = this.queue.findIndex((job) => job.id === jobId && job.projectId === projectId);
+    if (queuedIndex >= 0) {
+      const [job] = this.queue.splice(queuedIndex, 1);
+      if (!job || job.workspaceId !== workspaceId) {
+        if (job) this.queue.splice(queuedIndex, 0, job);
+        throw new RunnerHttpError(404, "runner job not found in this workspace");
+      }
+      return this.finishCancelledJob(job);
+    }
+
+    const stored = this.storedJob(projectId, jobId);
+    if (
+      stored.id !== jobId ||
+      stored.projectId !== projectId ||
+      (stored.workspaceId ?? "repo") !== workspaceId
+    ) {
+      throw new RunnerHttpError(404, "runner job not found in this workspace");
+    }
+    if (!new Set(["queued", "running", "cancelling", "cancelled", "completed", "failed"])
+      .has(stored.status)) {
+      throw new RunnerHttpError(409, "runner job status is malformed");
+    }
+    if (stored.status === "cancelled") return stored;
+    if (stored.status === "completed" || stored.status === "failed") {
+      throw new RunnerHttpError(409, `runner job is already ${stored.status}`);
+    }
+    if (stored.status === "running" || stored.status === "cancelling") {
+      const containerName = `summing-${stored.projectId}-${stored.id.slice(0, 8)}`;
+      await run(this.dockerBinary, ["rm", "--force", containerName], {
+        cwd: this.dataRoot,
+        logPath: resolve(this.jobDirectory(projectId, jobId), "job.log"),
+        timeoutMs: 30_000,
+      });
+    }
+    return this.finishCancelledJob(stored);
+  }
+
+  private finishCancelledJob(job: RunnerJob): RunnerJob {
+    const completedAt = new Date().toISOString();
+    job.status = "cancelled";
+    job.cancelRequestedAt ??= completedAt;
+    job.completedAt = completedAt;
+    job.error = "cancelled by user";
+    const directory = this.jobDirectory(job.projectId, job.id);
+    writeFileSync(
+      resolve(directory, "job.log"),
+      `[${completedAt}] CANCELLED by user\n`,
+      { flag: "a", mode: 0o600 },
+    );
+    this.saveJob(job);
+    rmSync(resolve(directory, "source"), { recursive: true, force: true });
+    rmSync(resolve(directory, "source.tar"), { force: true });
+    rmSync(resolve(directory, "environment.json"), { force: true });
+    this.pruneJobDirectories(job.projectId);
+    return job;
   }
 
   private saveJob(job: RunnerJob): void {
@@ -670,14 +794,20 @@ export class ProjectRunnerServer {
     this.processing = true;
     try {
       for (let job = this.queue.shift(); job; job = this.queue.shift()) {
-        await this.execute(job);
+        const controller = new AbortController();
+        this.activeJob = { job, controller };
+        try {
+          await this.execute(job, controller.signal);
+        } finally {
+          if (this.activeJob?.job.id === job.id) this.activeJob = null;
+        }
       }
     } finally {
       this.processing = false;
     }
   }
 
-  private async execute(job: RunnerJob): Promise<void> {
+  private async execute(job: RunnerJob, signal: AbortSignal): Promise<void> {
     const directory = this.jobDirectory(job.projectId, job.id);
     const logPath = resolve(directory, "job.log");
     const source = resolve(directory, "source");
@@ -694,6 +824,7 @@ export class ProjectRunnerServer {
       const listed = await run("/usr/bin/tar", ["-tf", resolve(directory, "source.tar")], {
         cwd: directory,
         logPath,
+        signal,
         timeoutMs: 30_000,
       });
       if (listed.code !== 0) throw new Error("source archive cannot be listed");
@@ -705,20 +836,28 @@ export class ProjectRunnerServer {
       const extracted = await run(
         "/usr/bin/tar",
         ["--extract", "--file", resolve(directory, "source.tar"), "--directory", source, "--no-same-owner", "--no-same-permissions"],
-        { cwd: directory, logPath, timeoutMs: 60_000 },
+        { cwd: directory, logPath, signal, timeoutMs: 60_000 },
       );
       if (extracted.code !== 0) throw new Error("source archive extraction failed");
-      await this.ensureImage(job, source, logPath);
+      await this.ensureImage(job, source, logPath, signal);
+      if (signal.aborted) throw new RunnerCommandCancelledError("runner job cancelled");
       const result = job.action === "build"
         ? { code: 0 }
-        : await this.runImage(job, this.projectConfig(job.projectId), source, logPath);
+        : await this.runImage(job, this.projectConfig(job.projectId), source, logPath, signal);
       job.exitCode = result.code;
       if (result.code !== 0) throw new Error(`${job.action} exited with code ${result.code}`);
+      if (signal.aborted) throw new RunnerCommandCancelledError("runner job cancelled");
       job.status = "completed";
     } catch (error) {
-      job.status = "failed";
-      job.error = error instanceof Error ? error.message : String(error);
-      writeFileSync(logPath, `[${new Date().toISOString()}] ERROR ${job.error}\n`, { flag: "a" });
+      if (signal.aborted || error instanceof RunnerCommandCancelledError) {
+        job.status = "cancelled";
+        job.error = "cancelled by user";
+        writeFileSync(logPath, `[${new Date().toISOString()}] CANCELLED by user\n`, { flag: "a" });
+      } else {
+        job.status = "failed";
+        job.error = error instanceof Error ? error.message : String(error);
+        writeFileSync(logPath, `[${new Date().toISOString()}] ERROR ${job.error}\n`, { flag: "a" });
+      }
     } finally {
       if (job.action === "dry-run") {
         const project = this.projectConfig(job.projectId);
@@ -738,11 +877,17 @@ export class ProjectRunnerServer {
     return `summing/${job.projectId}-${job.workspaceId}:${job.revision}`;
   }
 
-  private async ensureImage(job: RunnerJob, source: string, logPath: string): Promise<void> {
+  private async ensureImage(
+    job: RunnerJob,
+    source: string,
+    logPath: string,
+    signal: AbortSignal,
+  ): Promise<void> {
     const image = this.image(job);
     const existing = await run(this.dockerBinary, ["image", "inspect", image], {
       cwd: source,
       logPath,
+      signal,
       timeoutMs: 30_000,
     });
     if (existing.code === 0) return;
@@ -756,7 +901,7 @@ export class ProjectRunnerServer {
         "--tag", image,
         ".",
       ],
-      { cwd: source, logPath, timeoutMs: 900_000 },
+      { cwd: source, logPath, signal, timeoutMs: 900_000 },
     );
     if (built.code !== 0) throw new Error(`docker build exited with code ${built.code}`);
   }
@@ -766,6 +911,7 @@ export class ProjectRunnerServer {
     project: RunnerProjectConfig,
     source: string,
     logPath: string,
+    signal: AbortSignal,
   ): Promise<{ code: number }> {
     const configPath = this.runtimeConfigPath(project, source);
     mkdirSync(project.dataPath, { recursive: true, mode: 0o700 });
@@ -781,10 +927,11 @@ export class ProjectRunnerServer {
       mkdirSync(directory, { recursive: true, mode: 0o700 });
     }
     const access = this.runtimeAccess(job, logPath);
+    const containerName = `summing-${job.projectId}-${job.id.slice(0, 8)}`;
     try {
       const args = [
       "run", "--rm", "--init",
-      "--name", `summing-${job.projectId}-${job.id.slice(0, 8)}`,
+      "--name", containerName,
       "--read-only",
       "--user", "0:0",
       "--cap-drop", "ALL",
@@ -817,10 +964,18 @@ export class ProjectRunnerServer {
         logPath,
         timeoutMs: job.action === "run" ? 14_400_000 : 900_000,
         redactions: access.redactions,
+        signal,
       });
       return { code: result.code };
     } finally {
       try {
+        if (signal.aborted) {
+          await run(this.dockerBinary, ["rm", "--force", containerName], {
+            cwd: this.dataRoot,
+            logPath,
+            timeoutMs: 30_000,
+          });
+        }
         this.redactArtifacts(job, project, access.redactions);
       } finally {
         if (access.envPath) rmSync(access.envPath, { force: true });
@@ -920,7 +1075,9 @@ export class ProjectRunnerServer {
           if (
             job.id !== entry ||
             job.projectId !== projectId ||
-            (job.status !== "completed" && job.status !== "failed") ||
+            (job.status !== "completed" &&
+              job.status !== "failed" &&
+              job.status !== "cancelled") ||
             typeof job.createdAt !== "string"
           ) {
             return [];

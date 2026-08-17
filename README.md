@@ -86,7 +86,9 @@ Team Space: создаётся при подключении командног�
 - Project Viewer открывается как Telegram Mini App: показывает дерево, безопасный
   текст файлов, working/commit/run diff, состояние `origin`, безопасные Pull/Push
   текущей ветки и явную fast-forward публикацию её `HEAD` в `origin/master`,
-  runner jobs, логи и простой dotenv-editor;
+  runner jobs, их остановку, логи и простой dotenv-editor; вкладка **Правки
+  агента** показывает Codex diff, а **Раннер** отвечает за Build / Validate /
+  Dry run / Live run;
 - отдельный администраторский Mini App открывается постоянной кнопкой
   **Управление** в личном чате: показывает проекты и обнаруженные Telegram-топики,
   сводит наблюдаемых пользователей по группе и топикам с Telegram ID и активностью,

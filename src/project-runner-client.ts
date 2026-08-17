@@ -5,7 +5,13 @@ import type {
 } from "./project-environment-migration.js";
 
 export type RunnerAction = "build" | "validate" | "dry-run" | "run";
-export type RunnerJobStatus = "queued" | "running" | "completed" | "failed";
+export type RunnerJobStatus =
+  | "queued"
+  | "running"
+  | "cancelling"
+  | "cancelled"
+  | "completed"
+  | "failed";
 
 export interface RunnerJob {
   id: string;
@@ -16,6 +22,7 @@ export interface RunnerJob {
   status: RunnerJobStatus;
   createdAt: string;
   startedAt?: string;
+  cancelRequestedAt?: string;
   completedAt?: string;
   exitCode?: number;
   error?: string;
@@ -141,6 +148,15 @@ export class ProjectRunnerClient {
       `/jobs?${query.toString()}`,
     );
     return result.jobs;
+  }
+
+  async cancel(projectId: string, workspaceId: string, jobId: string): Promise<RunnerJob> {
+    const query = new URLSearchParams({ project: projectId, workspace: workspaceId, job: jobId });
+    const result = await this.call<{ job: RunnerJob }>(
+      "POST",
+      `/jobs/cancel?${query.toString()}`,
+    );
+    return result.job;
   }
 
   async log(projectId: string, jobId: string): Promise<string> {

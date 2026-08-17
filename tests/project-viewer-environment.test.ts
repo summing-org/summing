@@ -81,6 +81,7 @@ test("viewer edits one plaintext environment per workspace and jobs no longer re
     updatedAt: "2026-08-14T00:00:00.000Z" as string | null,
   };
   let submission: unknown[] = [];
+  let cancellation: unknown[] = [];
   Object.assign(viewer.runner, {
     available: async () => true,
     environment: async (projectId: string, workspaceId: string) => {
@@ -108,6 +109,19 @@ test("viewer edits one plaintext environment per workspace and jobs no longer re
         revision: "a".repeat(40),
         status: "queued",
         createdAt: "2026-08-14T00:00:00Z",
+      };
+    },
+    cancel: async (...args: unknown[]) => {
+      cancellation = args;
+      return {
+        id: "00000000-0000-4000-8000-000000000001",
+        projectId: "demo",
+        workspaceId: "repo",
+        action: "dry-run",
+        revision: "a".repeat(40),
+        status: "cancelled",
+        createdAt: "2026-08-14T00:00:00Z",
+        completedAt: "2026-08-14T00:01:00Z",
       };
     },
   });
@@ -141,6 +155,21 @@ test("viewer edits one plaintext environment per workspace and jobs no longer re
     });
     assert.equal(launched.status, 202);
     assert.deepEqual(submission.slice(0, 2), ["demo", "repo"]);
+
+    const cancelled = await fetch(`${endpoint}/api/viewer/jobs/cancel`, {
+      method: "POST",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({
+        conversation: conversation.id,
+        job: "00000000-0000-4000-8000-000000000001",
+      }),
+    });
+    assert.equal(cancelled.status, 200);
+    assert.deepEqual(cancellation, [
+      "demo",
+      "repo",
+      "00000000-0000-4000-8000-000000000001",
+    ]);
   } finally {
     await viewer.close();
     state.close();

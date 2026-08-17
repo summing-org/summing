@@ -542,6 +542,22 @@ export class ProjectViewerServer {
       json(response, 202, { job });
       return;
     }
+    if (request.method === "POST" && url.pathname === "/api/viewer/jobs/cancel") {
+      const body = await requestBody(request) as Record<string, unknown> | null;
+      const requestedConversation = String(body?.conversation ?? "");
+      const jobId = String(body?.job ?? "");
+      if (!/^[0-9a-f-]{36}$/.test(jobId)) {
+        throw new ViewerHttpError(400, "invalid job id");
+      }
+      const scope = await this.scope(requestedConversation, telegramUser);
+      const job = await this.runner.cancel(
+        scope.project.id,
+        scope.project.workspace,
+        jobId,
+      );
+      json(response, 200, { job });
+      return;
+    }
     throw new ViewerHttpError(404, "not found");
   }
 

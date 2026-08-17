@@ -28,7 +28,11 @@ async function completedJob(
   for (;;) {
     const job = (await client.jobs(projectId, workspaceId)).find((candidate) => candidate.id === jobId);
     assert.ok(job);
-    if (job.status !== "queued" && job.status !== "running") return job;
+    if (
+      job.status !== "queued" &&
+      job.status !== "running" &&
+      job.status !== "cancelling"
+    ) return job;
     if (Date.now() > deadline) throw new Error("runner job timed out");
     await new Promise((resolveWait) => setTimeout(resolveWait, 20));
   }
@@ -206,6 +210,90 @@ exit 0
     assert.equal(existsSync(join(runs, dryRun.id)), true);
     assert.equal(existsSync(join(runs, malformedId)), true);
     assert.equal(existsSync(join(runs, queuedId)), true);
+  } finally {
+    await server.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runner cancels queued jobs and force-removes a running job container", async () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-runner-cancel-"));
+  const repository = join(root, "repo");
+  const configRoot = join(root, "config");
+  const dataRoot = join(root, "data");
+  const socket = join(root, "runner.sock");
+  const fakeDocker = join(root, "docker");
+  const dockerCalls = join(root, "docker.calls");
+  const runningMarker = join(root, "running");
+  const appConfig = join(root, "app.json");
+  const appData = join(root, "app-data");
+  mkdirSync(repository);
+  mkdirSync(configRoot);
+  execFileSync("git", ["init", "--initial-branch=main", repository]);
+  execFileSync("git", ["-C", repository, "config", "user.name", "Test"]);
+  execFileSync("git", ["-C", repository, "config", "user.email", "test@example.test"]);
+  writeFileSync(join(repository, "Dockerfile"), "FROM scratch\n");
+  execFileSync("git", ["-C", repository, "add", "."]);
+  execFileSync("git", ["-C", repository, "commit", "-m", "image"]);
+  writeFileSync(appConfig, "{}\n");
+  writeFileSync(
+    join(configRoot, "demo.json"),
+    JSON.stringify({ configPath: appConfig, dataPath: appData, network: false }),
+  );
+  writeFileSync(
+    fakeDocker,
+    `#!/bin/sh
+printf '%s\n' "$*" >> "${dockerCalls}"
+if [ "$1" = image ]; then exit 0; fi
+if [ "$1" = run ]; then
+  : > "${runningMarker}"
+  trap 'exit 143' TERM INT
+  while :; do sleep 1; done
+fi
+exit 0
+`,
+    { mode: 0o700 },
+  );
+  const server = new ProjectRunnerServer(
+    socket,
+    dataRoot,
+    configRoot,
+    fakeDocker,
+    Buffer.alloc(32, 9),
+  );
+  try {
+    await server.start();
+    const inspector = new GitInspector(repository);
+    const revision = await inspector.resolveRevision("HEAD");
+    const archive = await inspector.archive(revision);
+    const client = new ProjectRunnerClient(socket);
+    const running = await client.submit("demo", "repo", "run", revision, archive);
+    const runningDeadline = Date.now() + 5_000;
+    while (!existsSync(runningMarker)) {
+      if (Date.now() > runningDeadline) throw new Error("runner did not start the live job");
+      await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+    }
+
+    const queued = await client.submit("demo", "repo", "run", revision, archive);
+    assert.equal((await client.cancel("demo", "repo", queued.id)).status, "cancelled");
+    assert.equal(
+      (await client.jobs("demo", "repo")).find((job) => job.id === queued.id)?.status,
+      "cancelled",
+    );
+
+    assert.equal((await client.cancel("demo", "repo", running.id)).status, "cancelling");
+    const cancelled = await completedJob(client, "demo", "repo", running.id);
+    assert.equal(cancelled.status, "cancelled");
+    assert.equal(cancelled.error, "cancelled by user");
+    assert.ok(cancelled.cancelRequestedAt);
+    assert.ok(cancelled.completedAt);
+    assert.match(await client.log("demo", running.id), /cancellation requested/);
+    assert.match(await client.log("demo", running.id), /CANCELLED by user/);
+    assert.match(
+      readFileSync(dockerCalls, "utf8"),
+      new RegExp(`rm --force summing-demo-${running.id.slice(0, 8)}`),
+    );
+    assert.equal((await client.cancel("demo", "repo", running.id)).status, "cancelled");
   } finally {
     await server.close();
     rmSync(root, { recursive: true, force: true });
