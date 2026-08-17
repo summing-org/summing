@@ -20,8 +20,21 @@
     "codex:types": "codex app-server generate-ts --experimental --out .codex-protocol"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1111.0",
+    "exceljs": "^4.4.0",
     "heic-convert": "^2.1.0",
-    "smol-toml": "^1.7.1"
+    "jszip": "^3.10.1",
+    "mammoth": "^1.12.1",
+    "pdfjs-dist": "^6.2.108",
+    "prebuilt-tdlib": "^0.1008066.0",
+    "smol-toml": "^1.7.1",
+    "sqlite-vec": "^0.1.9",
+    "tdl": "^8.1.0"
+  },
+  "overrides": {
+    "exceljs": {
+      "uuid": "^11.1.1"
+    }
   },
   "devDependencies": {
     "@types/heic-convert": "^2.1.1",

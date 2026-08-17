@@ -570,8 +570,27 @@ test("Team Space pause and retention prevent covert indefinite collection", () =
       administratorUserId: 1,
     })!;
     const space = store.teamSpaceForProvider("telegram", "-900")!;
-    assert.equal(store.purgeExpiredTeamEvidence(30, 1_000 + 31 * 86_400), 1);
+    const retainedEvent = store.recordTeamEvent({
+      provider: "telegram",
+      externalSpaceId: "-901",
+      externalThreadId: "0",
+      spaceName: "Permanent library",
+      sourceTitle: "general",
+      externalEventId: "1",
+      eventKind: "message",
+      senderExternalId: "43",
+      senderDisplayName: "User 2",
+      text: "retained evidence",
+      occurredAt: 1_000,
+      administratorUserId: 1,
+    })!;
+    const retainedSpace = store.teamSpaceForProvider("telegram", "-901")!;
+    assert.equal(
+      store.purgeExpiredTeamEvidence(30, 1_000 + 31 * 86_400, [retainedSpace.id]),
+      1,
+    );
     assert.equal(store.teamEvent(event.id)?.synthesisState, "redacted");
+    assert.equal(store.teamEvent(retainedEvent.id)?.synthesisState, "pending");
     store.setTeamSpacePhase(space.id, "paused");
     assert.equal(store.recordTeamEvent({
       provider: "telegram",

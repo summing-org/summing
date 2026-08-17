@@ -90,6 +90,31 @@ test("loads the explicit project model", () => {
     assert.equal(config.deploymentRequestPath, join(root, "deploy", "request.json"));
     assert.equal(config.deploymentStatePath, join(root, "deploy", "state.json"));
     assert.equal(config.project("demo").workspace().path, workspace);
+    assert.equal(config.knowledgeSync.enabled, false);
+    assert.equal(config.knowledgeSync.embeddingModel, "text-embedding-3-small");
+    assert.equal(config.knowledgeSync.documentVisionModel, "gpt-5.4-nano");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("knowledge sync rejects ambiguous object-store and encryption modes", () => {
+  const { root, configPath } = fixture();
+  const base = {
+    SUMMING_DATA_DIR: join(root, "data"),
+    SUMMING_CONFIG: configPath,
+    TELEGRAM_BOT_TOKEN: "test-token",
+    TELEGRAM_OWNER_ID: "42",
+  };
+  try {
+    assert.throws(
+      () => loadConfig({ ...base, SUMMING_OBJECT_STORE: "filesystem" }),
+      (error) => error instanceof ConfigError && error.message.includes("object_store"),
+    );
+    assert.throws(
+      () => loadConfig({ ...base, SUMMING_S3_SSE: "none" }),
+      (error) => error instanceof ConfigError && error.message.includes("s3_sse"),
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

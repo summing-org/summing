@@ -354,6 +354,7 @@ Runtime сохраняет событие `my_chat_member`, поэтому до�
 | `/projects` | Показать доступные отправителю проекты. |
 | `/bind` | Связать текущий topic с Project/Workspace. |
 | `/status` | Проверить версию SUMMING, Codex, account, binding и runs. |
+| `/sync_status [chat_id]` | Краткий статус всех knowledge-sync источников или подробный статус группы; только администратор в личном чате. |
 | `/files` | Открыть Project Viewer, Git Pull/Push, diff, runner jobs и логи. |
 | `/steer` | Добавить указание в активный turn. |
 | Reply на stream | То же, без команды. |
@@ -373,7 +374,9 @@ Runtime сохраняет событие `my_chat_member`, поэтому до�
 ```text
 $SUMMING_DATA_DIR/
 ├── config.toml
-├── state.sqlite3
+├── state.sqlite3                  # существующие Team Space events и agent state
+├── core.sqlite                    # sync, consent, jobs, objects и canonical blocks
+├── search.sqlite                  # восстанавливаемые FTS5/sqlite-vec индексы
 ├── runner-control.sqlite3         # расписания, исполнения, планы подтверждения и audit
 ├── codex/
 ├── memory/identity.md
@@ -383,6 +386,16 @@ $SUMMING_DATA_DIR/
 ├── repositories/<id>/<repo>/
 └── worktrees/<conversation-id>/
 ```
+
+Постоянная библиотека Telegram включается секцией `[knowledge_sync]`. В
+production одновременно обязательны `telegram_terms_reviewed = true`,
+S3-совместимый backend и отдельный 32-байтовый MTProto master key. Подключение
+аккаунта, фиксация согласий авторов и allowlist групп выполняются во вкладке
+**База знаний** Admin Mini App. `core.sqlite` и объектное хранилище являются
+источником истины для нового pipeline; `search.sqlite` полностью
+восстанавливается из canonical blocks и versioned embeddings. MTProto-коннектор
+остаётся активным после backfill и удаляется только отдельным подтверждённым
+отзывом после отвязки всех групп.
 
 Полная архитектура и VPS runbook: [PROJECT_HANDBOOK_RU.md](PROJECT_HANDBOOK_RU.md).
 Конституционные принципы: [BIBLE.md](BIBLE.md).

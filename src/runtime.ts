@@ -30,6 +30,7 @@ import { DeploymentEventNotifier } from "./deployment-event-notifier.js";
 import { HealthServer } from "./health-server.js";
 import { productionEnvironmentMigrationCoordinator } from "./project-environment-coordinator.js";
 import { helpMessage } from "./help-message.js";
+import { KnowledgeSyncService } from "./knowledge-sync.js";
 import { ProjectCatalog, ProjectCatalogError } from "./project-catalog.js";
 import { GitInspector } from "./git-inspector.js";
 import { ProjectViewerServer } from "./project-viewer.js";
@@ -444,6 +445,7 @@ export class SummingRuntime {
   readonly viewer: ProjectViewerServer;
   readonly runnerControl: RunnerControlPlane;
   readonly deploymentEvents: DeploymentEventNotifier;
+  readonly knowledgeSync: KnowledgeSyncService;
   private readonly shutdown = new Deferred<void>();
   private readonly shutdownController = new AbortController();
   private stopping = false;
@@ -481,6 +483,17 @@ export class SummingRuntime {
     this.projects = new ProjectCatalog(config, this.state);
     this.codex = new CodexAppServer(config.codexBinary, config.codexHome);
     this.telegram = new TelegramAPI(config.telegramToken);
+    this.knowledgeSync = new KnowledgeSyncService(
+      config.knowledgeSync,
+      this.state,
+      config.openaiApiKey,
+      async (message) => this.telegram.sendMessage(config.telegramOwnerId, message).then(() => {}),
+      config.dataDir,
+      config.telegramOwnerId,
+      (sourceId) => {
+        if (config.teamModelEgressEnabled) this.scheduleTeamUnderstanding(sourceId);
+      },
+    );
     this.workspaces = new WorkspaceManager(config);
     this.attachments = new AttachmentService(
       this.telegram,
@@ -510,6 +523,7 @@ export class SummingRuntime {
       undefined,
       (conversation) => this.processors.has(conversation.id),
       (chatId, topicId) => this.afterTopicBindingChanged(chatId, topicId),
+      this.knowledgeSync,
     );
     this.runnerControl = new RunnerControlPlane(
       resolve(config.dataDir, "runner-control.sqlite3"),
@@ -557,6 +571,7 @@ export class SummingRuntime {
       this.telegramBotId = Number(me.id ?? 0);
       this.telegramUsername = String(me.username ?? "").replace(/^@/, "").toLowerCase();
       console.info(`Telegram bot connected: @${this.telegramUsername || "unknown"}`);
+      await this.knowledgeSync.start();
       await this.deploymentEvents.observeState();
       this.deploymentEvents.start();
       if (this.config.teamModelEgressEnabled) {
@@ -610,6 +625,7 @@ export class SummingRuntime {
       this.clearTeamUnderstandingTimers();
       this.deploymentEvents.stop();
       await this.runnerControl.stopAndWait();
+      await this.knowledgeSync.close();
       await this.telegram.close();
       await this.deploymentEvents.close();
       await this.codex.close(this.exitCode === 99);
@@ -681,6 +697,11 @@ export class SummingRuntime {
         scheduled_understanding_loops: this.teamUnderstandingTimers.size,
         active_understanding_loops: this.teamUnderstandingProcessors.size,
       },
+      knowledge_sync: {
+        enabled: this.config.knowledgeSync.enabled,
+        groups: this.knowledgeSync.store.listSyncStatuses().length,
+        connectors: this.knowledgeSync.store.listConnectors().length,
+      },
       telegram_last_poll: this.lastTelegramPoll,
       viewer: {
         port: this.config.viewerPort,
@@ -750,7 +771,17 @@ export class SummingRuntime {
 
   private purgeTeamEvidence(): void {
     if (!this.config.teamMemoryEnabled) return;
-    const redacted = this.state.purgeExpiredTeamEvidence(this.config.teamRawRetentionDays);
+    const retainedSpaces = [...new Set(
+      this.knowledgeSync.store.consentedRetainedSourceIds().flatMap((sourceId) => {
+        const source = this.state.teamSource(sourceId);
+        return source ? [source.spaceId] : [];
+      }),
+    )];
+    const redacted = this.state.purgeExpiredTeamEvidence(
+      this.config.teamRawRetentionDays,
+      Date.now() / 1_000,
+      retainedSpaces,
+    );
     if (redacted > 0) console.info(`redacted ${redacted} expired Team Space events`);
   }
 
@@ -1026,6 +1057,7 @@ export class SummingRuntime {
           : { orientationMessage: "", clarificationQuestions: [] }),
       };
       this.state.applyTeamUnderstanding(spaceId, eventIds, result, startedAt);
+      this.knowledgeSync.scheduleKnowledgeRefresh(Number(source.externalSpaceId));
       applied = true;
       await this.publishTeamUnderstandingIntervention(space, events, result);
     } catch (error) {
@@ -1445,7 +1477,13 @@ export class SummingRuntime {
     const teamInput = teamEligible
       ? telegramTeamEventInput(message, this.config.telegramOwnerId)
       : null;
-    const teamEvent = teamInput ? this.state.recordTeamEvent(teamInput) : null;
+    const teamEvent = teamInput && this.knowledgeSync.admitLiveTelegramEvent(
+      chatId,
+      Number(teamInput.senderExternalId),
+      teamInput.occurredAt,
+    )
+      ? this.state.recordTeamEvent(teamInput)
+      : null;
     if (teamEvent) this.scheduleTeamUnderstanding(teamEvent.sourceId);
     if (!senderId || sender.is_bot === true) return;
     if (
@@ -1787,7 +1825,11 @@ export class SummingRuntime {
         "edit",
         `${messageId}:${providerUpdateId ? `update:${providerUpdateId}` : editDate}`,
       );
-      if (input) {
+      if (input && this.knowledgeSync.admitLiveTelegramEvent(
+        chatId,
+        Number(input.senderExternalId),
+        input.occurredAt,
+      )) {
         const event = this.state.recordTeamEvent(input);
         if (event) this.scheduleTeamUnderstanding(event.sourceId);
       }
@@ -1809,6 +1851,12 @@ export class SummingRuntime {
     const memberId = Number(member.id ?? 0);
     if (!actorId) return;
     const occurredAt = Number(update.date ?? 0) || Date.now() / 1_000;
+    if (
+      !this.knowledgeSync.admitLiveTelegramEvent(chatId, actorId, occurredAt) ||
+      (memberId > 0 && !this.knowledgeSync.admitLiveTelegramEvent(chatId, memberId, occurredAt))
+    ) {
+      return;
+    }
     const actorName = [actor.first_name, actor.last_name]
       .filter((part): part is string => typeof part === "string" && Boolean(part.trim()))
       .join(" ")
@@ -1847,6 +1895,7 @@ export class SummingRuntime {
     const actor = record(update.user) ?? record(update.actor_chat) ?? {};
     const actorId = Number(actor.id ?? 0);
     const occurredAt = Number(update.date ?? 0) || Date.now() / 1_000;
+    if (!actorId || !this.knowledgeSync.admitLiveTelegramEvent(chatId, actorId, occurredAt)) return;
     const actorName = [actor.first_name, actor.last_name]
       .filter((part): part is string => typeof part === "string" && Boolean(part.trim()))
       .join(" ")
@@ -1965,11 +2014,22 @@ export class SummingRuntime {
         null,
         2,
       );
+      const knowledgeContext = this.config.knowledgeSync.enabled
+        ? await this.knowledgeSync.contextForQuestion(question.text, question.chatId)
+        : [];
       const prompt = [
         UNBOUND_TOPIC_INSTRUCTIONS,
         "",
         "Recent messages received in this topic before the direct question (possibly empty):",
         context,
+        ...(knowledgeContext.length > 0
+          ? [
+              "",
+              "Relevant evidence retrieved from the Team Space knowledge base. Cite its evidence field " +
+                "when relying on it and do not treat derived summaries as more authoritative than raw evidence:",
+              JSON.stringify(knowledgeContext, null, 2),
+            ]
+          : []),
         "",
         "Direct question:",
         question.text || "[No text was supplied.]",
@@ -2922,6 +2982,37 @@ export class SummingRuntime {
         topicId,
         messageId,
         `Откройте энвы через личный чат с ботом:\n${deepLink}`,
+      );
+      return;
+    }
+    if (command === "/sync_status") {
+      if (!isAdministrator) {
+        await this.reply(chatId, topicId, messageId, "Команда доступна только администратору.");
+        return;
+      }
+      if (chatType !== "private") {
+        await this.reply(
+          chatId,
+          topicId,
+          messageId,
+          "Статус синхронизации доступен только в личном чате с ботом.",
+        );
+        return;
+      }
+      let targetChatId: number | undefined;
+      if (argument) {
+        const parsed = Number(argument);
+        if (!Number.isSafeInteger(parsed) || parsed === 0) {
+          await this.reply(chatId, topicId, messageId, "Использование: /sync_status [chat_id]");
+          return;
+        }
+        targetChatId = parsed;
+      }
+      await this.replyLong(
+        chatId,
+        topicId,
+        messageId,
+        this.knowledgeSync.statusText(targetChatId),
       );
       return;
     }

@@ -16,6 +16,56 @@ export class ConfigError extends Error {}
 
 export type TranscriptionProvider = "openai" | "groq";
 
+export type ObjectStoreBackend = "local" | "s3";
+
+export interface KnowledgeSyncConfig {
+  enabled: boolean;
+  telegramTermsReviewed: boolean;
+  objectStoreBackend: ObjectStoreBackend;
+  localObjectRoot: string;
+  spoolRoot: string;
+  spoolMaximumBytes: number;
+  s3Endpoint: string;
+  s3Region: string;
+  s3Bucket: string;
+  s3Prefix: string;
+  s3AccessKeyId: string;
+  s3SecretAccessKey: string;
+  s3ForcePathStyle: boolean;
+  s3Sse: "AES256" | "aws:kms";
+  s3KmsKeyId: string;
+  mtprotoMasterKeyPath: string;
+  embeddingModel: string;
+  embeddingDimensions: number;
+  embeddingBatchSize: number;
+  documentVisionModel: string;
+}
+
+function defaultKnowledgeSyncConfig(dataDir: string): KnowledgeSyncConfig {
+  return {
+    enabled: false,
+    telegramTermsReviewed: false,
+    objectStoreBackend: "local",
+    localObjectRoot: resolve(dataDir, "knowledge-objects"),
+    spoolRoot: resolve(dataDir, "knowledge-spool"),
+    spoolMaximumBytes: 8_000_000_000,
+    s3Endpoint: "",
+    s3Region: "us-east-1",
+    s3Bucket: "",
+    s3Prefix: "summing",
+    s3AccessKeyId: "",
+    s3SecretAccessKey: "",
+    s3ForcePathStyle: false,
+    s3Sse: "AES256",
+    s3KmsKeyId: "",
+    mtprotoMasterKeyPath: "/etc/summing/mtproto.key",
+    embeddingModel: "text-embedding-3-small",
+    embeddingDimensions: 1_536,
+    embeddingBatchSize: 64,
+    documentVisionModel: "gpt-5.4-nano",
+  };
+}
+
 export interface WorkspaceConfig {
   id: string;
   path: string;
@@ -82,6 +132,7 @@ export class RuntimeConfig {
     readonly teamInterventionCooldownSeconds = 3_600,
     readonly teamRawRetentionDays = 365,
     readonly teamAnnounceOnJoin = true,
+    readonly knowledgeSync: KnowledgeSyncConfig = defaultKnowledgeSyncConfig(dataDir),
   ) {}
 
   project(projectId: string): ProjectConfig {
@@ -236,8 +287,19 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig 
   const transcription = table(raw.transcription) ?? {};
   const codexUsage = table(raw.codex_usage) ?? {};
   const teamMemory = table(raw.team_memory) ?? {};
+  const knowledgeSync = table(raw.knowledge_sync) ?? {};
   const health = table(raw.health) ?? {};
   const viewer = table(raw.viewer) ?? {};
+  const objectStoreBackend = String(
+    env.SUMMING_OBJECT_STORE || knowledgeSync.object_store || "local",
+  ).trim();
+  if (objectStoreBackend !== "local" && objectStoreBackend !== "s3") {
+    throw new ConfigError("knowledge_sync.object_store must be 'local' or 's3'");
+  }
+  const s3Sse = String(env.SUMMING_S3_SSE || knowledgeSync.s3_sse || "AES256").trim();
+  if (s3Sse !== "AES256" && s3Sse !== "aws:kms") {
+    throw new ConfigError("knowledge_sync.s3_sse must be 'AES256' or 'aws:kms'");
+  }
   const codexHome = expandPath(env.CODEX_HOME || `${dataDir}/codex`, "CODEX_HOME");
   const worktreeRoot = expandPath(
     env.SUMMING_WORKTREE_ROOT || `${dataDir}/worktrees`,
@@ -403,5 +465,67 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig 
       true,
     ),
     Boolean(teamMemory.announce_on_join ?? true),
+    {
+      enabled: Boolean(knowledgeSync.enabled ?? false),
+      telegramTermsReviewed: String(
+        env.SUMMING_TELEGRAM_TERMS_REVIEWED ??
+          knowledgeSync.telegram_terms_reviewed ??
+          "false",
+      ).toLowerCase() === "true",
+      objectStoreBackend: objectStoreBackend as ObjectStoreBackend,
+      localObjectRoot: expandPath(
+        env.SUMMING_OBJECT_ROOT || knowledgeSync.local_object_root || `${dataDir}/knowledge-objects`,
+        "knowledge_sync.local_object_root",
+      ),
+      spoolRoot: expandPath(
+        env.SUMMING_SYNC_SPOOL || knowledgeSync.spool_root || `${dataDir}/knowledge-spool`,
+        "knowledge_sync.spool_root",
+      ),
+      spoolMaximumBytes: boundedNumber(
+        knowledgeSync.spool_max_bytes ?? 8_000_000_000,
+        "knowledge_sync.spool_max_bytes",
+        100_000_000,
+        100_000_000_000,
+        true,
+      ),
+      s3Endpoint: String(env.SUMMING_S3_ENDPOINT || knowledgeSync.s3_endpoint || "").trim(),
+      s3Region: String(env.SUMMING_S3_REGION || knowledgeSync.s3_region || "us-east-1").trim(),
+      s3Bucket: String(env.SUMMING_S3_BUCKET || knowledgeSync.s3_bucket || "").trim(),
+      s3Prefix: String(env.SUMMING_S3_PREFIX || knowledgeSync.s3_prefix || "summing")
+        .trim().replace(/^\/+|\/+$/g, ""),
+      s3AccessKeyId: String(env.SUMMING_S3_ACCESS_KEY_ID || "").trim(),
+      s3SecretAccessKey: String(env.SUMMING_S3_SECRET_ACCESS_KEY || "").trim(),
+      s3ForcePathStyle: String(
+        env.SUMMING_S3_FORCE_PATH_STYLE ?? knowledgeSync.s3_force_path_style ?? "false",
+      ).toLowerCase() === "true",
+      s3Sse: s3Sse as "AES256" | "aws:kms",
+      s3KmsKeyId: String(env.SUMMING_S3_KMS_KEY_ID || "").trim(),
+      mtprotoMasterKeyPath: expandPath(
+        env.SUMMING_MTPROTO_KEY || knowledgeSync.mtproto_master_key || "/etc/summing/mtproto.key",
+        "knowledge_sync.mtproto_master_key",
+      ),
+      embeddingModel: String(
+        knowledgeSync.embedding_model || "text-embedding-3-small",
+      ).trim(),
+      embeddingDimensions: boundedNumber(
+        knowledgeSync.embedding_dimensions ?? 1_536,
+        "knowledge_sync.embedding_dimensions",
+        256,
+        3_072,
+        true,
+      ),
+      embeddingBatchSize: boundedNumber(
+        knowledgeSync.embedding_batch_size ?? 64,
+        "knowledge_sync.embedding_batch_size",
+        1,
+        2_048,
+        true,
+      ),
+      documentVisionModel: String(
+        env.SUMMING_DOCUMENT_VISION_MODEL ||
+          knowledgeSync.document_vision_model ||
+          "gpt-5.4-nano",
+      ).trim(),
+    },
   );
 }

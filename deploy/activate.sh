@@ -13,6 +13,7 @@ deploy_state_dir=/var/lib/summing/deploy
 env_file=/etc/summing/summing.env
 deploy_env_file=/etc/summing/deploy.env
 config_file="${data_dir}/config.toml"
+mtproto_key=/etc/summing/mtproto.key
 
 if [ ! -f "${repo_dir}/package.json" ]; then
   printf 'SUMMING source is missing from %s.\n' "${repo_dir}" >&2
@@ -73,6 +74,18 @@ install -d -o summing -g summing -m 0700 "${data_dir}/worktrees"
 install -d -o root -g summing -m 1770 "${deploy_state_dir}"
 install -d -o summing-builder -g summing-builder -m 0700 /var/lib/summing-builder
 install -d -o root -g summing -m 0750 /etc/summing
+if [ ! -f "${mtproto_key}" ]; then
+  temporary_mtproto_key=$(mktemp /run/summing-mtproto.XXXXXX)
+  openssl rand -hex 32 > "${temporary_mtproto_key}"
+  install -o root -g summing -m 0440 "${temporary_mtproto_key}" "${mtproto_key}"
+  rm -f "${temporary_mtproto_key}"
+fi
+if [ -L "${mtproto_key}" ] || ! grep -Eq '^[0-9a-fA-F]{64}$' "${mtproto_key}"; then
+  printf '%s\n' 'MTProto master key must be a regular file containing 64 hex characters.' >&2
+  exit 2
+fi
+chown root:summing "${mtproto_key}"
+chmod 0440 "${mtproto_key}"
 install -d -o root -g root -m 0755 /etc/codex
 install -o root -g root -m 0644 \
   "${repo_dir}/deploy/codex-requirements.toml" \

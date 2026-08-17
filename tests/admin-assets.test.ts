@@ -15,6 +15,10 @@ test("administrator Mini App exposes projects, bindings and global settings", ()
   assert.match(ADMIN_HTML, /Настройки SUMMING/);
   assert.match(ADMIN_HTML, /data-admin-section="overview"/);
   assert.match(ADMIN_HTML, /data-admin-section="system"/);
+  assert.match(ADMIN_HTML, /data-admin-section="knowledge"/);
+  assert.match(ADMIN_HTML, /id="connectorForm"/);
+  assert.match(ADMIN_HTML, /id="consentFrom"/);
+  assert.match(ADMIN_HTML, /id="sourceSyncForm"/);
   assert.match(ADMIN_HTML, /id="systemPanel"[^>]+role="tabpanel"/);
   assert.match(ADMIN_HTML, /Обновиться сейчас/);
   assert.match(ADMIN_HTML, /id="deploymentPhase"/);
@@ -27,6 +31,10 @@ test("administrator Mini App exposes projects, bindings and global settings", ()
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/bindings/);
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/users/);
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/deployment/);
+  assert.match(ADMIN_JS, /\/api\/viewer\/admin\/sync/);
+  assert.match(ADMIN_JS, /\/api\/viewer\/admin\/mtproto\/connectors/);
+  assert.match(ADMIN_JS, /Не отправлено уведомление о sync/);
+  assert.match(ADMIN_JS, /state!=="paused"&&status\.collector\.state!=="failed"/);
   assert.match(ADMIN_JS, /deploymentActive/);
   assert.match(ADMIN_JS, /renderDeploymentFailure/);
   assert.match(ADMIN_JS, /renderDeploymentHistory/);

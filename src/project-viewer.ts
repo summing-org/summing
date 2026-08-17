@@ -13,6 +13,7 @@ import {
   type RepositorySyncStatus,
 } from "./git-inspector.js";
 import { ProjectCatalogError, type ProjectCatalog } from "./project-catalog.js";
+import type { KnowledgeSyncAdmin } from "./knowledge-sync.js";
 import {
   ProjectRunnerClient,
   ProjectRunnerClientError,
@@ -139,6 +140,7 @@ export class ProjectViewerServer {
     deployment?: DeploymentControl,
     readonly bindingBusy: (conversation: Conversation) => boolean = () => false,
     readonly afterTopicBound: (chatId: number, topicId: number) => void = () => {},
+    readonly knowledgeSync?: KnowledgeSyncAdmin,
   ) {
     this.auth = new ViewerAuthenticator(
       config.telegramToken,
@@ -220,6 +222,115 @@ export class ProjectViewerServer {
     if (request.method === "GET" && url.pathname === "/api/viewer/admin") {
       this.requireAdminAccess(telegramUser);
       json(response, 200, this.adminOverview());
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/api/viewer/admin/sync") {
+      this.requireAdminAccess(telegramUser);
+      json(response, 200, this.requireKnowledgeSync().overview());
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/viewer/admin/mtproto/connectors") {
+      this.requireAdminAccess(telegramUser);
+      const body = await requestBody(request) as Record<string, unknown> | null;
+      try {
+        const status = this.requireKnowledgeSync().beginAuthorization({
+          apiId: Number(body?.apiId),
+          apiHash: String(body?.apiHash ?? ""),
+          phone: String(body?.phone ?? ""),
+        });
+        json(response, 201, status);
+      } catch (error) {
+        throw new ViewerHttpError(400, error instanceof Error ? error.message : String(error));
+      }
+      return;
+    }
+    const mtprotoAuth = url.pathname.match(
+      /^\/api\/viewer\/admin\/mtproto\/connectors\/([0-9a-f-]{36})\/auth$/,
+    );
+    if (request.method === "POST" && mtprotoAuth) {
+      this.requireAdminAccess(telegramUser);
+      const body = await requestBody(request) as Record<string, unknown> | null;
+      try {
+        json(response, 200, this.requireKnowledgeSync().submitAuthorization(mtprotoAuth[1]!, {
+          ...(body?.code ? { code: String(body.code) } : {}),
+          ...(body?.password ? { password: String(body.password) } : {}),
+        }));
+      } catch (error) {
+        throw new ViewerHttpError(400, error instanceof Error ? error.message : String(error));
+      }
+      return;
+    }
+    const mtprotoConnector = url.pathname.match(
+      /^\/api\/viewer\/admin\/mtproto\/connectors\/([0-9a-f-]{36})$/,
+    );
+    if (request.method === "DELETE" && mtprotoConnector) {
+      this.requireAdminAccess(telegramUser);
+      try {
+        await this.requireKnowledgeSync().revokeConnector(mtprotoConnector[1]!);
+        json(response, 200, { revoked: true });
+      } catch (error) {
+        throw new ViewerHttpError(409, error instanceof Error ? error.message : String(error));
+      }
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/viewer/admin/knowledge/consents") {
+      this.requireAdminAccess(telegramUser);
+      const body = await requestBody(request) as Record<string, unknown> | null;
+      try {
+        json(response, 200, {
+          consent: this.requireKnowledgeSync().grantConsent({
+            chatId: Number(body?.chatId),
+            telegramUserId: Number(body?.telegramUserId),
+            proof: String(body?.proof ?? ""),
+            ...(body?.historicalFrom === undefined || body.historicalFrom === null
+              ? {}
+              : { historicalFrom: Number(body.historicalFrom) }),
+          }),
+        });
+      } catch (error) {
+        throw new ViewerHttpError(400, error instanceof Error ? error.message : String(error));
+      }
+      return;
+    }
+    if (request.method === "DELETE" && url.pathname === "/api/viewer/admin/knowledge/consents") {
+      this.requireAdminAccess(telegramUser);
+      const body = await requestBody(request) as Record<string, unknown> | null;
+      try {
+        await this.requireKnowledgeSync().revokeConsent(
+          Number(body?.chatId),
+          Number(body?.telegramUserId),
+        );
+        json(response, 200, { revoked: true });
+      } catch (error) {
+        throw new ViewerHttpError(400, error instanceof Error ? error.message : String(error));
+      }
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/viewer/admin/knowledge/sources") {
+      this.requireAdminAccess(telegramUser);
+      const body = await requestBody(request) as Record<string, unknown> | null;
+      const action = String(body?.action ?? "start");
+      try {
+        const sync = this.requireKnowledgeSync();
+        if (action === "start") {
+          json(response, 202, await sync.startSource({
+            connectorId: String(body?.connectorId ?? ""),
+            chatId: Number(body?.chatId),
+            ...(body?.title ? { title: String(body.title) } : {}),
+          }));
+        } else if (action === "pause") {
+          json(response, 200, sync.pauseSource(Number(body?.chatId)));
+        } else if (action === "resume") {
+          json(response, 200, await sync.resumeSource(Number(body?.chatId)));
+        } else if (action === "unbind") {
+          sync.unbindSource(Number(body?.chatId));
+          json(response, 200, { unbound: true });
+        } else {
+          throw new Error("unsupported sync action");
+        }
+      } catch (error) {
+        throw new ViewerHttpError(400, error instanceof Error ? error.message : String(error));
+      }
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/viewer/admin/deployment") {
@@ -540,6 +651,11 @@ export class ProjectViewerServer {
     if (!this.isAdministrator(telegramUser)) {
       throw new ViewerHttpError(403, "центр управления доступен только администратору SUMMING");
     }
+  }
+
+  private requireKnowledgeSync(): KnowledgeSyncAdmin {
+    if (!this.knowledgeSync) throw new ViewerHttpError(503, "синхронизация базы знаний не настроена");
+    return this.knowledgeSync;
   }
 
   private adminOverview(): Record<string, unknown> {

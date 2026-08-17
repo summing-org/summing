@@ -1,0 +1,142 @@
+import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { createServer } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+import { ProjectConfig, RuntimeConfig, type WorkspaceConfig } from "../src/config.js";
+import type { KnowledgeSyncAdmin } from "../src/knowledge-sync.js";
+import { ProjectCatalog } from "../src/project-catalog.js";
+import { ProjectViewerServer } from "../src/project-viewer.js";
+import { StateStore } from "../src/state-store.js";
+
+async function freePort(): Promise<number> {
+  const probe = createServer();
+  await new Promise<void>((resolve, reject) => {
+    probe.once("error", reject);
+    probe.listen(0, "127.0.0.1", resolve);
+  });
+  const address = probe.address();
+  const port = address && typeof address === "object" ? address.port : 0;
+  await new Promise<void>((resolve, reject) => probe.close((error) => error ? reject(error) : resolve()));
+  return port;
+}
+
+function signedInitData(token: string, userId: number): string {
+  const params = new URLSearchParams({
+    auth_date: String(Math.floor(Date.now() / 1_000)),
+    query_id: `query-${userId}`,
+    user: JSON.stringify({ id: userId, first_name: "Viewer" }),
+  });
+  const check = [...params.entries()].sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, value]) => `${key}=${value}`).join("\n");
+  const secret = createHmac("sha256", "WebAppData").update(token).digest();
+  params.set("hash", createHmac("sha256", secret).update(check).digest("hex"));
+  return params.toString();
+}
+
+test("owner-only Admin API exposes MTProto, consent and source sync actions", async () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-viewer-sync-"));
+  const repository = join(root, "repo");
+  mkdirSync(repository);
+  const state = new StateStore(join(root, "state.sqlite"));
+  const port = await freePort();
+  const workspace: WorkspaceConfig = { id: "repo", path: repository };
+  const config = new RuntimeConfig(
+    root,
+    join(root, "codex"),
+    join(root, "worktrees"),
+    "bot-token",
+    1,
+    "codex",
+    8_765,
+    2,
+    1,
+    "",
+    "medium",
+    true,
+    new Map([["summing", new ProjectConfig(
+      "summing", "SUMMING", "repo", new Map([["repo", workspace]]), true,
+    )]]),
+    20, 12, 60, "openai", "gpt-transcribe", "", "", 20_000_000, port,
+  );
+  const calls: Array<[string, unknown]> = [];
+  const fake: KnowledgeSyncAdmin = {
+    overview: () => ({ enabled: true, connectors: [], statuses: [] }),
+    beginAuthorization: (input) => {
+      calls.push(["authorize", { ...input, apiHash: "[redacted]" }]);
+      return {
+        connectorId: "11111111-1111-4111-8111-111111111111",
+        state: "wait_code",
+        passwordHint: "",
+        expiresAt: 999,
+        error: "",
+      };
+    },
+    submitAuthorization: (id, input) => {
+      calls.push(["code", { id, ...input }]);
+      return { connectorId: id, state: "ready", passwordHint: "", expiresAt: 999, error: "" };
+    },
+    grantConsent: (input) => { calls.push(["consent", input]); return input; },
+    revokeConsent: async (chatId, userId) => { calls.push(["revoke-consent", { chatId, userId }]); },
+    startSource: async (input) => {
+      calls.push(["start", input]);
+      return { sourceId: "source" } as never;
+    },
+    pauseSource: (chatId) => ({ chatId } as never),
+    resumeSource: async (chatId) => ({ chatId } as never),
+    unbindSource: (chatId) => { calls.push(["unbind", chatId]); },
+    revokeConnector: async (id) => { calls.push(["revoke-connector", id]); },
+  };
+  const viewer = new ProjectViewerServer(
+    config,
+    state,
+    new ProjectCatalog(config, state),
+    undefined,
+    () => false,
+    () => {},
+    fake,
+  );
+  const endpoint = `http://127.0.0.1:${port}`;
+  const auth = (userId: number) => ({ "x-telegram-init-data": signedInitData("bot-token", userId) });
+  try {
+    assert.equal(viewer.knowledgeSync, fake);
+    await viewer.start();
+    assert.equal((await fetch(`${endpoint}/api/viewer/admin/sync`, { headers: auth(2) })).status, 403);
+    const overview = await fetch(`${endpoint}/api/viewer/admin/sync`, { headers: auth(1) });
+    const overviewPayload = await overview.json();
+    assert.equal(overview.status, 200, JSON.stringify(overviewPayload));
+    assert.deepEqual(overviewPayload, { enabled: true, connectors: [], statuses: [] });
+
+    const created = await fetch(`${endpoint}/api/viewer/admin/mtproto/connectors`, {
+      method: "POST",
+      headers: { ...auth(1), "content-type": "application/json" },
+      body: JSON.stringify({ apiId: 123, apiHash: "a".repeat(32), phone: "+79990000000" }),
+    });
+    assert.equal(created.status, 201);
+
+    const consent = await fetch(`${endpoint}/api/viewer/admin/knowledge/consents`, {
+      method: "POST",
+      headers: { ...auth(1), "content-type": "application/json" },
+      body: JSON.stringify({ chatId: -100, telegramUserId: 42, proof: "contract" }),
+    });
+    assert.equal(consent.status, 200);
+
+    const started = await fetch(`${endpoint}/api/viewer/admin/knowledge/sources`, {
+      method: "POST",
+      headers: { ...auth(1), "content-type": "application/json" },
+      body: JSON.stringify({
+        action: "start",
+        chatId: -100,
+        connectorId: "11111111-1111-4111-8111-111111111111",
+      }),
+    });
+    assert.equal(started.status, 202);
+    assert.equal(calls.map(([name]) => name).join(","), "authorize,consent,start");
+  } finally {
+    await viewer.close();
+    state.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});

@@ -1489,6 +1489,29 @@ export class StateStore {
     });
   }
 
+  redactTeamEventsForProvider(
+    provider: string,
+    externalSpaceId: string,
+    externalEventId: string,
+    redactedAt = Date.now() / 1_000,
+  ): number[] {
+    const rows = this.db.prepare(`
+      SELECT team_events.id
+      FROM team_events
+      JOIN team_sources ON team_sources.id = team_events.source_id
+      WHERE team_sources.provider = ?
+        AND team_sources.external_space_id = ?
+        AND (
+          team_events.external_event_id = ?
+          OR instr(team_events.external_event_id, ? || ':') = 1
+        )
+        AND team_events.synthesis_state <> 'redacted'
+    `).all(provider, externalSpaceId, externalEventId, externalEventId) as Row[];
+    const ids = rows.map((row) => Number(row.id));
+    for (const id of ids) this.redactTeamEvent(id, redactedAt);
+    return ids;
+  }
+
   private toTeamEvent(row: Row): TeamEvent {
     let attachments: TeamEventAttachment[] = [];
     try {
@@ -1543,6 +1566,15 @@ export class StateStore {
     `).all(spaceId, sourceId, limit) as Row[]).map((row) => this.toTeamEvent(row));
   }
 
+  teamEventsAfter(spaceId: string, afterId: number, limit = 500): TeamEvent[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM team_events
+      WHERE space_id = ? AND id > ? AND synthesis_state <> 'redacted'
+      ORDER BY id LIMIT ?
+    `).all(spaceId, afterId, limit) as Row[];
+    return rows.map((row) => this.toTeamEvent(row));
+  }
+
   teamEventCount(spaceId: string): number {
     const row = this.db.prepare(
       "SELECT COUNT(*) AS count FROM team_events WHERE space_id = ? AND synthesis_state <> 'redacted'",
@@ -1571,6 +1603,19 @@ export class StateStore {
         AND synthesis_state <> 'redacted'
     `).get(spaceId, provider, externalUserId) as Row;
     return Number(row.count);
+  }
+
+  teamEventIdsForIdentity(spaceId: string, provider: string, externalUserId: string): number[] {
+    return (this.db.prepare(`
+      SELECT team_events.id
+      FROM team_events
+      JOIN team_identities ON team_identities.person_id = team_events.person_id
+        AND team_identities.space_id = team_events.space_id
+      WHERE team_events.space_id = ? AND team_identities.provider = ?
+        AND team_identities.external_user_id = ?
+        AND team_events.synthesis_state <> 'redacted'
+      ORDER BY team_events.id
+    `).all(spaceId, provider, externalUserId) as Row[]).map((row) => Number(row.id));
   }
 
   teamKnowledgeForIdentity(
@@ -2147,15 +2192,21 @@ export class StateStore {
     `).run(spaceId, provider, externalUserId, personId, enabled ? 1 : 0, now, now);
   }
 
-  purgeExpiredTeamEvidence(retentionDays: number, now = Date.now() / 1_000): number {
+  purgeExpiredTeamEvidence(
+    retentionDays: number,
+    now = Date.now() / 1_000,
+    retainedSpaceIds: string[] = [],
+  ): number {
     if (retentionDays <= 0) return 0;
     const cutoff = now - retentionDays * 86_400;
     return this.transaction(() => {
+      const placeholders = retainedSpaceIds.map(() => "?").join(",");
       const result = this.db.prepare(`
         UPDATE team_events SET text = '', attachments_json = '[]',
           synthesis_state = 'redacted', redacted_at = ?
         WHERE occurred_at < ? AND synthesis_state <> 'redacted' AND redacted_at IS NULL
-      `).run(now, cutoff);
+          ${retainedSpaceIds.length > 0 ? `AND space_id NOT IN (${placeholders})` : ""}
+      `).run(now, cutoff, ...retainedSpaceIds);
       return Number(result.changes);
     });
   }

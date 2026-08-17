@@ -21,6 +21,22 @@ intervention_cooldown_sec = 3600
 raw_retention_days = 365
 announce_on_join = true
 
+[knowledge_sync]
+# Set true only after SUMMING_S3_* variables are configured in /etc/summing/summing.env.
+enabled = false
+telegram_terms_reviewed = false
+object_store = "s3"
+spool_root = "/var/lib/summing/data/knowledge-spool"
+spool_max_bytes = 8000000000
+mtproto_master_key = "/etc/summing/mtproto.key"
+embedding_model = "text-embedding-3-small"
+embedding_dimensions = 1536
+embedding_batch_size = 64
+document_vision_model = "gpt-5.4-nano"
+s3_region = "us-east-1"
+s3_prefix = "summing"
+s3_sse = "AES256"
+
 [codex_usage]
 profile_enabled = true
 refresh_interval_sec = 900

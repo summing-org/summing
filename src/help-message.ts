@@ -66,6 +66,7 @@ export function helpMessage(isAdministrator: boolean): string {
       command("/admin", "открыть центр управления Mini App"),
       command("/login", "войти в ChatGPT через device code в личном чате"),
       command("/limits", "показать 5-часовой и недельный Codex limits этого VPS"),
+      command("/sync_status [chat_id]", "показать состояние синхронизации базы знаний"),
       command("/topics", "показать обнаруженные Telegram группы, топики и привязки"),
       command("/memory_pause", "приостановить наблюдение текущего Team Space"),
       command("/memory_resume", "возобновить наблюдение текущего Team Space"),

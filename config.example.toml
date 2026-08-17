@@ -31,6 +31,24 @@ raw_retention_days = 365
 # Transparently announce durable observation when the bot joins a group.
 announce_on_join = true
 
+[knowledge_sync]
+# Enable only after creating the MTProto master key and configuring S3 in production.
+enabled = false
+telegram_terms_reviewed = false # set true only after the release-gate legal review
+object_store = "local" # production requires "s3"
+local_object_root = "~/summing/data/knowledge-objects"
+spool_root = "~/summing/data/knowledge-spool"
+spool_max_bytes = 8000000000
+mtproto_master_key = "/etc/summing/mtproto.key"
+embedding_model = "text-embedding-3-small"
+embedding_dimensions = 1536
+embedding_batch_size = 64
+document_vision_model = "gpt-5.4-nano"
+# S3 endpoint/credentials are preferably supplied through SUMMING_S3_* env variables.
+s3_region = "us-east-1"
+s3_prefix = "summing"
+s3_sse = "AES256"
+
 [codex_usage]
 # Publish the VPS account's weekly remaining usage in the bot profile.
 profile_enabled = true
