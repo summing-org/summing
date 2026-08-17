@@ -1,0 +1,272 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: secure-bootstrap --bundle FILE --secrets FILE --origin URL [options]
+
+Options:
+  --source-key FILE       SSH deploy key used only for the SUMMING source origin
+  --expected-commit SHA   Require this exact release commit
+  --consume-inputs        Delete /run installer inputs whenever bootstrap exits
+EOF
+}
+
+bundle=
+secrets=
+origin=
+source_key=
+expected_commit=
+consume_inputs=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --bundle) bundle=${2:-}; shift 2 ;;
+    --secrets) secrets=${2:-}; shift 2 ;;
+    --origin) origin=${2:-}; shift 2 ;;
+    --source-key) source_key=${2:-}; shift 2 ;;
+    --expected-commit) expected_commit=${2:-}; shift 2 ;;
+    --consume-inputs) consume_inputs=1; shift ;;
+    --help|-h) usage; exit 0 ;;
+    *) printf 'Unknown option: %s\n' "$1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+consume_install_inputs() {
+  if [ "${consume_inputs}" -ne 1 ]; then return; fi
+  case "${secrets}" in /run/*) rm -f -- "${secrets}" ;; esac
+  case "${source_key}" in /run/*) rm -f -- "${source_key}" ;; esac
+  case "${bundle}" in /run/*) rm -f -- "${bundle}" ;; esac
+}
+trap consume_install_inputs EXIT
+
+if [ "${EUID}" -ne 0 ]; then
+  printf '%s\n' 'Run secure-bootstrap as root.' >&2
+  exit 2
+fi
+if [ -z "${bundle}" ] || [ -z "${secrets}" ] || [ -z "${origin}" ]; then
+  usage >&2
+  exit 2
+fi
+if [ ! -f /etc/os-release ] || ! grep -q '^ID=ubuntu$' /etc/os-release || \
+  ! grep -q '^VERSION_ID="24.04"$' /etc/os-release; then
+  printf '%s\n' 'Fresh installation requires Ubuntu 24.04.' >&2
+  exit 2
+fi
+if [ -L /etc/summing/provisioned ] || [ ! -f /etc/summing/provisioned ] || \
+  [ "$(stat -c '%u:%a' /etc/summing/provisioned 2>/dev/null || true)" != "0:600" ]; then
+  printf '%s\n' 'Trusted cloud-init provisioning marker is missing or unsafe.' >&2
+  exit 2
+fi
+if ! id summing >/dev/null 2>&1; then
+  printf '%s\n' 'Provisioned summing user is missing.' >&2
+  exit 2
+fi
+case "${origin}" in
+  *[!A-Za-z0-9@:/._~-]*|'')
+    printf '%s\n' 'Source origin contains unsupported characters.' >&2
+    exit 2
+    ;;
+esac
+if [ -n "${expected_commit}" ] && ! printf '%s' "${expected_commit}" | grep -Eq '^[0-9a-f]{40}$'; then
+  printf '%s\n' 'Expected commit must be a full 40-character lowercase SHA.' >&2
+  exit 2
+fi
+case "${origin}" in
+  http://*|https://*@*)
+    printf '%s\n' 'Source origin must use SSH or credential-free HTTPS.' >&2
+    exit 2
+    ;;
+esac
+
+private_regular_file() {
+  local path=$1 label=$2 mode
+  if [ -L "${path}" ] || [ ! -f "${path}" ]; then
+    printf '%s must be a regular non-symlinked file.\n' "${label}" >&2
+    exit 2
+  fi
+  mode=$(stat -c '%a' "${path}")
+  case "${mode}" in
+    400|600) ;;
+    *) printf '%s permissions must be 0400 or 0600.\n' "${label}" >&2; exit 2 ;;
+  esac
+}
+
+private_regular_file "${secrets}" 'Secrets manifest'
+if [ -L "${bundle}" ] || [ ! -f "${bundle}" ]; then
+  printf '%s\n' 'Release bundle must be a regular non-symlinked file.' >&2
+  exit 2
+fi
+if [ -n "${source_key}" ]; then
+  private_regular_file "${source_key}" 'Source deploy key'
+fi
+if ! git bundle verify "${bundle}" >/dev/null; then
+  printf '%s\n' 'Release bundle verification failed.' >&2
+  exit 2
+fi
+if ! jq -e 'type == "object"' "${secrets}" >/dev/null; then
+  printf '%s\n' 'Secrets manifest must contain one JSON object.' >&2
+  exit 2
+fi
+installation_id=$(jq -er '.installationId' "${secrets}")
+case "${installation_id}" in
+  *[!a-z0-9-]*|'') printf '%s\n' 'Invalid installationId.' >&2; exit 2 ;;
+esac
+
+repo_dir=/opt/summing
+state_dir=/var/lib/summing
+data_dir=${state_dir}/data
+install_state_dir=/var/lib/summing-install
+install_state=${install_state_dir}/install-state.json
+env_file=/etc/summing/summing.env
+config_file=${data_dir}/config.toml
+caddy_candidate=/run/summing-Caddyfile
+deploy_env_file=/etc/summing/deploy.env
+
+if [ ! -f "${install_state}" ]; then
+  for durable in \
+    "${data_dir}/state.sqlite3" \
+    "${data_dir}/core.sqlite" \
+    "${data_dir}/runner-control.sqlite3" \
+    /var/lib/summing-runner/jobs \
+    "${env_file}"; do
+    if [ -e "${durable}" ]; then
+      printf 'Refusing clean install over existing durable state: %s\n' "${durable}" >&2
+      exit 2
+    fi
+  done
+  if systemctl is-active --quiet summing.service 2>/dev/null; then
+    printf '%s\n' 'Refusing clean install while summing.service is already active.' >&2
+    exit 2
+  fi
+fi
+
+install -d -o summing -g summing -m 0700 "${repo_dir}" "${data_dir}"
+install -d -o root -g summing -m 0750 /etc/summing
+install -d -o root -g root -m 0700 "${install_state_dir}"
+
+if [ ! -d "${repo_dir}/.git" ]; then
+  if find "${repo_dir}" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+    printf '%s\n' '/opt/summing is not an empty Git checkout.' >&2
+    exit 2
+  fi
+  sudo -u summing git clone --no-local "${bundle}" "${repo_dir}"
+fi
+
+release_commit=$(sudo -u summing git -C "${repo_dir}" rev-parse HEAD)
+if ! printf '%s' "${release_commit}" | grep -Eq '^[0-9a-f]{40}$'; then
+  printf '%s\n' 'Cloned release does not have a full commit SHA.' >&2
+  exit 2
+fi
+if [ -n "${expected_commit}" ] && [ "${release_commit}" != "${expected_commit}" ]; then
+  printf 'Release commit mismatch: expected %s, got %s.\n' "${expected_commit}" "${release_commit}" >&2
+  exit 2
+fi
+
+if [ -f "${install_state}" ]; then
+  state_id=$(jq -er '.installationId' "${install_state}")
+  state_commit=$(jq -er '.commit' "${install_state}")
+  state_status=$(jq -er '.status' "${install_state}")
+  if [ "${state_id}" != "${installation_id}" ] || [ "${state_commit}" != "${release_commit}" ]; then
+    printf '%s\n' 'Existing install-state belongs to another installation or release.' >&2
+    exit 2
+  fi
+  if [ "${state_status}" = complete ]; then
+    curl --fail --silent --show-error http://127.0.0.1:8765/health >/dev/null
+    printf 'SUMMING fresh installation %s is already complete at %s.\n' \
+      "${installation_id}" "${release_commit}"
+    exit 0
+  fi
+fi
+
+temporary_state=$(mktemp "${install_state_dir}/install-state.XXXXXX")
+jq -n \
+  --arg installationId "${installation_id}" \
+  --arg commit "${release_commit}" \
+  --arg startedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  '{installationId:$installationId,commit:$commit,status:"installing",startedAt:$startedAt}' \
+  > "${temporary_state}"
+chown root:root "${temporary_state}"
+chmod 0600 "${temporary_state}"
+mv -f "${temporary_state}" "${install_state}"
+
+sudo -u summing git -C "${repo_dir}" switch -C master "${release_commit}"
+if sudo -u summing git -C "${repo_dir}" remote get-url origin >/dev/null 2>&1; then
+  sudo -u summing git -C "${repo_dir}" remote set-url origin "${origin}"
+else
+  sudo -u summing git -C "${repo_dir}" remote add origin "${origin}"
+fi
+
+temporary_deploy_env=$(mktemp /etc/summing/deploy.env.XXXXXX)
+printf '%s\n' \
+  'SUMMING_DEPLOY_REMOTE=origin' \
+  'SUMMING_DEPLOY_BRANCH=master' \
+  "SUMMING_DEPLOY_EXPECTED_REMOTE=${origin}" \
+  'SUMMING_DEPLOY_KEEP_RELEASES=5' \
+  'SUMMING_DEPLOY_DRAIN_TIMEOUT_SEC=1800' \
+  > "${temporary_deploy_env}"
+chown root:root "${temporary_deploy_env}"
+chmod 0600 "${temporary_deploy_env}"
+mv -f "${temporary_deploy_env}" "${deploy_env_file}"
+
+if [ -n "${source_key}" ]; then
+  source_host=
+  case "${origin}" in
+    ssh://*@*/*) source_host=${origin#ssh://*@}; source_host=${source_host%%/*}; source_host=${source_host%%:*} ;;
+    *@*:*) source_host=${origin#*@}; source_host=${source_host%%:*} ;;
+  esac
+  if [ -z "${source_host}" ] || ! printf '%s' "${source_host}" | grep -Eq '^[A-Za-z0-9.-]+$'; then
+    printf '%s\n' 'Could not derive a safe SSH host from source origin.' >&2
+    exit 2
+  fi
+  install -d -o summing -g summing -m 0700 /var/lib/summing/.ssh
+  install -o summing -g summing -m 0400 "${source_key}" /var/lib/summing/.ssh/source_deploy_key
+  ssh_config=$(mktemp /var/lib/summing/.ssh/config.XXXXXX)
+  printf '%s\n' \
+    "Host ${source_host}" \
+    '  IdentityFile /var/lib/summing/.ssh/source_deploy_key' \
+    '  IdentitiesOnly yes' \
+    '  StrictHostKeyChecking accept-new' \
+    '  UserKnownHostsFile /var/lib/summing/.ssh/known_hosts' \
+    > "${ssh_config}"
+  chown summing:summing "${ssh_config}"
+  chmod 0600 "${ssh_config}"
+  mv -f "${ssh_config}" /var/lib/summing/.ssh/config
+fi
+
+/usr/local/bin/node "${repo_dir}/scripts/render-fresh-install.mjs" \
+  --input "${secrets}" \
+  --env-output "${env_file}" \
+  --config-output "${config_file}" \
+  --caddy-output "${caddy_candidate}" \
+  >/run/summing-install-summary.json
+chown root:summing "${env_file}"
+chmod 0640 "${env_file}"
+chown summing:summing "${config_file}"
+chmod 0600 "${config_file}"
+
+if [ -s "${caddy_candidate}" ]; then
+  if ! command -v caddy >/dev/null 2>&1; then
+    printf '%s\n' 'Caddy is required when viewer.domain is configured.' >&2
+    exit 2
+  fi
+  caddy validate --config "${caddy_candidate}"
+  install -o root -g root -m 0644 "${caddy_candidate}" /etc/caddy/Caddyfile
+  systemctl enable caddy.service
+  systemctl restart caddy.service
+fi
+
+"${repo_dir}/deploy/activate.sh"
+curl --fail --silent --show-error http://127.0.0.1:8765/health >/dev/null
+
+completed_state=$(mktemp "${install_state_dir}/install-state.XXXXXX")
+jq \
+  --arg completedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  '.status="complete" | .completedAt=$completedAt' \
+  "${install_state}" > "${completed_state}"
+chown root:root "${completed_state}"
+chmod 0600 "${completed_state}"
+mv -f "${completed_state}" "${install_state}"
+
+printf 'SUMMING fresh installation %s completed at %s.\n' \
+  "${installation_id}" "${release_commit}"
+printf '%s\n' 'Continue in the owner-only Admin Mini App onboarding.'

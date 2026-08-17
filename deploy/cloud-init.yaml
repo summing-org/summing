@@ -14,6 +14,7 @@ packages:
   - apparmor-utils
   - bubblewrap
   - ca-certificates
+  - caddy
   - curl
   - git
   - file
@@ -82,8 +83,6 @@ write_files:
       install -d -o root -g summing -m 0750 /etc/summing
       install -d -o summing -g summing -m 0750 /opt/summing
       install -d -o summing -g summing -m 0750 /srv/projects
-      chown root:summing /etc/summing/summing.env
-      chmod 0640 /etc/summing/summing.env
 
       if ! swapon --show=NAME --noheadings | grep -qx /swapfile; then
         if [ ! -f /swapfile ]; then
@@ -138,6 +137,8 @@ write_files:
       ufw default deny incoming
       ufw default allow outgoing
       ufw allow 22/tcp
+      ufw allow 80/tcp
+      ufw allow 443/tcp
       ufw --force enable
 
       printf '%s\n' \
@@ -152,25 +153,7 @@ write_files:
       npm --version
       codex --version
       git --version
-
-  - path: /etc/summing/summing.env
-    owner: root:root
-    permissions: "0640"
-    content: |
-      SUMMING_DATA_DIR=/var/lib/summing/data
-      SUMMING_CONFIG=/var/lib/summing/data/config.toml
-      SUMMING_WORKTREE_ROOT=/var/lib/summing/data/worktrees
-      SUMMING_DEPLOY_REQUEST=/var/lib/summing/deploy/request.json
-      SUMMING_DEPLOY_STATE=/var/lib/summing/deploy/state.json
-      CODEX_HOME=/var/lib/summing/data/codex
-      CODEX_BIN=/usr/local/bin/codex
-      TELEGRAM_BOT_TOKEN=
-      TELEGRAM_OWNER_ID=
-      TRANSCRIPTION_PROVIDER=openai
-      TRANSCRIPTION_MODEL=gpt-transcribe
-      OPENAI_API_KEY=
-      GROQ_API_KEY=
-      NODE_ENV=production
+      install -o root -g root -m 0600 /dev/null /etc/summing/provisioned
 
   - path: /root/SUMMING_NEXT_STEPS.txt
     owner: root:root
@@ -178,14 +161,17 @@ write_files:
     content: |
       SUMMING host bootstrap is complete.
 
-      1. Upload the private repository, including .git, to /opt/summing.
-      2. Set TELEGRAM_BOT_TOKEN, TELEGRAM_OWNER_ID and OPENAI_API_KEY in:
-         /etc/summing/summing.env
-      3. Run:
-         /opt/summing/deploy/activate.sh
-      4. Send /login to the bot and complete ChatGPT device-code login.
-      5. In the administrator's private bot chat, create a managed project:
-         /project_create client_name 123456789 repo_name
+      From a clean trusted SUMMING checkout on the operator machine:
+
+        chmod 0600 /path/to/fresh-install.json /path/to/source-deploy-key
+        deploy/install-fresh \
+          --target root@THIS_SERVER \
+          --secrets /path/to/fresh-install.json \
+          --source-key /path/to/source-deploy-key
+
+      The command streams a verified Git bundle and consumes the remote copy of
+      the secret manifest when bootstrap exits. Continue with /login and the
+      owner-only Admin Mini App onboarding.
 
 runcmd:
   - [bash, /usr/local/sbin/summing-bootstrap]

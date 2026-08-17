@@ -19,6 +19,8 @@ test("administrator Mini App exposes projects, bindings and global settings", ()
   assert.match(ADMIN_HTML, /id="connectorForm"/);
   assert.match(ADMIN_HTML, /id="consentFrom"/);
   assert.match(ADMIN_HTML, /id="sourceSyncForm"/);
+  assert.match(ADMIN_HTML, /id="onboardingSteps"/);
+  assert.match(ADMIN_HTML, /Интерактивный onboarding/);
   assert.match(ADMIN_HTML, /id="systemPanel"[^>]+role="tabpanel"/);
   assert.match(ADMIN_HTML, /Обновиться сейчас/);
   assert.match(ADMIN_HTML, /id="deploymentPhase"/);
@@ -32,6 +34,8 @@ test("administrator Mini App exposes projects, bindings and global settings", ()
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/users/);
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/deployment/);
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/sync/);
+  assert.match(ADMIN_JS, /\/api\/viewer\/admin\/onboarding/);
+  assert.match(ADMIN_JS, /renderOnboarding/);
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/mtproto\/connectors/);
   assert.match(ADMIN_JS, /Не отправлено уведомление о sync/);
   assert.match(ADMIN_JS, /state!=="paused"&&status\.collector\.state!=="failed"/);
@@ -51,4 +55,5 @@ test("administrator Mini App exposes projects, bindings and global settings", ()
   assert.match(ADMIN_CSS, /\.admin-tabs/);
   assert.match(ADMIN_CSS, /\.admin-panel\.active/);
   assert.match(ADMIN_CSS, /\.owner-manager/);
+  assert.match(ADMIN_CSS, /\.onboarding-step/);
 });

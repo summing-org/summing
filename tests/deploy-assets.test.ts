@@ -93,6 +93,10 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
   assert.match(activation, /KB transfer key must be a regular file containing 64 hex characters/);
   assert.match(activation, /install -d -o root -g summing -m 1770 "\$\{deploy_state_dir\}"/);
   assert.match(activation, /runner_uid=\$\(id -u summing-runner\)/);
+  assert.match(activation, /summing-builder must not belong to the secret-bearing summing group/);
+  assert.match(activation, /runuser -u summing-builder -- env -i/);
+  assert.match(activation, /chown -R summing:summing "\$\{repo_dir\}"/);
+  assert.match(activation, /Initial release build failed with exit code/);
   assert.match(activation, /sed "s\/RUNNER_UID\/\$\{runner_uid\}\/g"/);
   assert.match(activation, /runner_project_config=\/etc\/summing-runner\/projects\/ash-seo\.json/);
   assert.match(activation, /Runner project config must not be a symlink/);

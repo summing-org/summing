@@ -130,63 +130,36 @@ persistent threads, streaming и `turn/steer`:
 
 ## Установка на Hetzner
 
-Для нового Ubuntu 24.04 x86-64 VPS обязательно выберите SSH-ключ и вставьте
-содержимое [deploy/cloud-init.yaml](deploy/cloud-init.yaml) в поле **Cloud config**
-формы создания сервера. Файл устанавливает системные пакеты, Node.js 24 LTS,
-Codex CLI, пользователя `summing`, 4 GiB swap, UFW и автоматические security
-updates. Секретов в cloud-init нет, сервис автоматически не запускается.
-
-После создания VPS дождитесь bootstrap и загрузите приватный репозиторий вместе
-с `.git`:
+Для новой production-инсталляции используйте
+[fresh installer](FRESH_INSTALL_RU.md). Он разделён на provisioning, secure
+bootstrap и owner-only интерактивный onboarding. Terraform root создаёт
+защищённый Ubuntu 24.04 host и firewall; cloud-init устанавливает Node 24, Codex,
+Caddy и системные зависимости без прикладных секретов:
 
 ```bash
-summing_server=203.0.113.10
-ssh -i ~/.ssh/summing-deploy root@"${summing_server}" 'cloud-init status --wait'
-rsync -az \
-  --exclude node_modules \
-  --exclude dist \
-  --exclude .pytest_cache \
-  --exclude __pycache__ \
-  --exclude '*.pyc' \
-  --exclude '/.env' \
-  --exclude '/.env.*' \
-  --exclude '/.codex' \
-  --exclude '/config.toml' \
-  --exclude '/summing.env' \
-  --exclude '/data' \
-  -e "ssh -i ~/.ssh/summing-deploy" \
-  ./ root@"${summing_server}":/opt/summing/
-ssh -i ~/.ssh/summing-deploy root@"${summing_server}"
+cd infra/hetzner
+cp terraform.tfvars.example terraform.tfvars
+export HCLOUD_TOKEN=...
+terraform init && terraform apply
 ```
 
-На VPS заполните `TELEGRAM_BOT_TOKEN`, Telegram ID администратора в
-`TELEGRAM_OWNER_ID` и отдельный `OPENAI_API_KEY`:
+После DNS и заполнения приватного `deploy/fresh-install.example.json` установка
+выполняется из чистого trusted checkout одной командой:
 
 ```bash
-nano /etc/summing/summing.env
-/opt/summing/deploy/activate.sh
+chmod 0600 /secure/path/fresh-install.json /secure/path/source-deploy-key
+deploy/install-fresh \
+  --target root@SERVER \
+  --secrets /secure/path/fresh-install.json \
+  --source-key /secure/path/source-deploy-key
 ```
 
-`activate.sh` создаёт production-конфиг, выполняет `npm ci`, lint, тесты и
-сборку, оставляет только production dependencies, устанавливает systemd units,
-атомарный release symlink и проверяет локальный health endpoint. Затем отправьте
-боту `/login` и завершите ChatGPT device-code flow. Не помещайте Telegram token,
-API credentials или приватный deploy key в cloud-init: user-data сохраняется в
-metadata провайдера и самого VPS.
-
-Для автоматических обновлений настройте пользователю `summing` read-only SSH
-deploy key к приватному репозиторию и убедитесь, что следующая команда работает
-без prompt:
-
-```bash
-sudo -u summing env HOME=/var/lib/summing GIT_TERMINAL_PROMPT=0 \
-  git -C /opt/summing fetch origin master
-```
-
-Ожидаемый URL `origin` закреплён в root-only `/etc/summing/deploy.env`. По
-умолчанию это `git@summing.github.com:summing-org/summing.git`; измените
-`SUMMING_DEPLOY_EXPECTED_REMOTE`, если VPS использует другой эквивалентный SSH
-URL.
+Installer передаёт проверенный bundle текущего commit, закрепляет read-only Git
+origin для будущих atomic updates, формирует конфигурацию с закрытыми правами,
+запускает lint/test/build, systemd и health check, после чего уничтожает копии
+одноразовых inputs в `/run`. Он отказывается работать поверх существующего
+durable state. Затем владелец завершает `/login` и видит последовательность
+MTProto → согласия → первый sync в **Управление → База знаний**.
 
 ## Ручная установка
 

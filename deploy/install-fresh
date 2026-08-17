@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: deploy/install-fresh --target root@HOST --secrets FILE [options]
+
+Streams the current clean Git commit as a verified bundle and runs the
+root-only secure bootstrap on a cloud-init-provisioned Ubuntu 24.04 host.
+
+Options:
+  --origin URL       Future self-update origin (defaults to local origin)
+  --source-key FILE  SSH deploy key for that origin
+  --yes              Skip the final target/commit confirmation
+EOF
+}
+
+target=
+secrets=
+origin=
+source_key=
+assume_yes=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --target) target=${2:-}; shift 2 ;;
+    --secrets) secrets=${2:-}; shift 2 ;;
+    --origin) origin=${2:-}; shift 2 ;;
+    --source-key) source_key=${2:-}; shift 2 ;;
+    --yes) assume_yes=1; shift ;;
+    --help|-h) usage; exit 0 ;;
+    *) printf 'Unknown option: %s\n' "$1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+if [ -z "${target}" ] || [ -z "${secrets}" ]; then
+  usage >&2
+  exit 2
+fi
+case "${target}" in
+  *[!A-Za-z0-9@._:-]*|'') printf '%s\n' 'Invalid SSH target.' >&2; exit 2 ;;
+esac
+
+repo_root=$(git rev-parse --show-toplevel)
+if [ "$(pwd -P)" != "$(cd "${repo_root}" && pwd -P)" ]; then
+  cd "${repo_root}"
+fi
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  printf '%s\n' 'Refusing to install from a checkout with tracked changes.' >&2
+  exit 2
+fi
+commit=$(git rev-parse HEAD)
+if ! printf '%s' "${commit}" | grep -Eq '^[0-9a-f]{40}$'; then
+  printf '%s\n' 'Could not resolve a full release commit.' >&2
+  exit 2
+fi
+if [ -z "${origin}" ]; then
+  origin=$(git remote get-url origin)
+fi
+case "${origin}" in
+  *[!A-Za-z0-9@:/._~-]*|''|http://*|https://*@*)
+    printf '%s\n' 'Origin must use SSH or credential-free HTTPS and contain no shell metacharacters.' >&2
+    exit 2
+    ;;
+esac
+case "${origin}" in
+  ssh://*|*@*:*)
+    if [ -z "${source_key}" ]; then
+      printf '%s\n' '--source-key is required for an SSH self-update origin.' >&2
+      exit 2
+    fi
+    ;;
+esac
+
+private_mode() {
+  local path=$1 mode
+  if [ -L "${path}" ] || [ ! -f "${path}" ]; then
+    printf 'Private input is not a regular file: %s\n' "${path}" >&2
+    exit 2
+  fi
+  if stat -f '%Lp' "${path}" >/dev/null 2>&1; then
+    mode=$(stat -f '%Lp' "${path}")
+  else
+    mode=$(stat -c '%a' "${path}")
+  fi
+  case "${mode}" in 400|600) ;; *) printf 'Private input must have mode 0400 or 0600: %s\n' "${path}" >&2; exit 2 ;; esac
+}
+private_mode "${secrets}"
+if [ -n "${source_key}" ]; then private_mode "${source_key}"; fi
+
+if ! command -v node >/dev/null 2>&1 || [ "$(node -p 'Number(process.versions.node.split(".")[0])')" -lt 24 ]; then
+  printf '%s\n' 'The operator machine requires Node.js 24 or newer.' >&2
+  exit 2
+fi
+temporary=$(mktemp -d)
+chmod 0700 "${temporary}"
+trap 'rm -rf "${temporary}"' EXIT
+node "${repo_root}/scripts/render-fresh-install.mjs" \
+  --input "${secrets}" \
+  --env-output "${temporary}/validated.env" \
+  --config-output "${temporary}/validated.toml" \
+  --caddy-output "${temporary}/validated.Caddyfile" \
+  >/dev/null
+
+if [ "${assume_yes}" -ne 1 ]; then
+  printf 'Install SUMMING commit %s on %s? [y/N] ' "${commit}" "${target}"
+  read -r answer
+  case "${answer}" in y|Y|yes|YES) ;; *) printf '%s\n' 'Cancelled.'; exit 1 ;; esac
+fi
+
+bundle=${temporary}/release.bundle
+git bundle create "${bundle}" HEAD
+git bundle verify "${bundle}" >/dev/null
+
+remote_dir=/run/summing-fresh-${commit}
+ssh "${target}" cloud-init status --wait
+ssh "${target}" install -d -o root -g root -m 0700 "${remote_dir}"
+scp -q "${bundle}" "${repo_root}/deploy/secure-bootstrap" "${target}:${remote_dir}/"
+scp -q "${secrets}" "${target}:${remote_dir}/secrets.json"
+ssh "${target}" chmod 0600 "${remote_dir}/release.bundle" "${remote_dir}/secrets.json"
+ssh "${target}" chmod 0700 "${remote_dir}/secure-bootstrap"
+
+remote_args=(
+  "${remote_dir}/secure-bootstrap"
+  --bundle "${remote_dir}/release.bundle"
+  --secrets "${remote_dir}/secrets.json"
+  --origin "${origin}"
+  --expected-commit "${commit}"
+  --consume-inputs
+)
+if [ -n "${source_key}" ]; then
+  scp -q "${source_key}" "${target}:${remote_dir}/source-key"
+  ssh "${target}" chmod 0600 "${remote_dir}/source-key"
+  remote_args+=(--source-key "${remote_dir}/source-key")
+fi
+printf -v remote_command '%q ' "${remote_args[@]}"
+ssh "${target}" "${remote_command}"
+ssh "${target}" rm -f -- "${remote_dir}/secure-bootstrap"
+ssh "${target}" rmdir "${remote_dir}"
+
+printf 'Fresh installation completed on %s at %s.\n' "${target}" "${commit}"

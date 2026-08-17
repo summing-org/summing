@@ -1130,6 +1130,21 @@ export class KnowledgeSyncStore {
     ).all(sourceId) as Row[]).map((row) => this.toConsent(row));
   }
 
+  consentSummary(): { granted: number; revoked: number; sources: number } {
+    const row = this.db.prepare(`
+      SELECT
+        SUM(CASE WHEN status = 'granted' THEN 1 ELSE 0 END) AS granted,
+        SUM(CASE WHEN status = 'revoked' THEN 1 ELSE 0 END) AS revoked,
+        COUNT(DISTINCT CASE WHEN status = 'granted' THEN source_id END) AS sources
+      FROM team_consents
+    `).get() as Row;
+    return {
+      granted: Number(row.granted ?? 0),
+      revoked: Number(row.revoked ?? 0),
+      sources: Number(row.sources ?? 0),
+    };
+  }
+
   recordUnknownAuthor(sourceId: string, telegramUserId: number, occurredAt: number): boolean {
     const existing = this.db.prepare(`
       SELECT 1 AS found FROM team_sync_unknown_authors

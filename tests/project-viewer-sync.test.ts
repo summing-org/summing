@@ -62,8 +62,17 @@ test("owner-only Admin API exposes MTProto, consent and source sync actions", as
     20, 12, 60, "openai", "gpt-transcribe", "", "", 20_000_000, port,
   );
   const calls: Array<[string, unknown]> = [];
+  const syncOverview = {
+    enabled: true,
+    telegramTermsReviewed: true,
+    objectStore: "s3",
+    embeddings: { configured: true },
+    connectors: [],
+    consents: { granted: 0, revoked: 0, sources: 0 },
+    statuses: [],
+  };
   const fake: KnowledgeSyncAdmin = {
-    overview: () => ({ enabled: true, connectors: [], statuses: [] }),
+    overview: () => syncOverview,
     beginAuthorization: (input) => {
       calls.push(["authorize", { ...input, apiHash: "[redacted]" }]);
       return {
@@ -109,6 +118,7 @@ test("owner-only Admin API exposes MTProto, consent and source sync actions", as
     () => false,
     () => {},
     fake,
+    () => ({ botConnected: true, codexAuthenticated: true }),
   );
   const endpoint = `http://127.0.0.1:${port}`;
   const auth = (userId: number) => ({ "x-telegram-init-data": signedInitData("bot-token", userId) });
@@ -119,7 +129,34 @@ test("owner-only Admin API exposes MTProto, consent and source sync actions", as
     const overview = await fetch(`${endpoint}/api/viewer/admin/sync`, { headers: auth(1) });
     const overviewPayload = await overview.json();
     assert.equal(overview.status, 200, JSON.stringify(overviewPayload));
-    assert.deepEqual(overviewPayload, { enabled: true, connectors: [], statuses: [] });
+    assert.deepEqual(overviewPayload, syncOverview);
+
+    assert.equal(
+      (await fetch(`${endpoint}/api/viewer/admin/onboarding`, { headers: auth(2) })).status,
+      403,
+    );
+    const onboardingResponse = await fetch(
+      `${endpoint}/api/viewer/admin/onboarding`,
+      { headers: auth(1) },
+    );
+    const onboarding = await onboardingResponse.json() as {
+      complete: boolean;
+      steps: Array<{ id: string; state: string }>;
+    };
+    assert.equal(onboardingResponse.status, 200);
+    assert.equal(onboarding.complete, false);
+    assert.deepEqual(
+      Object.fromEntries(onboarding.steps.map((step) => [step.id, step.state])),
+      {
+        provisioning: "complete",
+        "secure-bootstrap": "complete",
+        codex: "complete",
+        "telegram-group": "pending",
+        mtproto: "pending",
+        consent: "pending",
+        "first-source": "pending",
+      },
+    );
 
     const created = await fetch(`${endpoint}/api/viewer/admin/mtproto/connectors`, {
       method: "POST",

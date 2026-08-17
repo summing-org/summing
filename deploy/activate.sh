@@ -32,6 +32,10 @@ if ! id summing-builder >/dev/null 2>&1; then
     --shell /usr/sbin/nologin \
     summing-builder
 fi
+if id -nG summing-builder | tr ' ' '\n' | grep -qx summing; then
+  printf '%s\n' 'summing-builder must not belong to the secret-bearing summing group.' >&2
+  exit 2
+fi
 if [ ! -x /usr/local/bin/node ] || [ ! -x /usr/local/bin/codex ]; then
   printf '%s\n' 'Node.js or Codex CLI is missing; run cloud-init bootstrap first.' >&2
   exit 2
@@ -150,11 +154,21 @@ if [ "${telegram_owner}" -le 0 ]; then
   exit 2
 fi
 
-chown -R summing:summing "${repo_dir}"
-sudo -u summing \
-  env HOME=/var/lib/summing PATH=/usr/local/bin:/usr/bin:/bin \
+chown -R summing-builder:summing-builder "${repo_dir}"
+build_status=0
+runuser -u summing-builder -- env -i \
+  HOME=/var/lib/summing-builder \
+  USER=summing-builder \
+  LOGNAME=summing-builder \
+  PATH=/usr/local/bin:/usr/bin:/bin \
   bash -c \
-  'cd /opt/summing && npm ci && npm run lint && npm test && npm prune --omit=dev'
+  'cd /opt/summing && npm ci && npm run lint && npm test && npm prune --omit=dev' || \
+  build_status=$?
+chown -R summing:summing "${repo_dir}"
+if [ "${build_status}" -ne 0 ]; then
+  printf 'Initial release build failed with exit code %s.\n' "${build_status}" >&2
+  exit "${build_status}"
+fi
 
 if [ -L "${current_link}" ]; then
   :

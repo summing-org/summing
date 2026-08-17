@@ -328,6 +328,7 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
   overview(): Record<string, unknown> {
     return {
       enabled: this.config.enabled,
+      telegramTermsReviewed: this.config.telegramTermsReviewed,
       objectStore: this.config.objectStoreBackend,
       embeddings: {
         model: this.config.embeddingModel,
@@ -343,6 +344,7 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
         bindings: this.store.listBindings(connector.id),
         authorization: this.mtproto?.authorizationStatus(connector.id) ?? null,
       })),
+      consents: this.store.consentSummary(),
       statuses: this.store.listSyncStatuses(),
       notifications: this.store.outboxFailures(),
       transfers: this.store.listKnowledgeTransfers(),

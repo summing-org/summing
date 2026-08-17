@@ -524,6 +524,10 @@ export class SummingRuntime {
       (conversation) => this.processors.has(conversation.id),
       (chatId, topicId) => this.afterTopicBindingChanged(chatId, topicId),
       this.knowledgeSync,
+      () => ({
+        botConnected: this.telegramBotId > 0,
+        codexAuthenticated: Boolean(record(this.accountState.account)),
+      }),
     );
     this.runnerControl = new RunnerControlPlane(
       resolve(config.dataDir, "runner-control.sqlite3"),

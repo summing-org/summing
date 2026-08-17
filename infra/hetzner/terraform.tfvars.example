@@ -1,0 +1,6 @@
+name             = "summing-production"
+location         = "fsn1"
+server_type      = "cpx32"
+ssh_key_name     = "operator-key"
+ssh_source_cidrs = ["203.0.113.10/32"]
+backups          = true

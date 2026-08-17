@@ -38,6 +38,11 @@ interface ViewerScope {
   project: { id: string; name: string; workspace: string };
 }
 
+export interface OnboardingRuntimeStatus {
+  botConnected: boolean;
+  codexAuthenticated: boolean;
+}
+
 interface ViewerRepositoryConnection {
   mode: "none" | "external" | "managed-ssh";
   publicKey: string;
@@ -107,6 +112,16 @@ function queryValue(url: URL, name: string): string {
   return url.searchParams.get(name)?.trim() ?? "";
 }
 
+function objectValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function arrayValue(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value) ? value.map(objectValue) : [];
+}
+
 async function requestBody(request: IncomingMessage, maximumBytes = 16_384): Promise<unknown> {
   const chunks: Buffer[] = [];
   let bytes = 0;
@@ -141,6 +156,10 @@ export class ProjectViewerServer {
     readonly bindingBusy: (conversation: Conversation) => boolean = () => false,
     readonly afterTopicBound: (chatId: number, topicId: number) => void = () => {},
     readonly knowledgeSync?: KnowledgeSyncAdmin,
+    readonly onboardingRuntime: () => OnboardingRuntimeStatus = () => ({
+      botConnected: false,
+      codexAuthenticated: false,
+    }),
   ) {
     this.auth = new ViewerAuthenticator(
       config.telegramToken,
@@ -227,6 +246,11 @@ export class ProjectViewerServer {
     if (request.method === "GET" && url.pathname === "/api/viewer/admin/sync") {
       this.requireAdminAccess(telegramUser);
       json(response, 200, this.requireKnowledgeSync().overview());
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/api/viewer/admin/onboarding") {
+      this.requireAdminAccess(telegramUser);
+      json(response, 200, this.onboardingOverview());
       return;
     }
     if (request.method === "POST" && url.pathname === "/api/viewer/admin/mtproto/connectors") {
@@ -700,6 +724,100 @@ export class ProjectViewerServer {
   private requireKnowledgeSync(): KnowledgeSyncAdmin {
     if (!this.knowledgeSync) throw new ViewerHttpError(503, "синхронизация базы знаний не настроена");
     return this.knowledgeSync;
+  }
+
+  private onboardingOverview(): Record<string, unknown> {
+    const runtime = this.onboardingRuntime();
+    const sync = objectValue(this.knowledgeSync?.overview());
+    const connectors = arrayValue(sync.connectors);
+    const statuses = arrayValue(sync.statuses);
+    const embeddings = objectValue(sync.embeddings);
+    const consents = objectValue(sync.consents);
+    const knownGroups = this.state.listTelegramChats()
+      .filter((chat) => chat.type !== "private").length;
+    const configurationReady =
+      sync.enabled === true &&
+      sync.telegramTermsReviewed === true &&
+      sync.objectStore === "s3" &&
+      embeddings.configured === true;
+    const connectorReady = connectors.some((connector) => connector.state === "ready");
+    const connectorAuthorizing = connectors.some((connector) => connector.state === "authorizing");
+    const grantedConsents = Number(consents.granted ?? 0);
+    const collected = statuses.some((status) => {
+      const collector = objectValue(status.collector);
+      return collector.state === "tailing" || collector.state === "collected" ||
+        Number(collector.initialCollectedAt ?? 0) > 0;
+    });
+    const syncing = statuses.some((status) => {
+      const state = objectValue(status.collector).state;
+      return state === "backfilling" || state === "tailing" || state === "collected";
+    });
+    const steps = [
+      {
+        id: "provisioning",
+        state: "complete",
+        title: "Provisioning",
+        detail: "Ubuntu, Node, Codex, Caddy и systemd доступны; Admin API отвечает.",
+      },
+      {
+        id: "secure-bootstrap",
+        state: configurationReady ? "complete" : "blocked",
+        title: "Secure bootstrap",
+        detail: configurationReady
+          ? "Knowledge sync, legal gate, S3 и OpenAI настроены."
+          : "Проверьте fresh-install manifest: knowledge sync, legal gate, S3 и OpenAI обязательны.",
+      },
+      {
+        id: "codex",
+        state: runtime.codexAuthenticated ? "complete" : "pending",
+        title: "Авторизация Codex",
+        detail: runtime.codexAuthenticated
+          ? "Codex App Server авторизован."
+          : "Отправьте /login владельцу в личном чате и завершите device-code flow.",
+        action: runtime.codexAuthenticated ? "" : "/login",
+      },
+      {
+        id: "telegram-group",
+        state: runtime.botConnected && knownGroups > 0 ? "complete" : "pending",
+        title: "Группа Telegram",
+        detail: knownGroups > 0
+          ? `Bot API наблюдает групп: ${knownGroups}.`
+          : "Добавьте бота в группу и отправьте доступное ему сообщение.",
+      },
+      {
+        id: "mtproto",
+        state: connectorReady ? "complete" : connectorAuthorizing ? "active" : "pending",
+        title: "Технический MTProto-аккаунт",
+        detail: connectorReady
+          ? "Постоянный TDLib-коннектор готов."
+          : connectorAuthorizing
+            ? "Завершите OTP/2FA challenge ниже."
+            : "Введите API ID/hash и телефон ниже; затем подтвердите OTP/2FA.",
+      },
+      {
+        id: "consent",
+        state: grantedConsents > 0 ? "complete" : "pending",
+        title: "Согласия авторов",
+        detail: grantedConsents > 0
+          ? `Активных записей согласия: ${grantedConsents}.`
+          : "Зафиксируйте history + future + model egress для каждого предполагаемого автора.",
+      },
+      {
+        id: "first-source",
+        state: collected ? "complete" : syncing ? "active" : "pending",
+        title: "Первый источник",
+        detail: collected
+          ? "Первичная история собрана, источник работает в live tail."
+          : syncing
+            ? "Первичный backfill выполняется; прогресс показан ниже."
+            : "Выберите группу и готовый коннектор, затем запустите sync.",
+      },
+    ];
+    return {
+      complete: steps.every((step) => step.state === "complete"),
+      knownGroups,
+      steps,
+    };
   }
 
   private adminOverview(): Record<string, unknown> {

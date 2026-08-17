@@ -35,6 +35,7 @@ test("knowledge sync persists checkpoints, consent, stages, jobs and one complet
     });
     assert.equal(store.consentGranted("source-1", 42, 60), true);
     assert.equal(store.consentGranted("source-1", 42, 40), false);
+    assert.deepEqual(store.consentSummary(), { granted: 1, revoked: 0, sources: 1 });
     assert.equal(store.recordUnknownAuthor("source-1", 77, 103), true);
     assert.equal(store.recordUnknownAuthor("source-1", 77, 104), false);
 
@@ -87,6 +88,7 @@ test("knowledge sync persists checkpoints, consent, stages, jobs and one complet
     store.close();
     store = new KnowledgeSyncStore(path);
     assert.equal(store.checkpoint("source-1")?.fromMessageId, 555);
+    assert.deepEqual(store.consentSummary(), { granted: 1, revoked: 0, sources: 1 });
     assert.equal(store.claimOutbox(10, 200).length, 0);
   } finally {
     store.close();

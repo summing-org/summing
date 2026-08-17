@@ -1,0 +1,36 @@
+{
+  "installationId": "summing-production",
+  "telegram": {
+    "botToken": "123456789:replace-with-bot-token",
+    "ownerId": 123456789
+  },
+  "openai": {
+    "apiKey": "replace-with-openai-api-key"
+  },
+  "viewer": {
+    "domain": "assist.example.com",
+    "localToken": "replace-with-at-least-32-random-characters"
+  },
+  "runtime": {
+    "timezone": "Europe/Moscow",
+    "maxParallelConversations": 2
+  },
+  "transcription": {
+    "provider": "openai",
+    "model": "gpt-transcribe"
+  },
+  "knowledge": {
+    "enabled": true,
+    "telegramTermsReviewed": true,
+    "objectStore": {
+      "endpoint": "https://fsn1.your-objectstorage.com",
+      "region": "fsn1",
+      "bucket": "summing-production",
+      "prefix": "summing-production",
+      "accessKeyId": "replace-with-s3-access-key",
+      "secretAccessKey": "replace-with-s3-secret-key",
+      "forcePathStyle": true,
+      "sse": "AES256"
+    }
+  }
+}
