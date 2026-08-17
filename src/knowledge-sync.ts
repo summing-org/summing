@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { KnowledgeSyncConfig } from "./config.js";
@@ -12,9 +12,12 @@ import {
 import {
   KnowledgeSyncStore,
   type IngestionJob,
+  type KnowledgeTransferMode,
+  type KnowledgeTransferRecord,
   type SyncStageName,
   type SyncStatus,
 } from "./knowledge-sync-store.js";
+import { KnowledgeTransferManager } from "./knowledge-transfer.js";
 import {
   MtprotoConnectorManager,
   type MtprotoAuthorizationStatus,
@@ -70,6 +73,13 @@ export interface KnowledgeSyncAdmin {
   resumeSource(chatId: number): Promise<SyncStatus>;
   unbindSource(chatId: number): void;
   revokeConnector(connectorId: string): Promise<void>;
+  startKnowledgeExport(input: {
+    chatId: number;
+    mode: KnowledgeTransferMode;
+    includeEmbeddings?: boolean;
+  }): KnowledgeTransferRecord;
+  startKnowledgeImport(input: { bundleKey: string }): KnowledgeTransferRecord;
+  confirmKnowledgeImport(id: string, acceptConsents: boolean): KnowledgeTransferRecord;
 }
 
 function objectRecord(value: unknown): Record<string, unknown> {
@@ -221,12 +231,17 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
   readonly objects: ContentAddressedObjects;
   readonly embeddings: OpenAIEmbeddingClient;
   readonly documentEnricher: OpenAIDocumentEnricher;
+  readonly transfers: KnowledgeTransferManager;
   readonly mtproto: MtprotoConnectorManager | null;
   private readonly backfills = new Map<string, Promise<void>>();
   private jobsTimer: NodeJS.Timeout | null = null;
   private outboxTimer: NodeJS.Timeout | null = null;
+  private transfersTimer: NodeJS.Timeout | null = null;
   private jobsRunning = false;
   private outboxRunning = false;
+  private transfersRunning = false;
+  private transfersTask: Promise<void> | null = null;
+  private searchMaintenance = false;
   private stopped = false;
   private searchRebuild: Promise<void> | null = null;
 
@@ -269,6 +284,13 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
       openaiApiKey,
       config.documentVisionModel,
     );
+    this.transfers = new KnowledgeTransferManager(
+      config,
+      state,
+      this.store,
+      this.objectStore,
+      administratorUserId,
+    );
     this.mtproto = config.enabled ? new MtprotoConnectorManager(config, this.store) : null;
     this.mtproto?.onUpdate((connectorId, update) => this.handleUpdate(connectorId, update));
   }
@@ -287,14 +309,17 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
     }
     this.scheduleJobs(0);
     this.scheduleOutbox(0);
+    this.scheduleTransfers(0);
   }
 
   async close(): Promise<void> {
     this.stopped = true;
     if (this.jobsTimer) clearTimeout(this.jobsTimer);
     if (this.outboxTimer) clearTimeout(this.outboxTimer);
+    if (this.transfersTimer) clearTimeout(this.transfersTimer);
     await this.mtproto?.close();
     await Promise.allSettled(this.backfills.values());
+    if (this.transfersTask) await this.transfersTask;
     if (this.searchRebuild) await this.searchRebuild;
     this.searchIndex.close();
     this.store.close();
@@ -320,7 +345,52 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
       })),
       statuses: this.store.listSyncStatuses(),
       notifications: this.store.outboxFailures(),
+      transfers: this.store.listKnowledgeTransfers(),
+      importedSources: this.store.listImportedKnowledgeSources(),
     };
+  }
+
+  startKnowledgeExport(input: {
+    chatId: number;
+    mode: KnowledgeTransferMode;
+    includeEmbeddings?: boolean;
+  }): KnowledgeTransferRecord {
+    if (!this.config.enabled) throw new Error("knowledge sync is disabled");
+    const binding = this.store.listBindings().find((item) => item.telegramChatId === input.chatId);
+    if (!binding) throw new Error("Telegram group is not bound to knowledge sync");
+    if (input.mode !== "manifest" && input.mode !== "portable") {
+      throw new Error("knowledge export mode must be manifest or portable");
+    }
+    const transfer = this.store.createKnowledgeTransfer({
+      id: randomUUID(),
+      kind: "export",
+      mode: input.mode,
+      sourceId: binding.sourceId,
+      request: { includeEmbeddings: input.includeEmbeddings !== false },
+    });
+    this.scheduleTransfers(0);
+    return transfer;
+  }
+
+  startKnowledgeImport(input: { bundleKey: string }): KnowledgeTransferRecord {
+    if (!this.config.enabled) throw new Error("knowledge sync is disabled");
+    const bundleKey = input.bundleKey.trim();
+    if (!bundleKey) throw new Error("knowledge bundle key is required");
+    const transfer = this.store.createKnowledgeTransfer({
+      id: randomUUID(),
+      kind: "import",
+      mode: "portable",
+      bundleKey,
+      request: { bundleKey, confirmed: false },
+    });
+    this.scheduleTransfers(0);
+    return transfer;
+  }
+
+  confirmKnowledgeImport(id: string, acceptConsents: boolean): KnowledgeTransferRecord {
+    const transfer = this.store.confirmKnowledgeImport(id, acceptConsents);
+    this.scheduleTransfers(0);
+    return transfer;
   }
 
   beginAuthorization(input: {
@@ -754,7 +824,7 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
   }
 
   private async processJobs(): Promise<void> {
-    if (this.jobsRunning || this.stopped) return;
+    if (this.jobsRunning || this.stopped || this.searchMaintenance) return;
     this.jobsRunning = true;
     try {
       this.resumeFailedBackfills();
@@ -784,8 +854,8 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
 
   private async rebuildDerivedSearch(): Promise<void> {
     const rebuiltSpaces = new Set<string>();
-    for (const binding of this.store.listBindings()) {
-      const source = this.state.teamSource(binding.sourceId);
+    for (const knowledgeSource of this.searchableKnowledgeSources()) {
+      const source = this.state.teamSource(knowledgeSource.sourceId);
       if (!source || rebuiltSpaces.has(source.spaceId)) continue;
       rebuiltSpaces.add(source.spaceId);
       let cursor = 0;
@@ -794,16 +864,16 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
         if (events.length === 0) break;
         for (const event of events) {
           cursor = Math.max(cursor, event.id);
-          if (!event.text || !this.store.eventRevisionIsSearchable(binding.sourceId, event.id)) continue;
+          if (!event.text || !this.store.eventRevisionIsSearchable(knowledgeSource.sourceId, event.id)) continue;
           const eventSource = this.state.teamSource(event.sourceId);
           this.searchIndex.indexText({
-            sourceId: binding.sourceId,
+            sourceId: knowledgeSource.sourceId,
             evidenceType: "event",
             evidenceRef: String(event.id),
             text: event.text,
             normalizedHash: stableTextHash(event.text),
             locator: {
-              chatId: binding.telegramChatId,
+              chatId: knowledgeSource.telegramChatId,
               messageId: Number(event.externalEventId.split(":", 1)[0] ?? 0),
               threadId: eventSource?.externalThreadId ?? "0",
               topicId: eventSource?.externalThreadId ?? "0",
@@ -814,7 +884,7 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
         }
         await new Promise<void>((resolveYield) => setImmediate(resolveYield));
       }
-      this.scheduleKnowledgeRefresh(binding.telegramChatId);
+      this.scheduleKnowledgeRefreshSource(knowledgeSource.sourceId);
     }
     let chunkCursor = 0;
     while (!this.stopped) {
@@ -870,6 +940,17 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
       await new Promise<void>((resolveYield) => setImmediate(resolveYield));
     }
     if (!this.stopped) this.searchIndex.markRebuilt(this.searchIndexSignature());
+  }
+
+  private searchableKnowledgeSources(): Array<{
+    sourceId: string;
+    telegramChatId: number;
+    title: string;
+  }> {
+    const sources = new Map<string, { sourceId: string; telegramChatId: number; title: string }>();
+    for (const source of this.store.listImportedKnowledgeSources()) sources.set(source.sourceId, source);
+    for (const source of this.store.listBindings()) sources.set(source.sourceId, source);
+    return [...sources.values()];
   }
 
   private searchIndexSignature(): string {
@@ -1136,6 +1217,16 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
         evidenceEventIds: item.evidenceEventIds,
       },
     });
+    const existingEmbedding = this.store.semanticEmbedding(
+      "knowledge",
+      evidenceRef,
+      this.config.embeddingModel,
+      this.config.embeddingDimensions,
+    );
+    if (existingEmbedding) {
+      this.searchIndex.setEmbedding("knowledge", evidenceRef, existingEmbedding);
+      return;
+    }
     this.store.enqueueJob(
       job.sourceId,
       "embeddings",
@@ -1294,6 +1385,74 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
     }
   }
 
+  private scheduleTransfers(delay = 2_000): void {
+    if (this.stopped || !this.config.enabled || this.transfersTimer || this.transfersRunning) return;
+    this.transfersTimer = setTimeout(() => {
+      this.transfersTimer = null;
+      this.transfersTask = this.processTransfers().finally(() => {
+        this.transfersTask = null;
+        this.scheduleTransfers(2_000);
+      });
+    }, delay);
+    this.transfersTimer.unref();
+  }
+
+  private async processTransfers(): Promise<void> {
+    if (this.transfersRunning || this.stopped) return;
+    this.transfersRunning = true;
+    try {
+      const transfer = this.store.claimKnowledgeTransfer();
+      if (!transfer) return;
+      try {
+        if (transfer.kind === "export") {
+          if (!transfer.sourceId) throw new Error("knowledge export source is missing");
+          const result = await this.transfers.export({
+            exportId: transfer.id,
+            sourceId: transfer.sourceId,
+            mode: transfer.mode,
+            includeEmbeddings: transfer.request.includeEmbeddings !== false,
+          });
+          this.store.finishKnowledgeTransfer(transfer.id, { ...result }, result.bundleKey);
+          return;
+        }
+        const bundleKey = String(transfer.request.bundleKey ?? transfer.bundleKey).trim();
+        if (!bundleKey) throw new Error("knowledge import bundle key is missing");
+        if (transfer.request.confirmed !== true) {
+          const inspection = await this.transfers.inspect(bundleKey);
+          this.store.awaitKnowledgeImportConfirmation(transfer.id, { ...inspection }, bundleKey);
+          return;
+        }
+        const result = await this.transfers.import(
+          bundleKey,
+          transfer.request.acceptConsents === true,
+        );
+        await this.rebuildSearchAfterImport();
+        this.store.finishKnowledgeTransfer(transfer.id, { ...result }, bundleKey);
+      } catch (error) {
+        this.store.failKnowledgeTransfer(transfer.id, errorText(error));
+      }
+    } finally {
+      this.transfersRunning = false;
+    }
+  }
+
+  private async rebuildSearchAfterImport(): Promise<void> {
+    this.searchMaintenance = true;
+    try {
+      while (this.jobsRunning && !this.stopped) {
+        await new Promise<void>((resolveWait) => setTimeout(resolveWait, 25));
+      }
+      if (this.searchRebuild) await this.searchRebuild;
+      this.searchIndex.reset();
+      this.searchRebuild = this.rebuildDerivedSearch();
+      await this.searchRebuild;
+    } finally {
+      this.searchRebuild = null;
+      this.searchMaintenance = false;
+      this.scheduleJobs(0);
+    }
+  }
+
   private initialCollectedMessage(status: SyncStatus): string {
     const dates = [status.collector.firstMessageAt, status.collector.lastMessageAt]
       .map((value) => value ? new Date(value * 1_000).toISOString().slice(0, 10) : "—")
@@ -1392,9 +1551,13 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
   }
 
   scheduleKnowledgeRefresh(chatId: number): void {
-    const binding = this.store.listBindings().find((item) => item.telegramChatId === chatId);
-    if (!binding) return;
-    const source = this.state.teamSource(binding.sourceId);
+    const source = this.searchableKnowledgeSources().find((item) => item.telegramChatId === chatId);
+    if (!source) return;
+    this.scheduleKnowledgeRefreshSource(source.sourceId);
+  }
+
+  private scheduleKnowledgeRefreshSource(sourceId: string): void {
+    const source = this.state.teamSource(sourceId);
     if (!source) return;
     for (const item of this.state.teamKnowledge(source.spaceId, 10_000)) {
       const evidenceRef = `knowledge:${item.id}`;
@@ -1404,13 +1567,13 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
         continue;
       }
       this.store.enqueueJob(
-        binding.sourceId,
+        sourceId,
         "knowledge",
         `${item.id}:${item.updatedAt}`,
         { knowledgeId: item.id },
       );
     }
-    this.refreshStages(binding.sourceId);
+    this.refreshStages(sourceId);
     this.scheduleJobs(0);
   }
 

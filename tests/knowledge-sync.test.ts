@@ -27,6 +27,7 @@ test("disabled knowledge sync does not require production S3 credentials or an M
     s3Sse: "AES256",
     s3KmsKeyId: "",
     mtprotoMasterKeyPath: join(root, "missing.key"),
+    knowledgeTransferKeyPath: join(root, "missing-transfer.key"),
     embeddingModel: "text-embedding-3-small",
     embeddingDimensions: 4,
     embeddingBatchSize: 8,

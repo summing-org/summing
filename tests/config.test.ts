@@ -93,6 +93,7 @@ test("loads the explicit project model", () => {
     assert.equal(config.knowledgeSync.enabled, false);
     assert.equal(config.knowledgeSync.embeddingModel, "text-embedding-3-small");
     assert.equal(config.knowledgeSync.documentVisionModel, "gpt-5.4-nano");
+    assert.equal(config.knowledgeSync.knowledgeTransferKeyPath, "/etc/summing/kb-transfer.key");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

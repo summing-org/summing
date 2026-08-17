@@ -110,6 +110,16 @@ test("derived-index rebuild marker is versioned by model and dimensions", () => 
     index.markRebuilt("v1:model-a:4");
     assert.equal(index.rebuildRequired("v1:model-a:4"), false);
     assert.equal(index.rebuildRequired("v1:model-b:4"), true);
+    index.indexText({
+      sourceId: "source",
+      evidenceType: "event",
+      evidenceRef: "1",
+      text: "derived entry",
+      normalizedHash: "hash",
+    });
+    index.reset();
+    assert.equal(index.entryCount(), 0);
+    assert.equal(index.rebuildRequired("v1:model-a:4"), true);
     index.close();
     index = new KnowledgeSearchIndex(path, 8);
     assert.equal(index.rebuildRequired("v1:model-a:8"), true);

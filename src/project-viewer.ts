@@ -333,6 +333,50 @@ export class ProjectViewerServer {
       }
       return;
     }
+    if (request.method === "POST" && url.pathname === "/api/viewer/admin/knowledge/transfers") {
+      this.requireAdminAccess(telegramUser);
+      const body = await requestBody(request) as Record<string, unknown> | null;
+      try {
+        const sync = this.requireKnowledgeSync();
+        const kind = String(body?.kind ?? "");
+        if (kind === "export") {
+          const mode = String(body?.mode ?? "manifest");
+          if (mode !== "manifest" && mode !== "portable") {
+            throw new Error("knowledge export mode must be manifest or portable");
+          }
+          json(response, 202, sync.startKnowledgeExport({
+            chatId: Number(body?.chatId),
+            mode,
+            includeEmbeddings: body?.includeEmbeddings !== false,
+          }));
+        } else if (kind === "import") {
+          json(response, 202, sync.startKnowledgeImport({
+            bundleKey: String(body?.bundleKey ?? ""),
+          }));
+        } else {
+          throw new Error("knowledge transfer kind must be export or import");
+        }
+      } catch (error) {
+        throw new ViewerHttpError(400, error instanceof Error ? error.message : String(error));
+      }
+      return;
+    }
+    const knowledgeTransferConfirmation = url.pathname.match(
+      /^\/api\/viewer\/admin\/knowledge\/transfers\/([0-9a-f-]{36})\/confirm$/,
+    );
+    if (request.method === "POST" && knowledgeTransferConfirmation) {
+      this.requireAdminAccess(telegramUser);
+      const body = await requestBody(request) as Record<string, unknown> | null;
+      try {
+        json(response, 202, this.requireKnowledgeSync().confirmKnowledgeImport(
+          knowledgeTransferConfirmation[1]!,
+          body?.acceptConsents === true,
+        ));
+      } catch (error) {
+        throw new ViewerHttpError(409, error instanceof Error ? error.message : String(error));
+      }
+      return;
+    }
     if (request.method === "GET" && url.pathname === "/api/viewer/admin/deployment") {
       this.requireAdminAccess(telegramUser);
       json(response, 200, await this.deployment.status());

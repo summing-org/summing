@@ -14,6 +14,7 @@ env_file=/etc/summing/summing.env
 deploy_env_file=/etc/summing/deploy.env
 config_file="${data_dir}/config.toml"
 mtproto_key=/etc/summing/mtproto.key
+kb_transfer_key=/etc/summing/kb-transfer.key
 
 if [ ! -f "${repo_dir}/package.json" ]; then
   printf 'SUMMING source is missing from %s.\n' "${repo_dir}" >&2
@@ -86,6 +87,18 @@ if [ -L "${mtproto_key}" ] || ! grep -Eq '^[0-9a-fA-F]{64}$' "${mtproto_key}"; t
 fi
 chown root:summing "${mtproto_key}"
 chmod 0440 "${mtproto_key}"
+if [ ! -f "${kb_transfer_key}" ]; then
+  temporary_kb_transfer_key=$(mktemp /run/summing-kb-transfer.XXXXXX)
+  openssl rand -hex 32 > "${temporary_kb_transfer_key}"
+  install -o root -g summing -m 0440 "${temporary_kb_transfer_key}" "${kb_transfer_key}"
+  rm -f "${temporary_kb_transfer_key}"
+fi
+if [ -L "${kb_transfer_key}" ] || ! grep -Eq '^[0-9a-fA-F]{64}$' "${kb_transfer_key}"; then
+  printf '%s\n' 'KB transfer key must be a regular file containing 64 hex characters.' >&2
+  exit 2
+fi
+chown root:summing "${kb_transfer_key}"
+chmod 0440 "${kb_transfer_key}"
 install -d -o root -g root -m 0755 /etc/codex
 install -o root -g root -m 0644 \
   "${repo_dir}/deploy/codex-requirements.toml" \

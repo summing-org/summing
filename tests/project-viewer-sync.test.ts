@@ -88,6 +88,18 @@ test("owner-only Admin API exposes MTProto, consent and source sync actions", as
     resumeSource: async (chatId) => ({ chatId } as never),
     unbindSource: (chatId) => { calls.push(["unbind", chatId]); },
     revokeConnector: async (id) => { calls.push(["revoke-connector", id]); },
+    startKnowledgeExport: (input) => {
+      calls.push(["export", input]);
+      return { id: "export" } as never;
+    },
+    startKnowledgeImport: (input) => {
+      calls.push(["import", input]);
+      return { id: "import" } as never;
+    },
+    confirmKnowledgeImport: (id, acceptConsents) => {
+      calls.push(["confirm-import", { id, acceptConsents }]);
+      return { id } as never;
+    },
   };
   const viewer = new ProjectViewerServer(
     config,
@@ -133,7 +145,22 @@ test("owner-only Admin API exposes MTProto, consent and source sync actions", as
       }),
     });
     assert.equal(started.status, 202);
-    assert.equal(calls.map(([name]) => name).join(","), "authorize,consent,start");
+    const exported = await fetch(`${endpoint}/api/viewer/admin/knowledge/transfers`, {
+      method: "POST",
+      headers: { ...auth(1), "content-type": "application/json" },
+      body: JSON.stringify({ kind: "export", chatId: -100, mode: "portable" }),
+    });
+    assert.equal(exported.status, 202);
+    const imported = await fetch(`${endpoint}/api/viewer/admin/knowledge/transfers`, {
+      method: "POST",
+      headers: { ...auth(1), "content-type": "application/json" },
+      body: JSON.stringify({ kind: "import", bundleKey: "summing/exports/id/manifest.json" }),
+    });
+    assert.equal(imported.status, 202);
+    assert.equal(
+      calls.map(([name]) => name).join(","),
+      "authorize,consent,start,export,import",
+    );
   } finally {
     await viewer.close();
     state.close();

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { DatabaseSync, type SQLInputValue } from "node:sqlite";
+import { backup, DatabaseSync, type SQLInputValue } from "node:sqlite";
 import type { StoredAttachment } from "./attachment-service.js";
 
 export interface Conversation {
@@ -326,6 +326,159 @@ export class StateStore {
 
   close(): void {
     this.db.close();
+  }
+
+  async backupTo(path: string): Promise<void> {
+    await backup(this.db, path);
+  }
+
+  analyzeKnowledgeCatalog(catalogPath: string): {
+    sourceConflicts: number;
+    eventConflicts: number;
+    existingEvents: number;
+  } {
+    this.db.prepare("ATTACH DATABASE ? AS kb_import").run(catalogPath);
+    try {
+      const sourceConflicts = this.db.prepare(`
+        SELECT COUNT(*) AS count
+        FROM kb_import.kb_team_sources incoming
+        JOIN team_sources current ON current.id = incoming.id
+          OR (current.provider = incoming.provider
+            AND current.external_space_id = incoming.external_space_id
+            AND current.external_thread_id = incoming.external_thread_id)
+        WHERE current.id <> incoming.id OR current.space_id <> incoming.space_id
+          OR current.provider <> incoming.provider
+          OR current.external_space_id <> incoming.external_space_id
+          OR current.external_thread_id <> incoming.external_thread_id
+      `).get() as Row;
+      const eventConflicts = this.db.prepare(`
+        SELECT COUNT(*) AS count
+        FROM kb_import.kb_team_events incoming
+        JOIN team_events current ON current.source_id = incoming.source_id
+          AND current.event_kind = incoming.event_kind
+          AND current.external_event_id = incoming.external_event_id
+        WHERE current.space_id <> incoming.space_id
+          OR current.person_id <> incoming.person_id
+          OR current.provider <> incoming.provider
+          OR current.sender_external_id <> incoming.sender_external_id
+          OR current.text <> incoming.text
+          OR current.reply_to_external_event_id <> incoming.reply_to_external_event_id
+          OR current.attachments_json <> incoming.attachments_json
+          OR current.occurred_at <> incoming.occurred_at
+          OR current.synthesis_state <> incoming.synthesis_state
+          OR COALESCE(current.redacted_at, -1) <> COALESCE(incoming.redacted_at, -1)
+      `).get() as Row;
+      const existingEvents = this.db.prepare(`
+        SELECT COUNT(*) AS count
+        FROM kb_import.kb_team_events incoming
+        JOIN team_events current ON current.source_id = incoming.source_id
+          AND current.event_kind = incoming.event_kind
+          AND current.external_event_id = incoming.external_event_id
+      `).get() as Row;
+      return {
+        sourceConflicts: Number(sourceConflicts.count),
+        eventConflicts: Number(eventConflicts.count),
+        existingEvents: Number(existingEvents.count),
+      };
+    } finally {
+      this.db.exec("DETACH DATABASE kb_import");
+    }
+  }
+
+  importKnowledgeCatalog(
+    catalogPath: string,
+    administratorUserId: number,
+  ): { events: number; knowledge: number } {
+    this.db.prepare("ATTACH DATABASE ? AS kb_import").run(catalogPath);
+    try {
+      return this.transaction(() => {
+        this.db.prepare(`
+          INSERT OR IGNORE INTO team_spaces
+            (id, name, administrator_user_id, phase, summary, summary_status,
+             announced_at, model_egress_announced_at, oriented_at,
+             last_intervention_at, created_at, updated_at)
+          SELECT id, name, ?, phase, summary, summary_status, announced_at,
+            model_egress_announced_at, oriented_at, last_intervention_at,
+            created_at, updated_at
+          FROM kb_import.kb_team_spaces
+        `).run(administratorUserId);
+        this.db.exec(`
+          INSERT OR IGNORE INTO team_sources
+            (id, space_id, provider, external_space_id, external_thread_id, title,
+             joined_at, created_at, updated_at)
+          SELECT id, space_id, provider, external_space_id, external_thread_id, title,
+            joined_at, created_at, updated_at
+          FROM kb_import.kb_team_sources;
+          INSERT OR IGNORE INTO team_people
+            (id, space_id, display_name, created_at, updated_at)
+          SELECT id, space_id, display_name, created_at, updated_at
+          FROM kb_import.kb_team_people;
+          INSERT OR IGNORE INTO team_identities
+            (space_id, provider, external_user_id, person_id, display_name,
+             observation_enabled, first_seen_at, last_seen_at)
+          SELECT space_id, provider, external_user_id, person_id, display_name,
+            observation_enabled, first_seen_at, last_seen_at
+          FROM kb_import.kb_team_identities;
+          INSERT OR IGNORE INTO team_events
+            (space_id, source_id, person_id, provider, external_event_id, event_kind,
+             sender_external_id, sender_display_name, text, reply_to_external_event_id,
+             attachments_json, occurred_at, observed_at, synthesis_state, redacted_at)
+          SELECT space_id, source_id, person_id, provider, external_event_id, event_kind,
+             sender_external_id, sender_display_name, text, reply_to_external_event_id,
+             attachments_json, occurred_at, observed_at, synthesis_state, redacted_at
+          FROM kb_import.kb_team_events ORDER BY export_event_id;
+          UPDATE kb_import.kb_team_events
+          SET target_event_id = (
+            SELECT current.id FROM team_events current
+            WHERE current.source_id = kb_import.kb_team_events.source_id
+              AND current.event_kind = kb_import.kb_team_events.event_kind
+              AND current.external_event_id = kb_import.kb_team_events.external_event_id
+          );
+          INSERT OR IGNORE INTO team_knowledge
+            (space_id, fingerprint, kind, subject, statement, confidence, status,
+             visibility, visibility_ref, valid_from, valid_to, created_at, updated_at)
+          SELECT space_id, fingerprint, kind, subject, statement, confidence, status,
+             visibility, visibility_ref, valid_from, valid_to, created_at, updated_at
+          FROM kb_import.kb_team_knowledge ORDER BY export_knowledge_id;
+          UPDATE kb_import.kb_team_knowledge
+          SET target_knowledge_id = (
+            SELECT current.id FROM team_knowledge current
+            WHERE current.space_id = kb_import.kb_team_knowledge.space_id
+              AND current.fingerprint = kb_import.kb_team_knowledge.fingerprint
+          );
+          INSERT OR IGNORE INTO team_knowledge_evidence (knowledge_id, event_id)
+          SELECT knowledge.target_knowledge_id, event.target_event_id
+          FROM kb_import.kb_team_knowledge_evidence evidence
+          JOIN kb_import.kb_team_knowledge knowledge
+            ON knowledge.export_knowledge_id = evidence.knowledge_id
+          JOIN kb_import.kb_team_events event
+            ON event.export_event_id = evidence.event_id
+          WHERE knowledge.target_knowledge_id IS NOT NULL
+            AND event.target_event_id IS NOT NULL;
+          INSERT OR IGNORE INTO team_knowledge_supersessions
+            (old_knowledge_id, new_knowledge_id)
+          SELECT old_knowledge.target_knowledge_id, new_knowledge.target_knowledge_id
+          FROM kb_import.kb_team_knowledge_supersessions supersession
+          JOIN kb_import.kb_team_knowledge old_knowledge
+            ON old_knowledge.export_knowledge_id = supersession.old_knowledge_id
+          JOIN kb_import.kb_team_knowledge new_knowledge
+            ON new_knowledge.export_knowledge_id = supersession.new_knowledge_id
+          WHERE old_knowledge.target_knowledge_id IS NOT NULL
+            AND new_knowledge.target_knowledge_id IS NOT NULL;
+        `);
+        const events = this.db.prepare(`
+          SELECT COUNT(*) AS count FROM kb_import.kb_team_events
+          WHERE target_event_id IS NOT NULL
+        `).get() as Row;
+        const knowledge = this.db.prepare(`
+          SELECT COUNT(*) AS count FROM kb_import.kb_team_knowledge
+          WHERE target_knowledge_id IS NOT NULL
+        `).get() as Row;
+        return { events: Number(events.count), knowledge: Number(knowledge.count) };
+      });
+    } finally {
+      this.db.exec("DETACH DATABASE kb_import");
+    }
   }
 
   private transaction<T>(action: () => T): T {

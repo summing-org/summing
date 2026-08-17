@@ -1,6 +1,6 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { DatabaseSync, type SQLInputValue } from "node:sqlite";
+import { backup, DatabaseSync, type SQLInputValue } from "node:sqlite";
 
 export type ConnectorState = "authorizing" | "ready" | "degraded" | "revoked";
 export type CollectorState =
@@ -13,6 +13,38 @@ export type CollectorState =
 export type SyncStageName = "media" | "extraction" | "fts" | "embeddings" | "knowledge";
 export type SyncStageState = "pending" | "running" | "ready" | "degraded" | "failed";
 export type ConsentStatus = "granted" | "revoked";
+export type KnowledgeTransferKind = "export" | "import";
+export type KnowledgeTransferMode = "manifest" | "portable";
+export type KnowledgeTransferState =
+  | "queued"
+  | "running"
+  | "awaiting_confirmation"
+  | "succeeded"
+  | "failed";
+
+export interface KnowledgeTransferRecord {
+  id: string;
+  kind: KnowledgeTransferKind;
+  mode: KnowledgeTransferMode;
+  state: KnowledgeTransferState;
+  sourceId: string | null;
+  bundleKey: string;
+  request: Record<string, unknown>;
+  result: Record<string, unknown>;
+  attempts: number;
+  lastError: string;
+  createdAt: number;
+  updatedAt: number;
+  completedAt: number | null;
+}
+
+export interface ImportedKnowledgeSource {
+  sourceId: string;
+  telegramChatId: number;
+  title: string;
+  checkpoint: Record<string, unknown>;
+  importedAt: number;
+}
 
 export interface MtprotoConnectorRecord {
   id: string;
@@ -162,6 +194,10 @@ function parseStrings(value: unknown): string[] {
   }
 }
 
+function sqlValue(value: SQLInputValue | undefined): SQLInputValue {
+  return value ?? null;
+}
+
 export class KnowledgeSyncStore {
   private readonly db: DatabaseSync;
 
@@ -174,6 +210,10 @@ export class KnowledgeSyncStore {
 
   close(): void {
     this.db.close();
+  }
+
+  async backupTo(path: string): Promise<void> {
+    await backup(this.db, path);
   }
 
   private transaction<T>(action: () => T): T {
@@ -398,6 +438,31 @@ export class KnowledgeSyncStore {
         locator_json TEXT NOT NULL DEFAULT '{}',
         PRIMARY KEY(knowledge_id, evidence_type, evidence_ref)
       );
+      CREATE TABLE IF NOT EXISTS knowledge_transfers (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL CHECK(kind IN ('export','import')),
+        mode TEXT NOT NULL CHECK(mode IN ('manifest','portable')),
+        state TEXT NOT NULL CHECK(state IN
+          ('queued','running','awaiting_confirmation','succeeded','failed')),
+        source_id TEXT,
+        bundle_key TEXT NOT NULL DEFAULT '',
+        request_json TEXT NOT NULL DEFAULT '{}',
+        result_json TEXT NOT NULL DEFAULT '{}',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT NOT NULL DEFAULT '',
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        completed_at REAL
+      );
+      CREATE INDEX IF NOT EXISTS knowledge_transfers_state
+        ON knowledge_transfers(state, created_at, id);
+      CREATE TABLE IF NOT EXISTS imported_knowledge_sources (
+        source_id TEXT PRIMARY KEY,
+        telegram_chat_id INTEGER NOT NULL,
+        title TEXT NOT NULL DEFAULT '',
+        checkpoint_json TEXT NOT NULL DEFAULT '{}',
+        imported_at REAL NOT NULL
+      );
     `);
     const objectRefColumns = this.db.prepare("PRAGMA table_info(content_object_refs)").all() as Row[];
     if (!objectRefColumns.some((column) => column.name === "telegram_user_id")) {
@@ -417,7 +482,470 @@ export class KnowledgeSyncStore {
     this.db.exec(`
       UPDATE team_ingestion_jobs SET state = 'pending' WHERE state = 'running';
       UPDATE team_sync_outbox SET state = 'pending' WHERE state = 'sending';
+      UPDATE knowledge_transfers
+      SET state = 'queued', last_error = 'resuming after process restart',
+          completed_at = NULL, updated_at = unixepoch('subsec')
+      WHERE state = 'running';
     `);
+  }
+
+  createKnowledgeTransfer(input: {
+    id: string;
+    kind: KnowledgeTransferKind;
+    mode: KnowledgeTransferMode;
+    sourceId?: string | null;
+    bundleKey?: string;
+    request?: Record<string, unknown>;
+    now?: number;
+  }): KnowledgeTransferRecord {
+    const now = input.now ?? Date.now() / 1_000;
+    this.db.prepare(`
+      INSERT INTO knowledge_transfers
+        (id, kind, mode, state, source_id, bundle_key, request_json, created_at, updated_at)
+      VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?)
+    `).run(
+      input.id,
+      input.kind,
+      input.mode,
+      input.sourceId ?? null,
+      input.bundleKey ?? "",
+      JSON.stringify(input.request ?? {}),
+      now,
+      now,
+    );
+    return this.knowledgeTransfer(input.id)!;
+  }
+
+  knowledgeTransfer(id: string): KnowledgeTransferRecord | null {
+    const row = this.db.prepare("SELECT * FROM knowledge_transfers WHERE id = ?")
+      .get(id) as Row | undefined;
+    return row ? this.toKnowledgeTransfer(row) : null;
+  }
+
+  listKnowledgeTransfers(limit = 50): KnowledgeTransferRecord[] {
+    return (this.db.prepare(`
+      SELECT * FROM knowledge_transfers ORDER BY created_at DESC, id DESC LIMIT ?
+    `).all(Math.max(1, Math.min(500, limit))) as Row[])
+      .map((row) => this.toKnowledgeTransfer(row));
+  }
+
+  claimKnowledgeTransfer(): KnowledgeTransferRecord | null {
+    return this.transaction(() => {
+      const row = this.db.prepare(`
+        SELECT id FROM knowledge_transfers WHERE state = 'queued'
+        ORDER BY created_at, id LIMIT 1
+      `).get() as Row | undefined;
+      if (!row) return null;
+      const now = Date.now() / 1_000;
+      const updated = this.db.prepare(`
+        UPDATE knowledge_transfers SET state = 'running', attempts = attempts + 1,
+          last_error = '', updated_at = ? WHERE id = ? AND state = 'queued'
+      `).run(now, String(row.id));
+      return Number(updated.changes) > 0 ? this.knowledgeTransfer(String(row.id)) : null;
+    });
+  }
+
+  awaitKnowledgeImportConfirmation(
+    id: string,
+    result: Record<string, unknown>,
+    bundleKey: string,
+  ): void {
+    const mode = result.mode === "manifest" ? "manifest" : "portable";
+    const sourceId = typeof result.sourceId === "string" && result.sourceId ? result.sourceId : null;
+    this.db.prepare(`
+      UPDATE knowledge_transfers SET state = 'awaiting_confirmation', result_json = ?,
+        bundle_key = ?, mode = ?, source_id = ?, updated_at = ?
+      WHERE id = ? AND state = 'running' AND kind = 'import'
+    `).run(JSON.stringify(result), bundleKey, mode, sourceId, Date.now() / 1_000, id);
+  }
+
+  confirmKnowledgeImport(id: string, acceptConsents: boolean): KnowledgeTransferRecord {
+    return this.transaction(() => {
+      const current = this.knowledgeTransfer(id);
+      if (!current || current.kind !== "import" || current.state !== "awaiting_confirmation") {
+        throw new Error("knowledge import is not awaiting confirmation");
+      }
+      if (Number(current.result.grantedConsents ?? 0) > 0 && !acceptConsents) {
+        throw new Error("imported consent records require explicit acceptance");
+      }
+      this.db.prepare(`
+        UPDATE knowledge_transfers SET state = 'queued', request_json = ?, updated_at = ?
+        WHERE id = ? AND state = 'awaiting_confirmation'
+      `).run(
+        JSON.stringify({ ...current.request, confirmed: true, acceptConsents }),
+        Date.now() / 1_000,
+        id,
+      );
+      return this.knowledgeTransfer(id)!;
+    });
+  }
+
+  finishKnowledgeTransfer(
+    id: string,
+    result: Record<string, unknown>,
+    bundleKey = "",
+  ): void {
+    const now = Date.now() / 1_000;
+    this.db.prepare(`
+      UPDATE knowledge_transfers SET state = 'succeeded', result_json = ?,
+        bundle_key = CASE WHEN ? <> '' THEN ? ELSE bundle_key END,
+        last_error = '', updated_at = ?, completed_at = ?
+      WHERE id = ? AND state = 'running'
+    `).run(JSON.stringify(result), bundleKey, bundleKey, now, now, id);
+  }
+
+  failKnowledgeTransfer(id: string, error: string): void {
+    const now = Date.now() / 1_000;
+    this.db.prepare(`
+      UPDATE knowledge_transfers SET state = 'failed', last_error = ?,
+        updated_at = ?, completed_at = ? WHERE id = ? AND state = 'running'
+    `).run(error.slice(0, 2_000), now, now, id);
+  }
+
+  recordImportedKnowledgeSource(input: {
+    sourceId: string;
+    telegramChatId: number;
+    title: string;
+    checkpoint: Record<string, unknown>;
+    importedAt?: number;
+  }): void {
+    this.db.prepare(`
+      INSERT INTO imported_knowledge_sources
+        (source_id, telegram_chat_id, title, checkpoint_json, imported_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(source_id) DO UPDATE SET telegram_chat_id = excluded.telegram_chat_id,
+        title = excluded.title, checkpoint_json = excluded.checkpoint_json,
+        imported_at = excluded.imported_at
+    `).run(
+      input.sourceId,
+      input.telegramChatId,
+      input.title,
+      JSON.stringify(input.checkpoint),
+      input.importedAt ?? Date.now() / 1_000,
+    );
+  }
+
+  listImportedKnowledgeSources(): ImportedKnowledgeSource[] {
+    return (this.db.prepare(`
+      SELECT * FROM imported_knowledge_sources ORDER BY imported_at DESC, source_id
+    `).all() as Row[]).map((row) => ({
+      sourceId: String(row.source_id),
+      telegramChatId: Number(row.telegram_chat_id),
+      title: String(row.title),
+      checkpoint: parseRecord(row.checkpoint_json),
+      importedAt: Number(row.imported_at),
+    }));
+  }
+
+  analyzeKnowledgeCatalog(catalogPath: string): {
+    consentOverrides: number;
+    objectConflicts: number;
+    existingObjects: number;
+  } {
+    this.db.prepare("ATTACH DATABASE ? AS kb_import").run(catalogPath);
+    try {
+      const consentOverrides = this.db.prepare(`
+        SELECT COUNT(*) AS count
+        FROM kb_import.kb_team_consents incoming
+        JOIN team_consents current
+          ON current.source_id = incoming.source_id
+         AND current.telegram_user_id = incoming.telegram_user_id
+        WHERE current.status = 'revoked' AND incoming.status = 'granted'
+      `).get() as Row;
+      const objectConflicts = this.db.prepare(`
+        SELECT COUNT(*) AS count
+        FROM kb_import.kb_content_objects incoming
+        JOIN content_objects current ON current.sha256 = incoming.sha256
+        WHERE current.size_bytes <> incoming.size_bytes
+      `).get() as Row;
+      const existingObjects = this.db.prepare(`
+        SELECT COUNT(*) AS count
+        FROM kb_import.kb_content_objects incoming
+        JOIN content_objects current ON current.sha256 = incoming.sha256
+      `).get() as Row;
+      return {
+        consentOverrides: Number(consentOverrides.count),
+        objectConflicts: Number(objectConflicts.count),
+        existingObjects: Number(existingObjects.count),
+      };
+    } finally {
+      this.db.exec("DETACH DATABASE kb_import");
+    }
+  }
+
+  importKnowledgeCatalog(
+    catalogPath: string,
+    input: {
+      acceptConsents: boolean;
+      objectStoreBackend: "local" | "s3";
+      objectPrefix: string;
+      embeddingModel: string;
+      embeddingDimensions: number;
+    },
+  ): { consents: number; objects: number; blocks: number; chunks: number } {
+    this.db.prepare("ATTACH DATABASE ? AS kb_import").run(catalogPath);
+    try {
+      return this.transaction(() => {
+        const consents = this.db.prepare(`
+          SELECT * FROM kb_import.kb_team_consents ORDER BY telegram_user_id
+        `).all() as Row[];
+        for (const consent of consents) {
+          const current = this.db.prepare(`
+            SELECT status FROM team_consents WHERE source_id = ? AND telegram_user_id = ?
+          `).get(String(consent.source_id), Number(consent.telegram_user_id)) as Row | undefined;
+          if (current?.status === "revoked" && consent.status === "granted") continue;
+          if (consent.status === "granted" && !input.acceptConsents) {
+            throw new Error("imported consent records require explicit acceptance");
+          }
+          this.db.prepare(`
+            INSERT INTO team_consents
+              (source_id, telegram_user_id, status, scope_json, granted_at,
+               historical_from, proof, revoked_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(source_id, telegram_user_id) DO UPDATE SET
+              status = excluded.status, scope_json = excluded.scope_json,
+              granted_at = excluded.granted_at, historical_from = excluded.historical_from,
+              proof = excluded.proof, revoked_at = excluded.revoked_at,
+              updated_at = MAX(team_consents.updated_at, excluded.updated_at)
+          `).run(
+            sqlValue(consent.source_id), sqlValue(consent.telegram_user_id),
+            sqlValue(consent.status), sqlValue(consent.scope_json), sqlValue(consent.granted_at),
+            sqlValue(consent.historical_from), sqlValue(consent.proof),
+            sqlValue(consent.revoked_at), sqlValue(consent.updated_at),
+          );
+        }
+
+        const prefix = input.objectPrefix.replace(/^\/+|\/+$/g, "");
+        const objects = this.db.prepare(`
+          SELECT * FROM kb_import.kb_content_objects ORDER BY sha256
+        `).all() as Row[];
+        for (const object of objects) {
+          const sha256 = String(object.sha256);
+          const objectKey = [prefix, "sha256", sha256.slice(0, 2), sha256]
+            .filter(Boolean).join("/");
+          this.db.prepare(`
+            INSERT OR IGNORE INTO content_objects
+              (sha256, object_key, size_bytes, mime_type, file_name, backend, stored_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+          `).run(
+            sha256, objectKey, sqlValue(object.size_bytes), sqlValue(object.mime_type),
+            sqlValue(object.file_name), input.objectStoreBackend, sqlValue(object.stored_at),
+          );
+        }
+        this.db.exec(`
+          INSERT OR IGNORE INTO content_object_refs
+            (sha256, source_id, telegram_user_id, ref_type, ref_id, metadata_json, created_at)
+          SELECT sha256, source_id, telegram_user_id, ref_type, ref_id, metadata_json, created_at
+          FROM kb_import.kb_content_object_refs;
+        `);
+
+        const blocks = this.db.prepare(`
+          SELECT * FROM kb_import.kb_document_blocks ORDER BY export_block_id
+        `).all() as Row[];
+        const insertBlock = this.db.prepare(`
+          INSERT OR IGNORE INTO document_blocks
+            (object_hash, source_id, block_kind, ordinal, text, locator_json,
+             structure_json, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+        const findBlock = this.db.prepare(`
+          SELECT id FROM document_blocks
+          WHERE object_hash = ? AND ordinal = ? AND block_kind = ?
+        `);
+        const updateBlock = this.db.prepare(`
+          UPDATE kb_import.kb_document_blocks SET target_block_id = ?
+          WHERE export_block_id = ?
+        `);
+        for (const block of blocks) {
+          insertBlock.run(
+            sqlValue(block.object_hash), sqlValue(block.source_id), sqlValue(block.block_kind),
+            sqlValue(block.ordinal), sqlValue(block.text), sqlValue(block.locator_json),
+            sqlValue(block.structure_json), sqlValue(block.created_at),
+          );
+          const target = findBlock.get(
+            sqlValue(block.object_hash), sqlValue(block.ordinal), sqlValue(block.block_kind),
+          ) as Row;
+          updateBlock.run(sqlValue(target.id), sqlValue(block.export_block_id));
+        }
+
+        const chunks = this.db.prepare(`
+          SELECT * FROM kb_import.kb_search_chunks ORDER BY export_chunk_id
+        `).all() as Row[];
+        const insertChunk = this.db.prepare(`
+          INSERT OR IGNORE INTO search_chunks
+            (source_id, normalized_hash, text, block_ids_json, metadata_json, created_at)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `);
+        const findChunk = this.db.prepare(`
+          SELECT id FROM search_chunks WHERE source_id = ? AND normalized_hash = ?
+        `);
+        const updateChunk = this.db.prepare(`
+          UPDATE kb_import.kb_search_chunks SET target_chunk_id = ?
+          WHERE export_chunk_id = ?
+        `);
+        for (const chunk of chunks) {
+          const mappedBlocks = (this.db.prepare(`
+            SELECT blocks.target_block_id AS id
+            FROM kb_import.kb_search_chunk_blocks links
+            JOIN kb_import.kb_document_blocks blocks
+              ON blocks.export_block_id = links.block_id
+            WHERE links.chunk_id = ? AND blocks.target_block_id IS NOT NULL
+            ORDER BY links.rowid
+          `).all(sqlValue(chunk.export_chunk_id)) as Row[]).map((row) => Number(row.id));
+          let metadata = parseRecord(chunk.metadata_json);
+          metadata = { ...metadata, blockIds: mappedBlocks };
+          insertChunk.run(
+            sqlValue(chunk.source_id), sqlValue(chunk.normalized_hash), sqlValue(chunk.text),
+            JSON.stringify(mappedBlocks), JSON.stringify(metadata), sqlValue(chunk.created_at),
+          );
+          const target = findChunk.get(
+            sqlValue(chunk.source_id), sqlValue(chunk.normalized_hash),
+          ) as Row;
+          updateChunk.run(sqlValue(target.id), sqlValue(chunk.export_chunk_id));
+        }
+        this.db.exec(`
+          INSERT OR IGNORE INTO search_chunk_blocks (chunk_id, block_id)
+          SELECT chunks.target_chunk_id, blocks.target_block_id
+          FROM kb_import.kb_search_chunk_blocks links
+          JOIN kb_import.kb_search_chunks chunks ON chunks.export_chunk_id = links.chunk_id
+          JOIN kb_import.kb_document_blocks blocks ON blocks.export_block_id = links.block_id
+          WHERE chunks.target_chunk_id IS NOT NULL AND blocks.target_block_id IS NOT NULL;
+        `);
+
+        const eventMap = new Map((this.db.prepare(`
+          SELECT export_event_id, target_event_id FROM kb_import.kb_team_events
+          WHERE target_event_id IS NOT NULL
+        `).all() as Row[]).map((row) => [Number(row.export_event_id), Number(row.target_event_id)]));
+        const knowledgeMap = new Map((this.db.prepare(`
+          SELECT export_knowledge_id, target_knowledge_id FROM kb_import.kb_team_knowledge
+          WHERE target_knowledge_id IS NOT NULL
+        `).all() as Row[]).map((row) => [Number(row.export_knowledge_id), Number(row.target_knowledge_id)]));
+        const blockMap = new Map((this.db.prepare(`
+          SELECT export_block_id, target_block_id FROM kb_import.kb_document_blocks
+          WHERE target_block_id IS NOT NULL
+        `).all() as Row[]).map((row) => [Number(row.export_block_id), Number(row.target_block_id)]));
+        const chunkMap = new Map((this.db.prepare(`
+          SELECT export_chunk_id, target_chunk_id FROM kb_import.kb_search_chunks
+          WHERE target_chunk_id IS NOT NULL
+        `).all() as Row[]).map((row) => [Number(row.export_chunk_id), Number(row.target_chunk_id)]));
+
+        const revisions = this.db.prepare(`SELECT * FROM kb_import.kb_team_event_revisions`)
+          .all() as Row[];
+        for (const revision of revisions) {
+          const mapped = revision.team_event_id === null
+            ? null : eventMap.get(Number(revision.team_event_id)) ?? null;
+          this.db.prepare(`
+            INSERT OR IGNORE INTO team_event_revisions
+              (source_id, telegram_message_id, revision, event_kind, team_event_id, occurred_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+          `).run(
+            sqlValue(revision.source_id), sqlValue(revision.telegram_message_id),
+            sqlValue(revision.revision), sqlValue(revision.event_kind), mapped,
+            sqlValue(revision.occurred_at),
+          );
+        }
+
+        const chunkEmbeddings = this.db.prepare(`
+          SELECT * FROM kb_import.kb_chunk_embeddings
+          WHERE model = ? AND dimensions = ?
+        `).all(input.embeddingModel, input.embeddingDimensions) as Row[];
+        for (const embedding of chunkEmbeddings) {
+          const chunkId = chunkMap.get(Number(embedding.chunk_id));
+          if (!chunkId) continue;
+          this.db.prepare(`
+            INSERT OR REPLACE INTO chunk_embeddings
+              (chunk_id, model, dimensions, vector, normalized_hash, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+          `).run(
+            chunkId, sqlValue(embedding.model), sqlValue(embedding.dimensions),
+            sqlValue(embedding.vector), sqlValue(embedding.normalized_hash),
+            sqlValue(embedding.created_at),
+          );
+        }
+
+        const semantic = this.db.prepare(`
+          SELECT * FROM kb_import.kb_semantic_embeddings
+          WHERE model = ? AND dimensions = ?
+        `).all(input.embeddingModel, input.embeddingDimensions) as Row[];
+        for (const embedding of semantic) {
+          let evidenceRef = String(embedding.evidence_ref);
+          const documentMatch = evidenceRef.match(/^chunk:(\d+)$/);
+          const knowledgeMatch = evidenceRef.match(/^knowledge:(\d+)$/);
+          if (documentMatch) {
+            const mapped = chunkMap.get(Number(documentMatch[1]));
+            if (!mapped) continue;
+            evidenceRef = `chunk:${mapped}`;
+          } else if (knowledgeMatch) {
+            const mapped = knowledgeMap.get(Number(knowledgeMatch[1]));
+            if (!mapped) continue;
+            evidenceRef = `knowledge:${mapped}`;
+          }
+          this.db.prepare(`
+            INSERT OR REPLACE INTO semantic_embeddings
+              (evidence_type, evidence_ref, source_id, model, dimensions, vector,
+               normalized_hash, indexer_version, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(
+            sqlValue(embedding.evidence_type), evidenceRef, sqlValue(embedding.source_id),
+            sqlValue(embedding.model), sqlValue(embedding.dimensions), sqlValue(embedding.vector),
+            sqlValue(embedding.normalized_hash), sqlValue(embedding.indexer_version),
+            sqlValue(embedding.created_at),
+          );
+        }
+
+        const evidenceRows = this.db.prepare(`
+          SELECT * FROM kb_import.kb_team_knowledge_evidence_refs
+        `).all() as Row[];
+        for (const evidence of evidenceRows) {
+          const knowledgeId = knowledgeMap.get(Number(evidence.knowledge_id));
+          if (!knowledgeId) continue;
+          let ref = String(evidence.evidence_ref);
+          if (evidence.evidence_type === "event") {
+            const mapped = eventMap.get(Number(ref));
+            if (!mapped) continue;
+            ref = String(mapped);
+          } else if (evidence.evidence_type === "document_block") {
+            const match = ref.match(/^(?:block:)?(\d+)$/);
+            const mapped = match ? blockMap.get(Number(match[1])) : undefined;
+            if (!mapped) continue;
+            ref = `block:${mapped}`;
+          }
+          this.db.prepare(`
+            INSERT OR IGNORE INTO team_knowledge_evidence_refs
+              (knowledge_id, evidence_type, evidence_ref, locator_json)
+            VALUES (?, ?, ?, ?)
+          `).run(
+            knowledgeId, sqlValue(evidence.evidence_type), ref, sqlValue(evidence.locator_json),
+          );
+        }
+        return {
+          consents: consents.length,
+          objects: objects.length,
+          blocks: blocks.length,
+          chunks: chunks.length,
+        };
+      });
+    } finally {
+      this.db.exec("DETACH DATABASE kb_import");
+    }
+  }
+
+  private toKnowledgeTransfer(row: Row): KnowledgeTransferRecord {
+    return {
+      id: String(row.id),
+      kind: String(row.kind) as KnowledgeTransferKind,
+      mode: String(row.mode) as KnowledgeTransferMode,
+      state: String(row.state) as KnowledgeTransferState,
+      sourceId: row.source_id === null ? null : String(row.source_id),
+      bundleKey: String(row.bundle_key),
+      request: parseRecord(row.request_json),
+      result: parseRecord(row.result_json),
+      attempts: Number(row.attempts),
+      lastError: String(row.last_error),
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
+      completedAt: row.completed_at === null ? null : Number(row.completed_at),
+    };
   }
 
   createConnector(input: {
@@ -1475,6 +2003,23 @@ export class KnowledgeSyncStore {
       WHERE evidence_type = ? AND evidence_ref = ? AND model = ? AND dimensions = ?
       LIMIT 1
     `).get(evidenceType, evidenceRef, model, dimensions));
+  }
+
+  semanticEmbedding(
+    evidenceType: "document_block" | "knowledge",
+    evidenceRef: string,
+    model: string,
+    dimensions: number,
+  ): Float32Array | null {
+    const row = this.db.prepare(`
+      SELECT vector, dimensions FROM semantic_embeddings
+      WHERE evidence_type = ? AND evidence_ref = ? AND model = ? AND dimensions = ?
+    `).get(evidenceType, evidenceRef, model, dimensions) as Row | undefined;
+    if (!row) return null;
+    const bytes = row.vector as Uint8Array;
+    const copy = new Uint8Array(bytes.byteLength);
+    copy.set(bytes);
+    return new Float32Array(copy.buffer, 0, Number(row.dimensions));
   }
 
   jobStats(sourceId: string, kind: SyncStageName): {

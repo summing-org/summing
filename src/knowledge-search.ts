@@ -185,6 +185,19 @@ export class KnowledgeSearchIndex {
     `).run(signature);
   }
 
+  reset(): void {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.exec("INSERT INTO search_fts(search_fts) VALUES('delete-all')");
+      if (this.vectorAvailable) this.db.exec("DELETE FROM search_vectors");
+      this.db.exec("DELETE FROM search_entries; DELETE FROM search_meta");
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   private createSchema(): void {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS search_entries (

@@ -40,6 +40,7 @@ local_object_root = "~/summing/data/knowledge-objects"
 spool_root = "~/summing/data/knowledge-spool"
 spool_max_bytes = 8000000000
 mtproto_master_key = "/etc/summing/mtproto.key"
+transfer_key = "/etc/summing/kb-transfer.key"
 embedding_model = "text-embedding-3-small"
 embedding_dimensions = 1536
 embedding_batch_size = 64

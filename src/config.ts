@@ -35,6 +35,7 @@ export interface KnowledgeSyncConfig {
   s3Sse: "AES256" | "aws:kms";
   s3KmsKeyId: string;
   mtprotoMasterKeyPath: string;
+  knowledgeTransferKeyPath: string;
   embeddingModel: string;
   embeddingDimensions: number;
   embeddingBatchSize: number;
@@ -59,6 +60,7 @@ function defaultKnowledgeSyncConfig(dataDir: string): KnowledgeSyncConfig {
     s3Sse: "AES256",
     s3KmsKeyId: "",
     mtprotoMasterKeyPath: "/etc/summing/mtproto.key",
+    knowledgeTransferKeyPath: "/etc/summing/kb-transfer.key",
     embeddingModel: "text-embedding-3-small",
     embeddingDimensions: 1_536,
     embeddingBatchSize: 64,
@@ -503,6 +505,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig 
       mtprotoMasterKeyPath: expandPath(
         env.SUMMING_MTPROTO_KEY || knowledgeSync.mtproto_master_key || "/etc/summing/mtproto.key",
         "knowledge_sync.mtproto_master_key",
+      ),
+      knowledgeTransferKeyPath: expandPath(
+        env.SUMMING_KB_TRANSFER_KEY ||
+          knowledgeSync.transfer_key ||
+          "/etc/summing/kb-transfer.key",
+        "knowledge_sync.transfer_key",
       ),
       embeddingModel: String(
         knowledgeSync.embedding_model || "text-embedding-3-small",

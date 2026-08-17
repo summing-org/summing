@@ -89,6 +89,8 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
   assert.match(timer, /OnUnitActiveSec=10min/);
   assert.match(path, /PathChanged=\/var\/lib\/summing\/deploy\/request\.json/);
   assert.match(activation, /systemctl start summing-deploy\.path summing-deploy\.timer/);
+  assert.match(activation, /kb_transfer_key=\/etc\/summing\/kb-transfer\.key/);
+  assert.match(activation, /KB transfer key must be a regular file containing 64 hex characters/);
   assert.match(activation, /install -d -o root -g summing -m 1770 "\$\{deploy_state_dir\}"/);
   assert.match(activation, /runner_uid=\$\(id -u summing-runner\)/);
   assert.match(activation, /sed "s\/RUNNER_UID\/\$\{runner_uid\}\/g"/);
