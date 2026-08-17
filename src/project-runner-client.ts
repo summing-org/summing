@@ -5,6 +5,14 @@ import type {
 } from "./project-environment-migration.js";
 
 export type RunnerAction = "build" | "validate" | "dry-run" | "run";
+export type RunnerJobTrigger = "manual" | "schedule";
+
+export interface RunnerSubmissionMetadata {
+  trigger?: RunnerJobTrigger;
+  scheduleId?: string;
+  scheduledFor?: string;
+}
+
 export type RunnerJobStatus =
   | "queued"
   | "running"
@@ -19,6 +27,9 @@ export interface RunnerJob {
   workspaceId: string;
   action: RunnerAction;
   revision: string;
+  trigger?: RunnerJobTrigger;
+  scheduleId?: string;
+  scheduledFor?: string;
   status: RunnerJobStatus;
   createdAt: string;
   startedAt?: string;
@@ -38,6 +49,11 @@ export interface RunnerArtifact {
 
 export interface RunnerArtifactContent extends RunnerArtifact {
   content: string;
+}
+
+export interface RunnerArtifactDeletion extends RunnerArtifact {
+  jobId: string;
+  deletedAt: string;
 }
 
 export interface RunnerEnvironmentMigration {
@@ -130,8 +146,12 @@ export class ProjectRunnerClient {
     action: RunnerAction,
     revision: string,
     archive: Buffer,
+    metadata: RunnerSubmissionMetadata = {},
   ): Promise<RunnerJob> {
     const query = new URLSearchParams({ project: projectId, workspace: workspaceId, action, revision });
+    if (metadata.trigger) query.set("trigger", metadata.trigger);
+    if (metadata.scheduleId) query.set("schedule", metadata.scheduleId);
+    if (metadata.scheduledFor) query.set("scheduled_for", metadata.scheduledFor);
     const result = await this.call<{ job: RunnerJob }>(
       "POST",
       `/jobs?${query.toString()}`,
@@ -181,6 +201,20 @@ export class ProjectRunnerClient {
       `/artifact?${query.toString()}`,
     );
     return result.artifact;
+  }
+
+  async deleteArtifact(
+    projectId: string,
+    workspaceId: string,
+    jobId: string,
+    name: string,
+  ): Promise<RunnerArtifactDeletion> {
+    const query = new URLSearchParams({ project: projectId, workspace: workspaceId, job: jobId, name });
+    const result = await this.call<{ deleted: RunnerArtifactDeletion }>(
+      "DELETE",
+      `/artifact?${query.toString()}`,
+    );
+    return result.deleted;
   }
 
   async environment(projectId: string, workspaceId: string): Promise<ProjectEnvironmentDocument> {

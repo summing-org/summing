@@ -23,8 +23,11 @@ test("Project Viewer bounds Telegram authorization and network waits", () => {
   assert.match(VIEWER_HTML, /id="artifactPanel"/);
   assert.match(VIEWER_HTML, /data-tab="runs">Правки агента</);
   assert.match(VIEWER_HTML, /data-tab="launch">Раннер</);
-  assert.match(VIEWER_HTML, /ИЗОЛИРОВАННЫЙ РАННЕР/);
+  assert.match(VIEWER_HTML, /ДИАГНОСТИКА/);
   assert.match(VIEWER_HTML, /Очередь раннера/);
+  assert.match(VIEWER_HTML, /Запусками и расписаниями управляет агент/);
+  assert.doesNotMatch(VIEWER_HTML, /data-action=/);
+  assert.doesNotMatch(VIEWER_JS, /function enqueue/);
   assert.match(VIEWER_HTML, /id="cancelJob"[^>]*>Остановить</);
   assert.match(VIEWER_HTML, /id="artifactReport"[^>]+sandbox/);
   assert.match(VIEWER_HTML, /href="\/logo\.svg"/);

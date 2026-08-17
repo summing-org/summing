@@ -606,7 +606,33 @@ test("owners control projects while group participants get read-only Q&A", async
     assert.equal(runtime.state.get(bound.id).readOnlyCodexThreadId, "thr-readonly");
     assert.equal(runtime.state.get(bound.id).codexThreadId, null);
 
-    runtime.state.setThread(bound.id, "thr-write");
+    runtime.state.setThread(bound.id, "thr-legacy", "write", "legacy-v1");
+    let resumedLegacy = false;
+    let writeOptions: Record<string, unknown> = {};
+    runtime.codex.resumeThread = async () => {
+      resumedLegacy = true;
+    };
+    runtime.codex.startThread = async (_cwd, _model, options) => {
+      writeOptions = options as Record<string, unknown>;
+      return "thr-write";
+    };
+    assert.equal(
+      await selectThread(
+        runtime.state.get(bound.id),
+        alphaWorkspace,
+        alphaWorkspace,
+        [],
+        [],
+        "write",
+      ),
+      "thr-write",
+    );
+    assert.equal(resumedLegacy, false);
+    assert.ok(Array.isArray(writeOptions.dynamicTools));
+    assert.equal(typeof writeOptions.dynamicToolHandler, "function");
+    assert.equal(runtime.state.get(bound.id).codexThreadCapability, "runner-control-v1");
+    assert.equal(runtime.state.get(bound.id).previousCodexThreadId, "thr-legacy");
+
     await send(42, "/new", -100, "supergroup", 5);
     assert.equal(runtime.state.get(bound.id).codexThreadId, null);
     assert.equal(runtime.state.get(bound.id).readOnlyCodexThreadId, null);

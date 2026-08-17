@@ -1,4 +1,4 @@
-# SUMMING 9.8
+# SUMMING 9.9
 
 SUMMING — один постоянно живущий агент с одним администратором и назначаемыми
 владельцами проектов. Он работает на Linux VPS, принимает команды из Telegram
@@ -87,8 +87,8 @@ Team Space: создаётся при подключении командног�
   текст файлов, working/commit/run diff, состояние `origin`, безопасные Pull/Push
   текущей ветки и явную fast-forward публикацию её `HEAD` в `origin/master`,
   runner jobs, их остановку, логи и простой dotenv-editor; вкладка **Правки
-  агента** показывает Codex diff, а **Раннер** отвечает за Build / Validate /
-  Dry run / Live run;
+  агента** показывает Codex diff, а **Раннер** остаётся диагностическим экраном
+  jobs/logs/artifacts с аварийной остановкой, без зашитых кнопок запуска и расписания;
 - отдельный администраторский Mini App открывается постоянной кнопкой
   **Управление** в личном чате: показывает проекты и обнаруженные Telegram-топики,
   сводит наблюдаемых пользователей по группе и топикам с Telegram ID и активностью,
@@ -99,9 +99,13 @@ Team Space: создаётся при подключении командног�
   бот упоминает владельца проекта в выбранном топике и сообщает Project/Repository;
 - отдельный rootless Docker runner собирает неизменяемые Git snapshots и
   выполняет только фиксированные действия `build`, `validate`, `dry-run`, `run`;
-- per-project systemd timer может запускать закреплённый commit SHA; автоматические
-  commit/merge/push, force push, Claudexor, swarm, MCP, marketplaces, local models
-  и автономная Evolution отсутствуют.
+- owner управляет runner jobs, расписаниями и артефактами обычными сообщениями
+  агенту. Host-scoped инструменты дают агенту live-state только текущего
+  Project/Workspace: запуск и остановка требуют явной команды, расписания хранят
+  timezone/дни/время и не допускают overlap, а изменение/удаление расписания и
+  удаление/очистка артефактов используют отдельное подтверждение в следующем
+  сообщении. Автоматические commit/merge/push, force push, Claudexor, swarm,
+  произвольные MCP/marketplaces, local models и автономная Evolution отсутствуют.
 
 ## Требования
 
@@ -370,6 +374,7 @@ Runtime сохраняет событие `my_chat_member`, поэтому до�
 $SUMMING_DATA_DIR/
 ├── config.toml
 ├── state.sqlite3
+├── runner-control.sqlite3         # расписания, исполнения, планы подтверждения и audit
 ├── codex/
 ├── memory/identity.md
 ├── projects/<id>/memory.md
@@ -401,7 +406,8 @@ sudo /opt/summing/deploy/install-project-operations.sh
 
 Installer создаёт отдельного `summing-runner`, rootless Docker с лимитом build
 cache 8 ГБ, приватный AES-ключ для project env, HTTPS proxy, project runtime
-policy/data и timer unit. Пользователь `summing` не получает Docker socket. При первом
+policy/data и совместимый legacy timer unit. Пользователь `summing` не получает
+Docker socket. При первом
 переходе static env и raw credentials из legacy Connections автоматически
 объединяются в encrypted store. Затем runner выполняет Validate и Dry run на
 одной env revision; только успешная проверка разрешает следующему deploy tick
@@ -411,6 +417,28 @@ config/unit/Caddyfile сохраняются для rollback. После cutover
 Основной production URL Mini App — `https://assist.summing.org`; прежний
 `https://ash.summing.org` остаётся только постоянным HTTPS-редиректом с
 сохранением URI для уже отправленных Telegram-кнопок.
+
+Запуском теперь управляет сам агент через закрытый namespace раннера. На вопросы
+вроде «что сейчас крутится?», «что с раннером?» или «что запланировано?» он
+обязан сначала прочитать live jobs, последние результаты, расписания и доступные
+артефакты, а при необходимости — ограниченный хвост job log, не угадывая состояние
+по процессам или файлам. По явной команде owner агент
+может запустить Build/Validate/Dry run/Live run, остановить точный job, поставить
+ежедневное или недельное расписание в IANA timezone, приостановить или возобновить
+его. Schedule create/update/delete сначала возвращает точный план; применить его
+можно только после подтверждения отдельным следующим сообщением. Каждый запуск по
+расписанию берёт актуальный `master`, пропускает overlap и учитывает ограниченное
+misfire-окно. Project-specific cron/systemd timers намеренно не импортируются по
+догадке: перед включением эквивалентного agent-managed расписания оператор должен
+отдельно отключить legacy timer, чтобы не получить двойной запуск.
+
+Артефакты можно перечислить и безопасно прочитать как недоверенные данные с
+лимитом ответа. Удаление одного файла и очистка job/workspace также составляют
+точный список целей и требуют подтверждения в следующем сообщении; появившийся
+после составления плана файл не удаляется. Подтверждённые allowlist-файлы
+перемещаются в закрытую runner-корзину, а не удаляются безвозвратно. Существующий
+editor thread без этих инструментов лениво архивируется при первом новом owner
+turn: новый thread получает capability, а прежний ID сохраняется для аудита.
 
 Вкладки **Репозиторий** и **Энвы** доступны администратору и любому назначенному
 owner только в пределах его Project. Репозиторий

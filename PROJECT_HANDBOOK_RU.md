@@ -1,6 +1,6 @@
-# SUMMING 9.8: архитектура, эксплуатация и разработка
+# SUMMING 9.9: архитектура, эксплуатация и разработка
 
-> Версия: **9.8.9**
+> Версия: **9.9.0**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
 > Последняя сверка с кодом: **17 августа 2026 года**.
 
@@ -800,7 +800,9 @@ mobile-first интерфейс и JSON API показывают:
 - подключение отсутствующего `origin` через проектный SSH deploy key, состояние
   текущей ветки относительно remote, явные Pull/Push и отдельную fast-forward
   публикацию текущего `HEAD` в `origin/master`;
-- очередь, статусы и журналы project runner.
+- очередь, статусы, журналы и allowlist-артефакты project runner. Viewer не
+  содержит кнопок запуска или настройки расписаний; **Раннер** — диагностический
+  экран с аварийной остановкой точного queued/running job.
 
 Тот же server публикует отдельный администраторский Mini App на `/admin`, которому
 не нужна заранее созданная Conversation. Он показывает каталог статических и
@@ -931,17 +933,54 @@ Application config выбирается из того же распакован�
 CPU и memory limits; writable остаётся только project data bind mount.
 
 `validate`, `dry-run` и `build` могут использовать временный snapshot грязного
-worktree. `run` требует чистый committed `HEAD`. Периодический запуск читает
-`/etc/summing-runner/schedules/<project>.json`, поэтому всегда закреплён на
-явном полном SHA и не меняется от последующих commits самопроизвольно.
+worktree. `run` требует чистый committed `HEAD`.
+
+Управление jobs и расписаниями принадлежит agent loop, а не набору UI-кнопок.
+App Server thread получает host-defined namespace `runner`; Project, Workspace,
+Telegram actor и turn берутся из активной авторизованной Conversation и не могут
+быть переданы моделью как аргументы. Поэтому на «что сейчас крутится?» агент
+сначала запрашивает live runner state и видит active/queued/recent jobs,
+расписания, их ближайшее и последнее исполнение и наличие артефактов. По явной
+owner-команде доступны запуск одной фиксированной операции и отмена точного job;
+для диагностики агент читает не более 64 000 последних символов его журнала как
+недоверенные данные.
+
+Расписания хранятся в `runner-control.sqlite3`: action, локальное `HH:MM`, IANA
+timezone, ISO weekdays, enabled, `revisionRef=master`, `overlapPolicy=skip` и
+misfire grace. Scheduler сериализует claim каждой occurrence, не стартует при
+недоступном runner и пропускает следующий occurrence, пока job этого расписания
+активен. На каждом occurrence полный SHA заново разрешается из текущего `master`.
+Create/update/delete формируют 15-минутный точный план и token; host запрещает
+применять token в том же Codex turn, поэтому требуется отдельное подтверждающее
+сообщение. Pause/resume обратимы и выполняются только по явной инструкции.
+Ошибки расписаний отправляются всем текущим owners Project.
+
+Project-specific cron/systemd timers не являются частью нового control plane и
+не импортируются по догадке из имён unit-файлов. Перед созданием эквивалентного
+agent-managed расписания оператор явно отключает такой legacy timer; это
+предотвращает двойной запуск и не зашивает ID внешнего Project в SUMMING runtime.
 
 Project Viewer разделяет два вида истории: **Правки агента** показывают patch
-между snapshot до и после Codex-задачи, а **Раннер** управляет изолированными
+между snapshot до и после Codex-задачи, а **Раннер** диагностирует изолированные
 Build / Validate / Dry run / Live run jobs. Queued job можно удалить из очереди,
 running job проходит через `cancelling` в `cancelled`: runner прерывает текущую
 команду, затем точечно выполняет `docker rm --force` только для контейнера с
 именем, полученным из project id и UUID job. Завершённые и упавшие jobs отменять
 нельзя; повторная отмена уже cancelled job идемпотентна.
+
+Агент перечисляет allowlist-артефакты и читает текст как недоверенные данные не
+более 64 000 символов. Delete одного файла и clear одного job либо всего
+Workspace сначала фиксируют точные `jobId/name` в отдельном плане. Применение в
+том же turn запрещено; файлы, появившиеся позже, в cleanup не входят. После
+подтверждения runner ещё раз проверяет Project/Workspace/job/name и обычный файл
+без symlink, переносит его в приватный `.trash` на том же filesystem и обновляет
+`artifactCount`. Результат различает успешно перемещённые и неудавшиеся цели.
+
+Dynamic tools нельзя добавить при `thread/resume`, поэтому Conversation хранит
+версию capability. При первом write-turn существующего topic старый editor
+thread без `runner-control-v1` атомарно переносится в `previous_codex_thread_id`,
+после чего создаётся новый thread с инструментами. Миграция выполняется один раз
+на Conversation; read-only thread участников не меняется.
 
 ## 10. Telegram-команды
 
@@ -1492,7 +1531,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "9.8.9",
+  "version": "9.9.0",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",
@@ -1696,6 +1735,8 @@ src/
 ├── project-viewer.ts       # Mini App static/API loopback server
 ├── viewer-auth.ts          # Telegram initData и local bearer validation
 ├── project-runner-*.ts     # Unix socket client/server/CLI
+├── runner-control.ts       # durable schedules, executions, confirmations и audit
+├── runner-tools.ts         # scoped App Server tools для jobs/schedules/artifacts
 ├── run-artifacts.ts        # before/after patches editor Runs
 ├── state-store.ts          # SQLite authority
 ├── workspace-manager.ts    # memory и Git worktrees
@@ -1709,6 +1750,7 @@ tests/
 ├── git-inspector.test.ts
 ├── repository-credentials.test.ts
 ├── project-runner.test.ts
+├── runner-control.test.ts
 ├── viewer-auth.test.ts
 ├── attachment-service.test.ts
 ├── runtime-access.test.ts
@@ -1727,7 +1769,7 @@ deploy/
 ├── config.production.toml  # минимальный production config для SUMMING
 ├── summing.service         # основной Telegram runtime
 ├── summing-runner.service  # изолированный Docker runner
-└── summing-ash-seo.timer   # pinned daily schedule
+└── summing-ash-seo.timer   # legacy external-Project compatibility; не agent scheduler
 ```
 
 Локальные проверки:

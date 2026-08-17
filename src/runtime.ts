@@ -5,6 +5,8 @@ import { Deferred, KeyedMutex, Semaphore } from "./async-primitives.js";
 import {
   CodexAppServer,
   CodexProtocolError,
+  type DynamicToolCall,
+  type DynamicToolCallResult,
   type CodexEvent,
   type JsonRecord,
 } from "./codex-app-server.js";
@@ -31,6 +33,8 @@ import { helpMessage } from "./help-message.js";
 import { ProjectCatalog, ProjectCatalogError } from "./project-catalog.js";
 import { GitInspector } from "./git-inspector.js";
 import { ProjectViewerServer } from "./project-viewer.js";
+import { RunnerControlPlane } from "./runner-control.js";
+import { executeRunnerTool, RUNNER_DYNAMIC_TOOLS } from "./runner-tools.js";
 import { detectSecretFile, detectSecretText, type SecretDetection } from "./secret-ingress.js";
 import {
   parseTeamUnderstandingResponse,
@@ -127,6 +131,7 @@ const UNBOUND_TURN_TIMEOUT_MILLISECONDS = 120_000;
 const TEAM_UNDERSTANDING_TURN_TIMEOUT_MILLISECONDS = 120_000;
 const MAX_TELEGRAM_REPLY_CONTEXT_LENGTH = 4_000;
 const MAX_TELEGRAM_REPLY_CHAIN_DEPTH = 8;
+const RUNNER_TOOL_CAPABILITY = "runner-control-v1";
 
 interface TelegramReplyContextItem {
   depth: number;
@@ -390,6 +395,7 @@ interface ActiveRun extends CodexResponseRun {
   runId: number;
   prepared: PreparedWorkspace;
   access: RunAccess;
+  actorUserId: number;
   cancelRequested: boolean;
 }
 
@@ -436,6 +442,7 @@ export class SummingRuntime {
   readonly transcriber: AudioTranscriber;
   readonly health: HealthServer;
   readonly viewer: ProjectViewerServer;
+  readonly runnerControl: RunnerControlPlane;
   readonly deploymentEvents: DeploymentEventNotifier;
   private readonly shutdown = new Deferred<void>();
   private readonly shutdownController = new AbortController();
@@ -504,6 +511,18 @@ export class SummingRuntime {
       (conversation) => this.processors.has(conversation.id),
       (chatId, topicId) => this.afterTopicBindingChanged(chatId, topicId),
     );
+    this.runnerControl = new RunnerControlPlane(
+      resolve(config.dataDir, "runner-control.sqlite3"),
+      this.projects,
+      this.viewer.runner,
+      async (projectId, message) => {
+        await Promise.allSettled(
+          this.projects.owners(projectId).map((ownerId) =>
+            this.telegram.sendMessage(ownerId, `⚠️ Раннер ${projectId}: ${message}`),
+          ),
+        );
+      },
+    );
     this.semaphore = new Semaphore(config.maxParallelConversations);
   }
 
@@ -539,6 +558,7 @@ export class SummingRuntime {
         console.warn("could not refresh Codex limits on startup", error);
       }
       this.scheduleCodexLimitsRefresh();
+      this.runnerControl.start();
       await this.health.start();
       await this.viewer.start();
       if (this.config.viewerPublicUrl) {
@@ -577,6 +597,7 @@ export class SummingRuntime {
       this.clearTeamRetentionTimer();
       this.clearTeamUnderstandingTimers();
       this.deploymentEvents.stop();
+      await this.runnerControl.stopAndWait();
       await this.telegram.close();
       await this.deploymentEvents.close();
       await this.codex.close(this.exitCode === 99);
@@ -603,6 +624,7 @@ export class SummingRuntime {
       await Promise.allSettled([...this.teamUnderstandingProcessors.values()]);
       await this.health.close();
       await this.viewer.close();
+      this.runnerControl.close();
       this.state.close();
       this.codex.off("event", onEvent);
     }
@@ -2984,6 +3006,11 @@ export class SummingRuntime {
         await this.reply(chatId, topicId, messageId, "Сначала завершите /cancel.");
         return;
       }
+      for (const threadId of [conversation.codexThreadId, conversation.readOnlyCodexThreadId]) {
+        if (!threadId) continue;
+        this.loadedThreads.delete(threadId);
+        this.codex.detachThreadHandler(threadId);
+      }
       this.state.setThread(conversation.id, null, "write");
       this.state.setThread(conversation.id, null, "read-only");
       await this.reply(chatId, topicId, messageId, "Начат новый контекст topic.");
@@ -3368,6 +3395,7 @@ export class SummingRuntime {
         stream,
         prepared,
         access,
+        actorUserId: inputs.at(-1)?.senderId ?? this.config.telegramOwnerId,
         turnId: null,
         response: "",
         commentary: [],
@@ -3383,7 +3411,10 @@ export class SummingRuntime {
         threadId,
         access === "read-only"
           ? `${READ_ONLY_PARTICIPANT_INSTRUCTIONS}\n\nParticipant question:\n${runPrompt}`
-          : `Before acting, read \`.summing-runtime/CONTEXT.md\`.\n\n${runPrompt}`,
+          : `Before acting, read \`.summing-runtime/CONTEXT.md\`. ` +
+            "For runner status, jobs, schedules, and artifacts, the runner namespace is the " +
+            "authoritative control plane; do not infer live state from files or processes.\n\n" +
+            runPrompt,
         prepared.path,
         {
           model: this.config.model,
@@ -3559,12 +3590,36 @@ export class SummingRuntime {
     readOnlyDeniedPaths: string[],
     access: RunAccess,
   ): Promise<string> {
+    if (
+      access === "write" &&
+      conversation.codexThreadId &&
+      conversation.codexThreadCapability !== RUNNER_TOOL_CAPABILITY
+    ) {
+      const archivedThreadId = this.state.archiveWriteThreadForCapability(
+        conversation.id,
+        RUNNER_TOOL_CAPABILITY,
+      );
+      if (archivedThreadId) {
+        this.loadedThreads.delete(archivedThreadId);
+        this.codex.detachThreadHandler(archivedThreadId);
+        console.info(
+          `archived legacy Codex thread ${archivedThreadId} before enabling runner tools`,
+        );
+        conversation = this.state.get(conversation.id);
+      }
+    }
     const permissions = {
       deniedPaths: readOnlyDeniedPaths,
       networkAccess: access === "write" && this.config.networkAccess,
       gitMetadataRoots,
       readableRoots: [readableRoot],
       readOnly: access === "read-only",
+      ...(access === "write"
+        ? {
+            dynamicTools: RUNNER_DYNAMIC_TOOLS,
+            dynamicToolHandler: (call: DynamicToolCall) => this.handleRunnerTool(call),
+          }
+        : {}),
     };
     const existingThreadId =
       access === "read-only" ? conversation.readOnlyCodexThreadId : conversation.codexThreadId;
@@ -3576,7 +3631,12 @@ export class SummingRuntime {
           if (!(error instanceof CodexProtocolError)) throw error;
           console.warn(`could not resume ${existingThreadId}; starting a new Codex thread`);
           const threadId = await this.codex.startThread(cwd, this.config.model, permissions);
-          this.state.setThread(conversation.id, threadId, access);
+          this.state.setThread(
+            conversation.id,
+            threadId,
+            access,
+            access === "write" ? RUNNER_TOOL_CAPABILITY : "",
+          );
           this.loadedThreads.add(threadId);
           return threadId;
         }
@@ -3585,9 +3645,35 @@ export class SummingRuntime {
       return existingThreadId;
     }
     const threadId = await this.codex.startThread(cwd, this.config.model, permissions);
-    this.state.setThread(conversation.id, threadId, access);
+    this.state.setThread(
+      conversation.id,
+      threadId,
+      access,
+      access === "write" ? RUNNER_TOOL_CAPABILITY : "",
+    );
     this.loadedThreads.add(threadId);
     return threadId;
+  }
+
+  private async handleRunnerTool(call: DynamicToolCall): Promise<DynamicToolCallResult> {
+    const active = this.activeByThread.get(call.threadId);
+    if (
+      !active ||
+      active.access !== "write" ||
+      !active.turnId ||
+      active.turnId !== call.turnId ||
+      !this.projects.canAccess(active.actorUserId, active.conversation.projectId)
+    ) {
+      throw new Error("runner tool is unavailable outside the active authorized owner turn");
+    }
+    return executeRunnerTool(this.runnerControl, {
+      projectId: active.conversation.projectId,
+      workspaceId: active.conversation.workspaceId,
+      repositoryPath: active.prepared.readableRoot,
+      conversationId: active.conversation.id,
+      actorUserId: active.actorUserId,
+      turnId: call.turnId,
+    }, call);
   }
 
   private async deliverSteer(active: ActiveRun, items: PendingInput[]): Promise<void> {

@@ -1,0 +1,1178 @@
+import { randomUUID } from "node:crypto";
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { GitInspector } from "./git-inspector.js";
+import { ProjectCatalog } from "./project-catalog.js";
+import {
+  ProjectRunnerClient,
+  type RunnerAction,
+  type RunnerArtifact,
+  type RunnerArtifactDeletion,
+  type RunnerJob,
+} from "./project-runner-client.js";
+
+const ACTIVE_JOB_STATUSES = new Set(["queued", "running", "cancelling"]);
+const TERMINAL_EXECUTION_STATUSES = new Set(["completed", "cancelled", "failed", "skipped"]);
+const SCHEDULE_NAME = /^[\p{L}\p{N}][\p{L}\p{N} ._()\-]{0,79}$/u;
+const SCHEDULE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const CLOCK_TIME = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
+const MAXIMUM_ARTIFACT_TOOL_CHARACTERS = 64_000;
+const MAXIMUM_LOG_TOOL_CHARACTERS = 64_000;
+
+type Row = Record<string, unknown>;
+
+export interface RunnerControlContext {
+  projectId: string;
+  workspaceId: string;
+  repositoryPath: string;
+  conversationId: string;
+  actorUserId: number;
+  turnId: string;
+}
+
+export interface RunnerSchedule {
+  id: string;
+  projectId: string;
+  workspaceId: string;
+  name: string;
+  action: RunnerAction;
+  time: string;
+  timeZone: string;
+  weekdays: number[];
+  enabled: boolean;
+  revisionRef: "master";
+  overlapPolicy: "skip";
+  misfireGraceMinutes: number;
+  createdBy: number;
+  updatedBy: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type RunnerScheduleExecutionStatus =
+  | "claimed"
+  | "queued"
+  | "running"
+  | "cancelling"
+  | "completed"
+  | "cancelled"
+  | "failed"
+  | "skipped";
+
+export interface RunnerScheduleExecution {
+  id: string;
+  scheduleId: string;
+  projectId: string;
+  workspaceId: string;
+  occurrenceKey: string;
+  scheduledFor: string;
+  status: RunnerScheduleExecutionStatus;
+  jobId: string | null;
+  revision: string | null;
+  reason: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface SchedulePlanPayload {
+  operation: "upsert" | "delete";
+  schedule?: RunnerSchedule;
+  scheduleId?: string;
+}
+
+export interface ArtifactPlanTarget {
+  jobId: string;
+  name: string;
+}
+
+interface ArtifactPlanPayload {
+  targets: ArtifactPlanTarget[];
+}
+
+export interface SchedulePlanInput {
+  operation: "upsert" | "delete";
+  scheduleId?: string;
+  name?: string;
+  action?: RunnerAction;
+  time?: string;
+  timeZone?: string;
+  weekdays?: number[];
+  enabled?: boolean;
+  misfireGraceMinutes?: number;
+}
+
+export interface SchedulePlan {
+  token: string;
+  summary: string;
+  expiresAt: string;
+}
+
+export interface ArtifactDeletionPlan extends SchedulePlan {
+  targets: ArtifactPlanTarget[];
+}
+
+export interface ArtifactDeletionResult {
+  deleted: RunnerArtifactDeletion[];
+  failed: Array<ArtifactPlanTarget & { error: string }>;
+}
+
+export interface RunnerScheduleView extends RunnerSchedule {
+  nextRunAt: string | null;
+  lastExecution: RunnerScheduleExecution | null;
+}
+
+export interface RunnerInspection {
+  available: boolean;
+  active: RunnerJob[];
+  queued: RunnerJob[];
+  recent: RunnerJob[];
+  schedules: RunnerScheduleView[];
+  artifacts: Array<{ jobId: string; action: RunnerAction; count: number; createdAt: string }>;
+  capabilities: RunnerAction[];
+}
+
+export interface RunnerArtifactView {
+  job: RunnerJob;
+  artifacts: RunnerArtifact[];
+}
+
+export class RunnerControlError extends Error {}
+
+function iso(epochMilliseconds: number): string {
+  return new Date(epochMilliseconds).toISOString();
+}
+
+function parseJson<T>(value: unknown, field: string): T {
+  try {
+    return JSON.parse(String(value)) as T;
+  } catch {
+    throw new RunnerControlError(`${field} is malformed`);
+  }
+}
+
+function validateTimeZone(value: unknown): string {
+  const timeZone = String(value ?? "").trim();
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone }).format(0);
+  } catch {
+    throw new RunnerControlError("timeZone must be a valid IANA time zone");
+  }
+  return timeZone;
+}
+
+function validateWeekdays(value: unknown): number[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new RunnerControlError("weekdays must contain at least one ISO weekday");
+  }
+  const weekdays = [...new Set(value.map(Number))].sort((left, right) => left - right);
+  if (weekdays.some((day) => !Number.isInteger(day) || day < 1 || day > 7)) {
+    throw new RunnerControlError("weekdays must contain integers from 1 (Monday) to 7 (Sunday)");
+  }
+  return weekdays;
+}
+
+function scheduleParts(epochMilliseconds: number, timeZone: string): {
+  date: string;
+  time: string;
+  weekday: number;
+} {
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    weekday: "short",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  });
+  const parts = Object.fromEntries(
+    formatter.formatToParts(epochMilliseconds).map((part) => [part.type, part.value]),
+  );
+  const weekday = ({ Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 7 } as const)[
+    parts.weekday as keyof { Mon: 1; Tue: 2; Wed: 3; Thu: 4; Fri: 5; Sat: 6; Sun: 7 }
+  ];
+  if (!weekday || !parts.year || !parts.month || !parts.day || !parts.hour || !parts.minute) {
+    throw new RunnerControlError(`cannot resolve local time in ${timeZone}`);
+  }
+  return {
+    date: `${parts.year}-${parts.month}-${parts.day}`,
+    time: `${parts.hour}:${parts.minute}`,
+    weekday,
+  };
+}
+
+function occurrenceAt(schedule: RunnerSchedule, epochMilliseconds: number): {
+  key: string;
+  scheduledFor: string;
+} | null {
+  const minute = Math.floor(epochMilliseconds / 60_000) * 60_000;
+  const parts = scheduleParts(minute, schedule.timeZone);
+  if (parts.time !== schedule.time || !schedule.weekdays.includes(parts.weekday)) return null;
+  return {
+    key: `${parts.date}T${parts.time}@${schedule.timeZone}`,
+    scheduledFor: iso(minute),
+  };
+}
+
+export function dueScheduleOccurrence(
+  schedule: RunnerSchedule,
+  nowMilliseconds: number,
+): { key: string; scheduledFor: string } | null {
+  for (let offset = 0; offset <= schedule.misfireGraceMinutes; offset += 1) {
+    const occurrence = occurrenceAt(schedule, nowMilliseconds - offset * 60_000);
+    if (occurrence) return occurrence;
+  }
+  return null;
+}
+
+export function nextScheduleOccurrence(
+  schedule: RunnerSchedule,
+  nowMilliseconds: number,
+): string | null {
+  const start = Math.floor(nowMilliseconds / 60_000) * 60_000 + 60_000;
+  for (let offset = 0; offset <= 8 * 24 * 60; offset += 1) {
+    const occurrence = occurrenceAt(schedule, start + offset * 60_000);
+    if (occurrence) return occurrence.scheduledFor;
+  }
+  return null;
+}
+
+export class RunnerControlStore {
+  private readonly db: DatabaseSync;
+
+  constructor(readonly path: string) {
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    this.db = new DatabaseSync(path);
+    this.db.exec("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL");
+    this.createSchema();
+  }
+
+  close(): void {
+    this.db.close();
+  }
+
+  private transaction<T>(action: () => T): T {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = action();
+      this.db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private createSchema(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS runner_schedules (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        action TEXT NOT NULL CHECK(action IN ('build', 'validate', 'dry-run', 'run')),
+        local_time TEXT NOT NULL,
+        time_zone TEXT NOT NULL,
+        weekdays_json TEXT NOT NULL,
+        enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
+        revision_ref TEXT NOT NULL CHECK(revision_ref = 'master'),
+        overlap_policy TEXT NOT NULL CHECK(overlap_policy = 'skip'),
+        misfire_grace_minutes INTEGER NOT NULL CHECK(misfire_grace_minutes BETWEEN 0 AND 1440),
+        created_by INTEGER NOT NULL,
+        updated_by INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(project_id, workspace_id, name)
+      );
+      CREATE INDEX IF NOT EXISTS runner_schedules_scope
+        ON runner_schedules(project_id, workspace_id, enabled, name);
+      CREATE TABLE IF NOT EXISTS runner_schedule_executions (
+        id TEXT PRIMARY KEY,
+        schedule_id TEXT NOT NULL REFERENCES runner_schedules(id) ON DELETE CASCADE,
+        project_id TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
+        occurrence_key TEXT NOT NULL,
+        scheduled_for TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN
+          ('claimed', 'queued', 'running', 'cancelling', 'completed', 'cancelled', 'failed', 'skipped')),
+        job_id TEXT,
+        revision TEXT,
+        reason TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(schedule_id, occurrence_key)
+      );
+      CREATE INDEX IF NOT EXISTS runner_schedule_executions_scope
+        ON runner_schedule_executions(project_id, workspace_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS runner_schedule_executions_active
+        ON runner_schedule_executions(status, updated_at);
+      CREATE TABLE IF NOT EXISTS runner_control_plans (
+        token TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
+        actor_user_id INTEGER NOT NULL,
+        created_turn_id TEXT NOT NULL DEFAULT '',
+        payload_json TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        consumed_at TEXT
+      );
+      CREATE TABLE IF NOT EXISTS runner_control_audit (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
+        actor_user_id INTEGER NOT NULL,
+        turn_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        target TEXT NOT NULL,
+        details_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS runner_control_audit_scope
+        ON runner_control_audit(project_id, workspace_id, created_at DESC, id DESC);
+      CREATE TABLE IF NOT EXISTS runner_artifact_plans (
+        token TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
+        actor_user_id INTEGER NOT NULL,
+        created_turn_id TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        applying_at TEXT,
+        consumed_at TEXT
+      );
+    `);
+    const planColumns = this.db.prepare("PRAGMA table_info(runner_control_plans)").all() as Row[];
+    if (!planColumns.some((column) => column.name === "created_turn_id")) {
+      this.db.exec(
+        "ALTER TABLE runner_control_plans ADD COLUMN created_turn_id TEXT NOT NULL DEFAULT ''",
+      );
+    }
+  }
+
+  schedules(projectId?: string, workspaceId?: string): RunnerSchedule[] {
+    const rows = projectId && workspaceId
+      ? this.db.prepare(`
+          SELECT * FROM runner_schedules
+          WHERE project_id = ? AND workspace_id = ? ORDER BY name, id
+        `).all(projectId, workspaceId) as Row[]
+      : this.db.prepare("SELECT * FROM runner_schedules ORDER BY project_id, workspace_id, name").all() as Row[];
+    return rows.map((row) => this.toSchedule(row));
+  }
+
+  enabledSchedules(): RunnerSchedule[] {
+    return (this.db.prepare(
+      "SELECT * FROM runner_schedules WHERE enabled = 1 ORDER BY project_id, workspace_id, name",
+    ).all() as Row[]).map((row) => this.toSchedule(row));
+  }
+
+  schedule(id: string, projectId: string, workspaceId: string): RunnerSchedule | null {
+    const row = this.db.prepare(`
+      SELECT * FROM runner_schedules WHERE id = ? AND project_id = ? AND workspace_id = ?
+    `).get(id, projectId, workspaceId) as Row | undefined;
+    return row ? this.toSchedule(row) : null;
+  }
+
+  savePlan(
+    context: RunnerControlContext,
+    payload: SchedulePlanPayload,
+    summary: string,
+    nowMilliseconds: number,
+  ): SchedulePlan {
+    const token = randomUUID();
+    const expiresAt = iso(nowMilliseconds + 15 * 60_000);
+    this.db.prepare(`
+      INSERT INTO runner_control_plans
+        (token, project_id, workspace_id, actor_user_id, created_turn_id,
+         payload_json, summary, created_at, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      token,
+      context.projectId,
+      context.workspaceId,
+      context.actorUserId,
+      context.turnId,
+      JSON.stringify(payload),
+      summary,
+      iso(nowMilliseconds),
+      expiresAt,
+    );
+    return { token, summary, expiresAt };
+  }
+
+  applyPlan(
+    context: RunnerControlContext,
+    token: string,
+    nowMilliseconds: number,
+  ): RunnerSchedule | null {
+    return this.transaction(() => {
+      const row = this.db.prepare(`
+        SELECT * FROM runner_control_plans
+        WHERE token = ? AND project_id = ? AND workspace_id = ? AND actor_user_id = ?
+      `).get(token, context.projectId, context.workspaceId, context.actorUserId) as Row | undefined;
+      if (!row) throw new RunnerControlError("schedule confirmation token was not found in this scope");
+      if (row.consumed_at !== null) throw new RunnerControlError("schedule confirmation token was already used");
+      if (String(row.created_turn_id) === context.turnId) {
+        throw new RunnerControlError(
+          "schedule changes require explicit user confirmation in a later message",
+        );
+      }
+      if (Date.parse(String(row.expires_at)) < nowMilliseconds) {
+        throw new RunnerControlError("schedule confirmation token expired");
+      }
+      const payload = parseJson<SchedulePlanPayload>(row.payload_json, "schedule plan");
+      let result: RunnerSchedule | null;
+      if (payload.operation === "delete") {
+        const scheduleId = String(payload.scheduleId ?? "");
+        const removed = this.db.prepare(`
+          DELETE FROM runner_schedules WHERE id = ? AND project_id = ? AND workspace_id = ?
+        `).run(scheduleId, context.projectId, context.workspaceId);
+        if (Number(removed.changes) !== 1) throw new RunnerControlError("schedule no longer exists");
+        result = null;
+      } else {
+        if (!payload.schedule) throw new RunnerControlError("schedule plan has no schedule");
+        const schedule = payload.schedule;
+        this.db.prepare(`
+          INSERT INTO runner_schedules
+            (id, project_id, workspace_id, name, action, local_time, time_zone,
+             weekdays_json, enabled, revision_ref, overlap_policy, misfire_grace_minutes,
+             created_by, updated_by, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            action = excluded.action,
+            local_time = excluded.local_time,
+            time_zone = excluded.time_zone,
+            weekdays_json = excluded.weekdays_json,
+            enabled = excluded.enabled,
+            revision_ref = excluded.revision_ref,
+            overlap_policy = excluded.overlap_policy,
+            misfire_grace_minutes = excluded.misfire_grace_minutes,
+            updated_by = excluded.updated_by,
+            updated_at = excluded.updated_at
+          WHERE runner_schedules.project_id = excluded.project_id
+            AND runner_schedules.workspace_id = excluded.workspace_id
+        `).run(
+          schedule.id,
+          schedule.projectId,
+          schedule.workspaceId,
+          schedule.name,
+          schedule.action,
+          schedule.time,
+          schedule.timeZone,
+          JSON.stringify(schedule.weekdays),
+          schedule.enabled ? 1 : 0,
+          schedule.revisionRef,
+          schedule.overlapPolicy,
+          schedule.misfireGraceMinutes,
+          schedule.createdBy,
+          schedule.updatedBy,
+          schedule.createdAt,
+          schedule.updatedAt,
+        );
+        result = this.schedule(schedule.id, schedule.projectId, schedule.workspaceId);
+        if (!result) throw new RunnerControlError("schedule could not be stored");
+      }
+      this.db.prepare(
+        "UPDATE runner_control_plans SET consumed_at = ? WHERE token = ?",
+      ).run(iso(nowMilliseconds), token);
+      return result;
+    });
+  }
+
+  saveArtifactPlan(
+    context: RunnerControlContext,
+    targets: ArtifactPlanTarget[],
+    summary: string,
+    nowMilliseconds: number,
+  ): ArtifactDeletionPlan {
+    const token = randomUUID();
+    const expiresAt = iso(nowMilliseconds + 15 * 60_000);
+    this.db.prepare(`
+      INSERT INTO runner_artifact_plans
+        (token, project_id, workspace_id, actor_user_id, created_turn_id,
+         payload_json, summary, created_at, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      token,
+      context.projectId,
+      context.workspaceId,
+      context.actorUserId,
+      context.turnId,
+      JSON.stringify({ targets } satisfies ArtifactPlanPayload),
+      summary,
+      iso(nowMilliseconds),
+      expiresAt,
+    );
+    return { token, summary, expiresAt, targets };
+  }
+
+  claimArtifactPlan(
+    context: RunnerControlContext,
+    token: string,
+    nowMilliseconds: number,
+  ): ArtifactPlanTarget[] {
+    return this.transaction(() => {
+      const row = this.db.prepare(`
+        SELECT * FROM runner_artifact_plans
+        WHERE token = ? AND project_id = ? AND workspace_id = ? AND actor_user_id = ?
+      `).get(token, context.projectId, context.workspaceId, context.actorUserId) as Row | undefined;
+      if (!row) throw new RunnerControlError("artifact confirmation token was not found in this scope");
+      if (row.consumed_at !== null) {
+        throw new RunnerControlError("artifact confirmation token was already used");
+      }
+      if (row.applying_at !== null) {
+        throw new RunnerControlError("artifact confirmation token is already being applied");
+      }
+      if (String(row.created_turn_id) === context.turnId) {
+        throw new RunnerControlError(
+          "artifact deletion requires explicit user confirmation in a later message",
+        );
+      }
+      if (Date.parse(String(row.expires_at)) < nowMilliseconds) {
+        throw new RunnerControlError("artifact confirmation token expired");
+      }
+      const payload = parseJson<ArtifactPlanPayload>(row.payload_json, "artifact plan");
+      if (!Array.isArray(payload.targets) || payload.targets.length === 0) {
+        throw new RunnerControlError("artifact plan has no targets");
+      }
+      this.db.prepare(`
+        UPDATE runner_artifact_plans SET applying_at = ?
+        WHERE token = ? AND applying_at IS NULL AND consumed_at IS NULL
+      `).run(iso(nowMilliseconds), token);
+      return payload.targets;
+    });
+  }
+
+  completeArtifactPlan(token: string, nowMilliseconds: number): void {
+    this.db.prepare(`
+      UPDATE runner_artifact_plans
+      SET consumed_at = ?, applying_at = NULL
+      WHERE token = ? AND applying_at IS NOT NULL AND consumed_at IS NULL
+    `).run(iso(nowMilliseconds), token);
+  }
+
+  setEnabled(
+    id: string,
+    projectId: string,
+    workspaceId: string,
+    enabled: boolean,
+    actorUserId: number,
+    nowMilliseconds: number,
+  ): RunnerSchedule {
+    const updated = this.db.prepare(`
+      UPDATE runner_schedules SET enabled = ?, updated_by = ?, updated_at = ?
+      WHERE id = ? AND project_id = ? AND workspace_id = ?
+    `).run(enabled ? 1 : 0, actorUserId, iso(nowMilliseconds), id, projectId, workspaceId);
+    if (Number(updated.changes) !== 1) throw new RunnerControlError("schedule was not found");
+    return this.schedule(id, projectId, workspaceId)!;
+  }
+
+  claimExecution(
+    schedule: RunnerSchedule,
+    occurrence: { key: string; scheduledFor: string },
+    nowMilliseconds: number,
+  ): RunnerScheduleExecution | null {
+    const id = randomUUID();
+    const inserted = this.db.prepare(`
+      INSERT OR IGNORE INTO runner_schedule_executions
+        (id, schedule_id, project_id, workspace_id, occurrence_key, scheduled_for,
+         status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'claimed', ?, ?)
+    `).run(
+      id,
+      schedule.id,
+      schedule.projectId,
+      schedule.workspaceId,
+      occurrence.key,
+      occurrence.scheduledFor,
+      iso(nowMilliseconds),
+      iso(nowMilliseconds),
+    );
+    if (Number(inserted.changes) !== 1) return null;
+    return this.execution(id)!;
+  }
+
+  updateExecution(
+    id: string,
+    status: RunnerScheduleExecutionStatus,
+    values: { jobId?: string | null; revision?: string | null; reason?: string | null },
+    nowMilliseconds: number,
+  ): RunnerScheduleExecution {
+    const current = this.execution(id);
+    if (!current) throw new RunnerControlError("schedule execution was not found");
+    this.db.prepare(`
+      UPDATE runner_schedule_executions
+      SET status = ?, job_id = ?, revision = ?, reason = ?, updated_at = ?
+      WHERE id = ?
+    `).run(
+      status,
+      values.jobId === undefined ? current.jobId : values.jobId,
+      values.revision === undefined ? current.revision : values.revision,
+      values.reason === undefined ? current.reason : values.reason,
+      iso(nowMilliseconds),
+      id,
+    );
+    return this.execution(id)!;
+  }
+
+  execution(id: string): RunnerScheduleExecution | null {
+    const row = this.db.prepare(
+      "SELECT * FROM runner_schedule_executions WHERE id = ?",
+    ).get(id) as Row | undefined;
+    return row ? this.toExecution(row) : null;
+  }
+
+  activeExecutions(): RunnerScheduleExecution[] {
+    return (this.db.prepare(`
+      SELECT * FROM runner_schedule_executions
+      WHERE status IN ('claimed', 'queued', 'running', 'cancelling')
+      ORDER BY created_at
+    `).all() as Row[]).map((row) => this.toExecution(row));
+  }
+
+  lastExecution(scheduleId: string): RunnerScheduleExecution | null {
+    const row = this.db.prepare(`
+      SELECT * FROM runner_schedule_executions
+      WHERE schedule_id = ? ORDER BY created_at DESC LIMIT 1
+    `).get(scheduleId) as Row | undefined;
+    return row ? this.toExecution(row) : null;
+  }
+
+  audit(
+    context: RunnerControlContext,
+    action: string,
+    target: string,
+    details: unknown,
+    nowMilliseconds: number,
+  ): void {
+    this.db.prepare(`
+      INSERT INTO runner_control_audit
+        (project_id, workspace_id, actor_user_id, turn_id, action, target, details_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      context.projectId,
+      context.workspaceId,
+      context.actorUserId,
+      context.turnId,
+      action,
+      target,
+      JSON.stringify(details),
+      iso(nowMilliseconds),
+    );
+  }
+
+  private toSchedule(row: Row): RunnerSchedule {
+    return {
+      id: String(row.id),
+      projectId: String(row.project_id),
+      workspaceId: String(row.workspace_id),
+      name: String(row.name),
+      action: String(row.action) as RunnerAction,
+      time: String(row.local_time),
+      timeZone: String(row.time_zone),
+      weekdays: parseJson<number[]>(row.weekdays_json, "schedule weekdays"),
+      enabled: Number(row.enabled) === 1,
+      revisionRef: "master",
+      overlapPolicy: "skip",
+      misfireGraceMinutes: Number(row.misfire_grace_minutes),
+      createdBy: Number(row.created_by),
+      updatedBy: Number(row.updated_by),
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+    };
+  }
+
+  private toExecution(row: Row): RunnerScheduleExecution {
+    return {
+      id: String(row.id),
+      scheduleId: String(row.schedule_id),
+      projectId: String(row.project_id),
+      workspaceId: String(row.workspace_id),
+      occurrenceKey: String(row.occurrence_key),
+      scheduledFor: String(row.scheduled_for),
+      status: String(row.status) as RunnerScheduleExecutionStatus,
+      jobId: row.job_id === null ? null : String(row.job_id),
+      revision: row.revision === null ? null : String(row.revision),
+      reason: row.reason === null ? null : String(row.reason),
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+    };
+  }
+}
+
+export class RunnerControlPlane {
+  readonly store: RunnerControlStore;
+  private timer: NodeJS.Timeout | null = null;
+  private ticking = false;
+  private scheduledTick: Promise<void> | null = null;
+
+  constructor(
+    storePath: string,
+    readonly projects: ProjectCatalog,
+    readonly runner: ProjectRunnerClient,
+    readonly notify: (projectId: string, message: string) => Promise<void> = async () => {},
+    readonly now: () => number = Date.now,
+    readonly intervalMilliseconds = 15_000,
+  ) {
+    this.store = new RunnerControlStore(storePath);
+  }
+
+  start(): void {
+    if (this.timer) return;
+    void this.runScheduledTick();
+    this.timer = setInterval(() => void this.runScheduledTick(), this.intervalMilliseconds);
+    this.timer.unref();
+  }
+
+  close(): void {
+    this.stop();
+    this.store.close();
+  }
+
+  stop(): void {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+  }
+
+  async stopAndWait(): Promise<void> {
+    this.stop();
+    if (this.scheduledTick) await this.scheduledTick;
+  }
+
+  private runScheduledTick(): Promise<void> {
+    if (this.scheduledTick) return this.scheduledTick;
+    const pending = this.tick();
+    this.scheduledTick = pending;
+    void pending.finally(() => {
+      if (this.scheduledTick === pending) this.scheduledTick = null;
+    });
+    return pending;
+  }
+
+  async inspect(context: RunnerControlContext): Promise<RunnerInspection> {
+    const available = await this.runner.available();
+    const jobs = available
+      ? await this.runner.jobs(context.projectId, context.workspaceId)
+      : [];
+    const active = jobs.filter((job) => job.status === "running" || job.status === "cancelling");
+    const queued = jobs.filter((job) => job.status === "queued");
+    const schedules = this.store.schedules(context.projectId, context.workspaceId).map((schedule) => ({
+      ...schedule,
+      nextRunAt: schedule.enabled ? nextScheduleOccurrence(schedule, this.now()) : null,
+      lastExecution: this.store.lastExecution(schedule.id),
+    }));
+    return {
+      available,
+      active,
+      queued,
+      recent: jobs.filter((job) => !ACTIVE_JOB_STATUSES.has(job.status)).slice(0, 10),
+      schedules,
+      artifacts: jobs
+        .filter((job) => Number(job.artifactCount ?? 0) > 0)
+        .map((job) => ({
+          jobId: job.id,
+          action: job.action,
+          count: Number(job.artifactCount ?? 0),
+          createdAt: job.createdAt,
+        })),
+      capabilities: ["build", "validate", "dry-run", "run"],
+    };
+  }
+
+  async startJob(context: RunnerControlContext, action: RunnerAction): Promise<RunnerJob> {
+    if (!(new Set<RunnerAction>(["build", "validate", "dry-run", "run"])).has(action)) {
+      throw new RunnerControlError("runner action is invalid");
+    }
+    if (!(await this.runner.available())) throw new RunnerControlError("runner is unavailable");
+    const inspector = new GitInspector(context.repositoryPath);
+    const repository = await inspector.summary();
+    if (action === "run" && repository.dirty) {
+      throw new RunnerControlError("live run requires a clean committed worktree");
+    }
+    const revision = action === "run"
+      ? repository.head
+      : await inspector.snapshot(`${action} requested by Telegram owner ${context.actorUserId}`);
+    const archive = await inspector.archive(revision);
+    const job = await this.runner.submit(
+      context.projectId,
+      context.workspaceId,
+      action,
+      revision,
+      archive,
+      { trigger: "manual" },
+    );
+    this.store.audit(context, "runner.start", job.id, { action, revision }, this.now());
+    return job;
+  }
+
+  async cancelJob(context: RunnerControlContext, jobId: string): Promise<RunnerJob> {
+    const job = await this.runner.cancel(context.projectId, context.workspaceId, jobId);
+    this.store.audit(context, "runner.cancel", job.id, { status: job.status }, this.now());
+    return job;
+  }
+
+  async readJobLog(
+    context: RunnerControlContext,
+    jobId: string,
+  ): Promise<{ jobId: string; log: string; truncated: boolean }> {
+    const jobs = await this.runner.jobs(context.projectId, context.workspaceId);
+    if (!jobs.some((job) => job.id === jobId)) {
+      throw new RunnerControlError("job was not found in this project");
+    }
+    const raw = await this.runner.log(context.projectId, jobId);
+    const characters = Array.from(raw);
+    const truncated = characters.length > MAXIMUM_LOG_TOOL_CHARACTERS;
+    const log = truncated
+      ? characters.slice(-MAXIMUM_LOG_TOOL_CHARACTERS).join("")
+      : raw;
+    this.store.audit(context, "runner.log.read", jobId, { truncated }, this.now());
+    return { jobId, log, truncated };
+  }
+
+  async artifacts(context: RunnerControlContext, jobId?: string): Promise<RunnerArtifactView[]> {
+    const jobs = await this.runner.jobs(context.projectId, context.workspaceId);
+    const selected = jobId
+      ? jobs.filter((job) => job.id === jobId)
+      : jobs.filter((job) => Number(job.artifactCount ?? 0) > 0);
+    if (jobId && selected.length === 0) throw new RunnerControlError("job was not found in this project");
+    const result: RunnerArtifactView[] = [];
+    for (const job of selected) {
+      result.push({ job, artifacts: await this.runner.artifacts(context.projectId, job.id) });
+    }
+    return result;
+  }
+
+  async readArtifact(
+    context: RunnerControlContext,
+    jobId: string,
+    name: string,
+  ): Promise<Record<string, unknown>> {
+    const jobs = await this.runner.jobs(context.projectId, context.workspaceId);
+    if (!jobs.some((job) => job.id === jobId)) {
+      throw new RunnerControlError("job was not found in this project");
+    }
+    const artifact = await this.runner.artifact(context.projectId, jobId, name);
+    const characters = Array.from(artifact.content);
+    const truncated = characters.length > MAXIMUM_ARTIFACT_TOOL_CHARACTERS;
+    const content = truncated
+      ? characters.slice(0, MAXIMUM_ARTIFACT_TOOL_CHARACTERS).join("")
+      : artifact.content;
+    this.store.audit(context, "artifact.read", `${jobId}/${name}`, { truncated }, this.now());
+    return { ...artifact, content, truncated };
+  }
+
+  async planArtifactDelete(
+    context: RunnerControlContext,
+    jobId: string,
+    name: string,
+  ): Promise<ArtifactDeletionPlan> {
+    const views = await this.artifacts(context, jobId);
+    if (!views[0]?.artifacts.some((artifact) => artifact.name === name)) {
+      throw new RunnerControlError("artifact was not found in this job");
+    }
+    const targets = [{ jobId, name }];
+    const plan = this.store.saveArtifactPlan(
+      context,
+      targets,
+      `Удалить артефакт «${name}» из запуска ${jobId}; файл будет перемещён в закрытую корзину`,
+      this.now(),
+    );
+    this.store.audit(context, "artifact.delete.plan", `${jobId}/${name}`, {}, this.now());
+    return plan;
+  }
+
+  async planArtifactClear(
+    context: RunnerControlContext,
+    jobId?: string,
+  ): Promise<ArtifactDeletionPlan> {
+    const views = await this.artifacts(context, jobId);
+    const targets = views.flatMap((view) =>
+      view.artifacts.map((artifact) => ({ jobId: view.job.id, name: artifact.name })),
+    );
+    if (targets.length === 0) throw new RunnerControlError("there are no artifacts to clear");
+    const jobCount = new Set(targets.map((target) => target.jobId)).size;
+    const scope = jobId ? `из запуска ${jobId}` : `из ${jobCount} запусков`;
+    const plan = this.store.saveArtifactPlan(
+      context,
+      targets,
+      `Очистить ${targets.length} артефакт(ов) ${scope}; файлы будут перемещены в закрытую корзину`,
+      this.now(),
+    );
+    this.store.audit(
+      context,
+      "artifact.clear.plan",
+      jobId ?? "workspace",
+      { targets: targets.length, jobs: jobCount },
+      this.now(),
+    );
+    return plan;
+  }
+
+  async applyArtifactPlan(
+    context: RunnerControlContext,
+    token: string,
+  ): Promise<ArtifactDeletionResult> {
+    if (!(await this.runner.available())) throw new RunnerControlError("runner is unavailable");
+    const targets = this.store.claimArtifactPlan(context, token, this.now());
+    const deleted: RunnerArtifactDeletion[] = [];
+    const failed: ArtifactDeletionResult["failed"] = [];
+    for (const target of targets) {
+      try {
+        deleted.push(await this.runner.deleteArtifact(
+          context.projectId,
+          context.workspaceId,
+          target.jobId,
+          target.name,
+        ));
+      } catch (error) {
+        failed.push({
+          ...target,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    this.store.completeArtifactPlan(token, this.now());
+    this.store.audit(
+      context,
+      "artifact.delete.apply",
+      token,
+      { deleted: deleted.length, failed },
+      this.now(),
+    );
+    return { deleted, failed };
+  }
+
+  planSchedule(context: RunnerControlContext, input: SchedulePlanInput): SchedulePlan {
+    const nowMilliseconds = this.now();
+    if (input.operation !== "upsert" && input.operation !== "delete") {
+      throw new RunnerControlError("schedule operation is invalid");
+    }
+    if (input.operation === "delete") {
+      const scheduleId = String(input.scheduleId ?? "");
+      const existing = this.store.schedule(scheduleId, context.projectId, context.workspaceId);
+      if (!existing) throw new RunnerControlError("schedule was not found");
+      return this.store.savePlan(
+        context,
+        { operation: "delete", scheduleId },
+        `Удалить расписание «${existing.name}» (${existing.action}, ${existing.time} ${existing.timeZone})`,
+        nowMilliseconds,
+      );
+    }
+    const existing = input.scheduleId
+      ? this.store.schedule(input.scheduleId, context.projectId, context.workspaceId)
+      : null;
+    if (input.scheduleId && !existing) throw new RunnerControlError("schedule was not found");
+    if (input.enabled !== undefined && typeof input.enabled !== "boolean") {
+      throw new RunnerControlError("enabled must be a boolean");
+    }
+    const name = String(input.name ?? existing?.name ?? "").trim();
+    if (!SCHEDULE_NAME.test(name)) throw new RunnerControlError("schedule name is invalid");
+    const action = String(input.action ?? existing?.action ?? "") as RunnerAction;
+    if (!(new Set<RunnerAction>(["build", "validate", "dry-run", "run"])).has(action)) {
+      throw new RunnerControlError("schedule action is invalid");
+    }
+    const time = String(input.time ?? existing?.time ?? "");
+    if (!CLOCK_TIME.test(time)) throw new RunnerControlError("time must use HH:MM in 24-hour format");
+    const timeZone = validateTimeZone(input.timeZone ?? existing?.timeZone ?? "");
+    const weekdays = validateWeekdays(input.weekdays ?? existing?.weekdays ?? [1, 2, 3, 4, 5, 6, 7]);
+    const misfireGraceMinutes = Number(
+      input.misfireGraceMinutes ?? existing?.misfireGraceMinutes ?? 30,
+    );
+    if (!Number.isInteger(misfireGraceMinutes) || misfireGraceMinutes < 0 || misfireGraceMinutes > 1440) {
+      throw new RunnerControlError("misfireGraceMinutes must be an integer from 0 to 1440");
+    }
+    const timestamp = iso(nowMilliseconds);
+    const schedule: RunnerSchedule = {
+      id: existing?.id ?? randomUUID(),
+      projectId: context.projectId,
+      workspaceId: context.workspaceId,
+      name,
+      action,
+      time,
+      timeZone,
+      weekdays,
+      enabled: input.enabled ?? existing?.enabled ?? true,
+      revisionRef: "master",
+      overlapPolicy: "skip",
+      misfireGraceMinutes,
+      createdBy: existing?.createdBy ?? context.actorUserId,
+      updatedBy: context.actorUserId,
+      createdAt: existing?.createdAt ?? timestamp,
+      updatedAt: timestamp,
+    };
+    const days = weekdays.length === 7 ? "ежедневно" : `дни ISO ${weekdays.join(",")}`;
+    return this.store.savePlan(
+      context,
+      { operation: "upsert", schedule },
+      `${existing ? "Изменить" : "Создать"} расписание «${name}»: ${action}, ${days} в ${time} (${timeZone}), ` +
+        `${schedule.enabled ? "включено" : "выключено"}`,
+      nowMilliseconds,
+    );
+  }
+
+  applySchedule(context: RunnerControlContext, token: string): RunnerSchedule | null {
+    const schedule = this.store.applyPlan(context, token, this.now());
+    this.store.audit(
+      context,
+      schedule ? "schedule.upsert" : "schedule.delete",
+      schedule?.id ?? token,
+      schedule,
+      this.now(),
+    );
+    return schedule;
+  }
+
+  setScheduleEnabled(
+    context: RunnerControlContext,
+    scheduleId: string,
+    enabled: boolean,
+  ): RunnerSchedule {
+    const schedule = this.store.setEnabled(
+      scheduleId,
+      context.projectId,
+      context.workspaceId,
+      enabled,
+      context.actorUserId,
+      this.now(),
+    );
+    this.store.audit(
+      context,
+      enabled ? "schedule.resume" : "schedule.pause",
+      scheduleId,
+      {},
+      this.now(),
+    );
+    return schedule;
+  }
+
+  async tick(): Promise<void> {
+    if (this.ticking) return;
+    this.ticking = true;
+    try {
+      await this.refreshExecutions();
+      if (!(await this.runner.available())) return;
+      for (const schedule of this.store.enabledSchedules()) {
+        const occurrence = dueScheduleOccurrence(schedule, this.now());
+        if (!occurrence) continue;
+        const execution = this.store.claimExecution(schedule, occurrence, this.now());
+        if (!execution) continue;
+        await this.enqueueScheduled(schedule, execution);
+      }
+    } catch (error) {
+      console.error("runner scheduler tick failed", error);
+    } finally {
+      this.ticking = false;
+    }
+  }
+
+  private async enqueueScheduled(
+    schedule: RunnerSchedule,
+    execution: RunnerScheduleExecution,
+  ): Promise<void> {
+    try {
+      if (!(await this.runner.available())) throw new RunnerControlError("runner is unavailable");
+      const jobs = await this.runner.jobs(schedule.projectId, schedule.workspaceId);
+      if (jobs.some((job) => job.scheduleId === schedule.id && ACTIVE_JOB_STATUSES.has(job.status))) {
+        this.store.updateExecution(
+          execution.id,
+          "skipped",
+          { reason: "previous job from this schedule is still active" },
+          this.now(),
+        );
+        return;
+      }
+      const workspace = this.projects.project(schedule.projectId).workspace(schedule.workspaceId);
+      const inspector = new GitInspector(workspace.path);
+      const revision = await inspector.resolveRevision(schedule.revisionRef);
+      const archive = await inspector.archive(revision);
+      const job = await this.runner.submit(
+        schedule.projectId,
+        schedule.workspaceId,
+        schedule.action,
+        revision,
+        archive,
+        {
+          trigger: "schedule",
+          scheduleId: schedule.id,
+          scheduledFor: execution.scheduledFor,
+        },
+      );
+      this.store.updateExecution(
+        execution.id,
+        "queued",
+        { jobId: job.id, revision },
+        this.now(),
+      );
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.store.updateExecution(execution.id, "failed", { reason }, this.now());
+      await this.notify(
+        schedule.projectId,
+        `Расписание «${schedule.name}» не смогло запустить ${schedule.action}: ${reason}`,
+      );
+    }
+  }
+
+  private async refreshExecutions(): Promise<void> {
+    const grouped = new Map<string, RunnerScheduleExecution[]>();
+    for (const execution of this.store.activeExecutions()) {
+      if (execution.status === "claimed") {
+        if (this.now() - Date.parse(execution.updatedAt) > 60_000) {
+          this.store.updateExecution(
+            execution.id,
+            "failed",
+            { reason: "scheduler restarted or lost the claim before submitting a job" },
+            this.now(),
+          );
+        }
+        continue;
+      }
+      if (!execution.jobId) continue;
+      const key = `${execution.projectId}\0${execution.workspaceId}`;
+      const entries = grouped.get(key) ?? [];
+      entries.push(execution);
+      grouped.set(key, entries);
+    }
+    for (const [key, executions] of grouped) {
+      const [projectId, workspaceId] = key.split("\0") as [string, string];
+      let jobs: RunnerJob[];
+      try {
+        jobs = await this.runner.jobs(projectId, workspaceId);
+      } catch {
+        continue;
+      }
+      for (const execution of executions) {
+        const job = jobs.find((candidate) => candidate.id === execution.jobId);
+        if (!job) continue;
+        const status = job.status as RunnerScheduleExecutionStatus;
+        if (status === execution.status) continue;
+        this.store.updateExecution(
+          execution.id,
+          status,
+          { reason: job.error ?? null, revision: job.revision },
+          this.now(),
+        );
+        if (TERMINAL_EXECUTION_STATUSES.has(status) && status !== "completed") {
+          const schedule = this.store.schedule(
+            execution.scheduleId,
+            execution.projectId,
+            execution.workspaceId,
+          );
+          if (schedule) {
+            await this.notify(
+              execution.projectId,
+              `Запуск расписания «${schedule.name}» завершился со статусом ${status}` +
+                `${job.error ? `: ${job.error}` : ""}`,
+            );
+          }
+        }
+      }
+    }
+  }
+}

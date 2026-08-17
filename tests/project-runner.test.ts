@@ -170,11 +170,22 @@ exit 0
     );
 
     const build = await client.submit("demo", "repo", "build", revision, archive);
-    assert.equal((await completedJob(client, "demo", "repo", build.id)).status, "completed");
+    const buildCompleted = await completedJob(client, "demo", "repo", build.id);
+    assert.equal(buildCompleted.status, "completed");
+    assert.equal(buildCompleted.trigger, "manual");
 
-    const dryRun = await client.submit("demo", "repo", "dry-run", revision, archive);
+    const scheduleId = randomUUID();
+    const scheduledFor = "2026-08-17T06:00:00.000Z";
+    const dryRun = await client.submit("demo", "repo", "dry-run", revision, archive, {
+      trigger: "schedule",
+      scheduleId,
+      scheduledFor,
+    });
     const dryRunCompleted = await completedJob(client, "demo", "repo", dryRun.id);
     assert.equal(dryRunCompleted.status, "completed");
+    assert.equal(dryRunCompleted.trigger, "schedule");
+    assert.equal(dryRunCompleted.scheduleId, scheduleId);
+    assert.equal(dryRunCompleted.scheduledFor, scheduledFor);
     assert.equal(dryRunCompleted.environmentRevision, 2);
     assert.equal(dryRunCompleted.artifactCount, 2);
     assert.deepEqual(
@@ -184,6 +195,31 @@ exit 0
     assert.equal(
       (await client.artifact("demo", dryRun.id, "manifest.json")).content,
       '{"status":"completed","key":"[REDACTED]"}\n',
+    );
+    await assert.rejects(
+      client.deleteArtifact("demo", "another-workspace", dryRun.id, "manifest.json"),
+      /not available for this workspace/,
+    );
+    const deletedManifest = await client.deleteArtifact(
+      "demo",
+      "repo",
+      dryRun.id,
+      "manifest.json",
+    );
+    assert.equal(deletedManifest.name, "manifest.json");
+    assert.deepEqual(
+      (await client.artifacts("demo", dryRun.id)).map((artifact) => artifact.name),
+      ["report.html"],
+    );
+    await client.deleteArtifact("demo", "repo", dryRun.id, "report.html");
+    assert.deepEqual(await client.artifacts("demo", dryRun.id), []);
+    assert.equal(
+      (await client.jobs("demo", "repo")).find((job) => job.id === dryRun.id)?.artifactCount,
+      0,
+    );
+    assert.equal(
+      readdirSync(join(dataRoot, "artifact-trash", "demo", dryRun.id)).length,
+      2,
     );
     assert.doesNotMatch(await client.log("demo", dryRun.id), /rotated-runtime-secret/);
     assert.match(await client.log("demo", dryRun.id), /application said key=\[REDACTED\]/);

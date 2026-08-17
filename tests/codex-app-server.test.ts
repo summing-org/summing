@@ -12,7 +12,11 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import test from "node:test";
-import { CodexAppServer, type JsonRecord } from "../src/codex-app-server.js";
+import {
+  CodexAppServer,
+  type DynamicToolNamespaceSpec,
+  type JsonRecord,
+} from "../src/codex-app-server.js";
 
 test("dispatches responses and notifications over JSONL stdio", async () => {
   const root = mkdtempSync(join(tmpdir(), "summing-codex-"));
@@ -55,6 +59,81 @@ lines.on("line", (line) => {
     delete process.env.SUMMING_TEST_SECRET;
     delete process.env.OPENAI_API_KEY;
     delete process.env.GROQ_API_KEY;
+    await client.close(true);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("advertises dynamic tools and answers host-side tool calls", async () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-codex-tools-"));
+  const executable = join(root, "fake-codex.mjs");
+  writeFileSync(
+    executable,
+    `#!/usr/bin/env node
+import { createInterface } from "node:readline";
+const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+lines.on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.id === 900 && message.result) {
+    send({ method: "test/tool-result", params: message.result });
+    return;
+  }
+  if (message.method === "thread/start") {
+    send({ id: message.id, result: {
+      thread: { id: "thread-tools" },
+      runtimeWorkspaceRoots: message.params.runtimeWorkspaceRoots,
+    } });
+    setTimeout(() => send({
+      id: 900,
+      method: "item/tool/call",
+      params: {
+        threadId: "thread-tools",
+        turnId: "turn-tools",
+        callId: "call-tools",
+        namespace: "runner",
+        tool: "inspect",
+        arguments: {},
+      },
+    }), 20);
+    return;
+  }
+  if (message.id) send({ id: message.id, result: { ok: true } });
+});
+`,
+  );
+  chmodSync(executable, 0o755);
+  const tools: DynamicToolNamespaceSpec[] = [{
+    type: "namespace",
+    name: "runner",
+    description: "Runner state",
+    tools: [{
+      type: "function",
+      name: "inspect",
+      description: "Inspect state",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    }],
+  }];
+  const client = new CodexAppServer(executable, join(root, "home"));
+  try {
+    await client.start();
+    const eventPromise = once(client, "event");
+    await client.startThread("/tmp/project", "", {
+      readableRoots: ["/tmp/project"],
+      dynamicTools: tools,
+      dynamicToolHandler: async (call) => ({
+        success: call.tool === "inspect" && call.namespace === "runner",
+        contentItems: [{ type: "inputText", text: JSON.stringify({ active: [] }) }],
+      }),
+    });
+    const [event] = await eventPromise;
+    assert.equal(event.method, "test/tool-result");
+    assert.equal(event.params.success, true);
+    assert.deepEqual(event.params.contentItems, [{
+      type: "inputText",
+      text: '{"active":[]}',
+    }]);
+  } finally {
     await client.close(true);
     rmSync(root, { recursive: true, force: true });
   }

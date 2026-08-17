@@ -13,6 +13,41 @@ export interface CodexEvent {
   params: JsonRecord;
 }
 
+export interface DynamicToolFunctionSpec {
+  type: "function";
+  name: string;
+  description: string;
+  inputSchema: JsonRecord;
+  deferLoading?: boolean;
+}
+
+export interface DynamicToolNamespaceSpec {
+  type: "namespace";
+  name: string;
+  description: string;
+  tools: DynamicToolFunctionSpec[];
+}
+
+export type DynamicToolSpec = DynamicToolFunctionSpec | DynamicToolNamespaceSpec;
+
+export interface DynamicToolCall {
+  threadId: string;
+  turnId: string;
+  callId: string;
+  namespace: string | null;
+  tool: string;
+  arguments: unknown;
+}
+
+export interface DynamicToolCallResult {
+  contentItems: Array<{ type: "inputText"; text: string }>;
+  success: boolean;
+}
+
+export type DynamicToolHandler = (
+  call: DynamicToolCall,
+) => Promise<DynamicToolCallResult>;
+
 interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
@@ -64,6 +99,8 @@ interface WorkspacePermissionOptions {
   networkAccess?: boolean;
   readableRoots?: string[];
   readOnly?: boolean;
+  dynamicTools?: DynamicToolSpec[];
+  dynamicToolHandler?: DynamicToolHandler;
 }
 
 interface TurnOptions
@@ -82,6 +119,7 @@ export class CodexAppServer extends EventEmitter {
   private closed = false;
   private readonly binaryReadRoot: string | null;
   private readonly nodeInstallationReadRoot: string | null;
+  private readonly dynamicToolHandlers = new Map<string, DynamicToolHandler>();
 
   constructor(
     readonly binary: string,
@@ -152,6 +190,7 @@ export class CodexAppServer extends EventEmitter {
       }
     }
     this.rejectPending(new CodexProtocolError("Codex App Server stopped"));
+    this.dynamicToolHandlers.clear();
     this.process = null;
   }
 
@@ -216,7 +255,7 @@ export class CodexAppServer extends EventEmitter {
     if (!value || typeof value !== "object" || Array.isArray(value)) return;
     const message = value as RpcMessage;
     if (message.method && message.id !== undefined) {
-      await this.answerServerRequest(message.id, message.method);
+      await this.answerServerRequest(message.id, message.method, message.params);
       return;
     }
     if (message.id !== undefined) {
@@ -238,7 +277,36 @@ export class CodexAppServer extends EventEmitter {
     }
   }
 
-  private async answerServerRequest(id: number, method: string): Promise<void> {
+  private async answerServerRequest(id: number, method: string, params: unknown): Promise<void> {
+    if (method === "item/tool/call") {
+      const call = this.dynamicToolCall(params);
+      const handler = call ? this.dynamicToolHandlers.get(call.threadId) : undefined;
+      if (!call || !handler) {
+        await this.send({
+          id,
+          result: {
+            contentItems: [{ type: "inputText", text: "Tool is unavailable in this thread." }],
+            success: false,
+          },
+        });
+        return;
+      }
+      try {
+        await this.send({ id, result: await handler(call) });
+      } catch (error) {
+        await this.send({
+          id,
+          result: {
+            contentItems: [{
+              type: "inputText",
+              text: error instanceof Error ? error.message : String(error),
+            }],
+            success: false,
+          },
+        });
+      }
+      return;
+    }
     if (
       method === "item/commandExecution/requestApproval" ||
       method === "item/fileChange/requestApproval"
@@ -291,6 +359,27 @@ export class CodexAppServer extends EventEmitter {
     return typeof error.message === "string" ? error.message : JSON.stringify(value);
   }
 
+  private dynamicToolCall(value: unknown): DynamicToolCall | null {
+    const params = this.record(value);
+    if (
+      typeof params.threadId !== "string" ||
+      typeof params.turnId !== "string" ||
+      typeof params.callId !== "string" ||
+      typeof params.tool !== "string" ||
+      !(params.namespace === null || typeof params.namespace === "string")
+    ) {
+      return null;
+    }
+    return {
+      threadId: params.threadId,
+      turnId: params.turnId,
+      callId: params.callId,
+      namespace: params.namespace,
+      tool: params.tool,
+      arguments: params.arguments,
+    };
+  }
+
   async account(refresh = false): Promise<JsonRecord> {
     return this.record(await this.request("account/read", { refreshToken: refresh }, 30_000));
   }
@@ -320,7 +409,7 @@ export class CodexAppServer extends EventEmitter {
       permissions: permissionProfile,
       config: this.permissionConfig(cwd, options),
       serviceName: "summing_telegram",
-      dynamicTools: [],
+      dynamicTools: options.dynamicTools ?? [],
       selectedCapabilityRoots: [],
     };
     if (model) params.model = model;
@@ -338,6 +427,9 @@ export class CodexAppServer extends EventEmitter {
       throw new CodexProtocolError(
         "thread/start did not preserve any runtime workspace roots",
       );
+    }
+    if (options.dynamicToolHandler) {
+      this.dynamicToolHandlers.set(thread.id, options.dynamicToolHandler);
     }
     return thread.id;
   }
@@ -358,10 +450,20 @@ export class CodexAppServer extends EventEmitter {
       permissions: permissionProfile,
       config: this.permissionConfig(cwd, options),
     });
+    if (options.dynamicToolHandler) {
+      this.dynamicToolHandlers.set(threadId, options.dynamicToolHandler);
+    } else {
+      this.dynamicToolHandlers.delete(threadId);
+    }
   }
 
   async unsubscribeThread(threadId: string): Promise<void> {
     await this.request("thread/unsubscribe", { threadId }, 30_000);
+    this.dynamicToolHandlers.delete(threadId);
+  }
+
+  detachThreadHandler(threadId: string): void {
+    this.dynamicToolHandlers.delete(threadId);
   }
 
   async startTurn(

@@ -11,6 +11,8 @@ export interface Conversation {
   projectId: string;
   workspaceId: string;
   codexThreadId: string | null;
+  codexThreadCapability: string;
+  previousCodexThreadId: string | null;
   readOnlyCodexThreadId: string | null;
   activeTurnId: string | null;
   streamMessageId: number | null;
@@ -348,6 +350,8 @@ export class StateStore {
           project_id TEXT NOT NULL,
           workspace_id TEXT NOT NULL,
           codex_thread_id TEXT,
+          codex_thread_capability TEXT NOT NULL DEFAULT '',
+          previous_codex_thread_id TEXT,
           readonly_codex_thread_id TEXT,
           active_turn_id TEXT,
           stream_message_id INTEGER,
@@ -666,6 +670,14 @@ export class StateStore {
       const conversationColumns = this.db.prepare("PRAGMA table_info(conversations)").all() as Row[];
       if (!conversationColumns.some((column) => column.name === "readonly_codex_thread_id")) {
         this.db.exec("ALTER TABLE conversations ADD COLUMN readonly_codex_thread_id TEXT");
+      }
+      if (!conversationColumns.some((column) => column.name === "codex_thread_capability")) {
+        this.db.exec(
+          "ALTER TABLE conversations ADD COLUMN codex_thread_capability TEXT NOT NULL DEFAULT ''",
+        );
+      }
+      if (!conversationColumns.some((column) => column.name === "previous_codex_thread_id")) {
+        this.db.exec("ALTER TABLE conversations ADD COLUMN previous_codex_thread_id TEXT");
       }
       const pendingColumns = this.db.prepare("PRAGMA table_info(pending_inputs)").all() as Row[];
       if (!pendingColumns.some((column) => column.name === "access_mode")) {
@@ -2242,6 +2254,8 @@ export class StateStore {
           project_id = excluded.project_id,
           workspace_id = excluded.workspace_id,
           codex_thread_id = CASE WHEN ? THEN NULL ELSE codex_thread_id END,
+          codex_thread_capability = CASE WHEN ? THEN '' ELSE codex_thread_capability END,
+          previous_codex_thread_id = CASE WHEN ? THEN NULL ELSE previous_codex_thread_id END,
           readonly_codex_thread_id = CASE WHEN ? THEN NULL ELSE readonly_codex_thread_id END,
           active_turn_id = NULL,
           stream_message_id = NULL,
@@ -2255,6 +2269,8 @@ export class StateStore {
         workspaceId,
         now,
         now,
+        changed ? 1 : 0,
+        changed ? 1 : 0,
         changed ? 1 : 0,
         changed ? 1 : 0,
         changed ? 1 : 0,
@@ -2294,6 +2310,9 @@ export class StateStore {
       projectId: String(row.project_id),
       workspaceId: String(row.workspace_id),
       codexThreadId: row.codex_thread_id === null ? null : String(row.codex_thread_id),
+      codexThreadCapability: String(row.codex_thread_capability ?? ""),
+      previousCodexThreadId:
+        row.previous_codex_thread_id === null ? null : String(row.previous_codex_thread_id),
       readOnlyCodexThreadId:
         row.readonly_codex_thread_id === null ? null : String(row.readonly_codex_thread_id),
       activeTurnId: row.active_turn_id === null ? null : String(row.active_turn_id),
@@ -2302,12 +2321,45 @@ export class StateStore {
     };
   }
 
-  setThread(conversationId: string, threadId: string | null, access: RunAccess = "write"): void {
-    this.updateConversation(
-      conversationId,
-      access === "read-only" ? "readonly_codex_thread_id" : "codex_thread_id",
-      threadId,
-    );
+  setThread(
+    conversationId: string,
+    threadId: string | null,
+    access: RunAccess = "write",
+    capability = "",
+  ): void {
+    if (access === "read-only") {
+      this.updateConversation(conversationId, "readonly_codex_thread_id", threadId);
+      return;
+    }
+    this.transaction(() => {
+      this.db.prepare(`
+        UPDATE conversations
+        SET codex_thread_id = ?, codex_thread_capability = ?, updated_at = ?
+        WHERE id = ?
+      `).run(threadId, threadId ? capability : "", Date.now() / 1000, conversationId);
+    });
+  }
+
+  archiveWriteThreadForCapability(conversationId: string, capability: string): string | null {
+    if (!capability.trim()) throw new Error("write thread capability must not be empty");
+    return this.transaction(() => {
+      const row = this.db.prepare(`
+        SELECT codex_thread_id, codex_thread_capability
+        FROM conversations WHERE id = ?
+      `).get(conversationId) as Row | undefined;
+      if (!row) throw new Error(`unknown conversation: ${conversationId}`);
+      const threadId = row.codex_thread_id === null ? null : String(row.codex_thread_id);
+      if (!threadId || String(row.codex_thread_capability ?? "") === capability) return null;
+      this.db.prepare(`
+        UPDATE conversations
+        SET previous_codex_thread_id = codex_thread_id,
+            codex_thread_id = NULL,
+            codex_thread_capability = '',
+            updated_at = ?
+        WHERE id = ?
+      `).run(Date.now() / 1000, conversationId);
+      return threadId;
+    });
   }
 
   setWorktree(conversationId: string, path: string): void {

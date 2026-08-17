@@ -106,6 +106,35 @@ test("rebinding starts a fresh Codex context", () => {
   }
 });
 
+test("write threads migrate once when host capabilities change and preserve the previous id", () => {
+  const { root, store } = tempStore();
+  try {
+    const conversation = store.bind(5, 10, "one", "app");
+    store.setThread(conversation.id, "thr_old", "write", "legacy-v1");
+    assert.equal(
+      store.archiveWriteThreadForCapability(conversation.id, "runner-control-v1"),
+      "thr_old",
+    );
+    const archived = store.get(conversation.id);
+    assert.equal(archived.codexThreadId, null);
+    assert.equal(archived.codexThreadCapability, "");
+    assert.equal(archived.previousCodexThreadId, "thr_old");
+
+    store.setThread(conversation.id, "thr_new", "write", "runner-control-v1");
+    assert.equal(
+      store.archiveWriteThreadForCapability(conversation.id, "runner-control-v1"),
+      null,
+    );
+    const current = store.get(conversation.id);
+    assert.equal(current.codexThreadId, "thr_new");
+    assert.equal(current.codexThreadCapability, "runner-control-v1");
+    assert.equal(current.previousCodexThreadId, "thr_old");
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("persists Telegram memberships and discovered topics", () => {
   const { root, path, store } = tempStore();
   store.recordTelegramChat({

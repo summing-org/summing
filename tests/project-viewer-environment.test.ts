@@ -54,7 +54,7 @@ function signedInitData(token: string, userId: number): string {
   return params.toString();
 }
 
-test("viewer edits one plaintext environment per workspace and jobs no longer require a manifest", async () => {
+test("viewer edits one environment while job launch stays agent-only and cancellation remains available", async () => {
   const root = mkdtempSync(join(tmpdir(), "summing-viewer-environment-"));
   const workspace = join(root, "workspace");
   repository(workspace);
@@ -153,8 +153,8 @@ test("viewer edits one plaintext environment per workspace and jobs no longer re
       headers: { ...headers, "content-type": "application/json" },
       body: JSON.stringify({ conversation: conversation.id, action: "dry-run" }),
     });
-    assert.equal(launched.status, 202);
-    assert.deepEqual(submission.slice(0, 2), ["demo", "repo"]);
+    assert.equal(launched.status, 404);
+    assert.deepEqual(submission, []);
 
     const cancelled = await fetch(`${endpoint}/api/viewer/jobs/cancel`, {
       method: "POST",

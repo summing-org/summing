@@ -16,7 +16,6 @@ import { ProjectCatalogError, type ProjectCatalog } from "./project-catalog.js";
 import {
   ProjectRunnerClient,
   ProjectRunnerClientError,
-  type RunnerAction,
 } from "./project-runner-client.js";
 import { RunArtifactStore } from "./run-artifacts.js";
 import {
@@ -512,34 +511,6 @@ export class ProjectViewerServer {
       json(response, 200, {
         artifact: await this.runner.artifact(scope.project.id, jobId, name),
       });
-      return;
-    }
-    if (request.method === "POST" && url.pathname === "/api/viewer/jobs") {
-      const body = await requestBody(request) as Record<string, unknown> | null;
-      const requestedConversation = String(body?.conversation ?? "");
-      const action = String(body?.action ?? "") as RunnerAction;
-      if (!(["build", "validate", "dry-run", "run"] as string[]).includes(action)) {
-        throw new ViewerHttpError(400, "unknown runner action");
-      }
-      const scope = await this.scope(requestedConversation, telegramUser);
-      if (!(await this.runner.available())) throw new ViewerHttpError(503, "runner is unavailable");
-      const repository = await scope.inspector.summary();
-      if (action === "run" && repository.dirty) {
-        throw new ViewerHttpError(409, "live run requires a clean committed worktree");
-      }
-      const revision =
-        action === "run"
-          ? repository.head
-          : await scope.inspector.snapshot(`${action} requested from viewer`);
-      const archive = await scope.inspector.archive(revision);
-      const job = await this.runner.submit(
-        scope.project.id,
-        scope.project.workspace,
-        action,
-        revision,
-        archive,
-      );
-      json(response, 202, { job });
       return;
     }
     if (request.method === "POST" && url.pathname === "/api/viewer/jobs/cancel") {

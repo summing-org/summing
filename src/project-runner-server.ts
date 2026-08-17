@@ -9,6 +9,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -30,11 +31,17 @@ import {
   type EnvironmentMigrationMarker,
   type LegacyEnvironmentMigrationTarget,
 } from "./project-environment-migration.js";
-import type { RunnerAction, RunnerJob } from "./project-runner-client.js";
+import type {
+  RunnerAction,
+  RunnerArtifactDeletion,
+  RunnerJob,
+  RunnerJobTrigger,
+} from "./project-runner-client.js";
 
 const PROJECT_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const WORKSPACE_ID = PROJECT_ID;
 const JOB_ID = /^[0-9a-f-]{36}$/;
+const SCHEDULE_ID = JOB_ID;
 const REVISION = /^[0-9a-f]{40}$/;
 const MAX_ARCHIVE_BYTES = 50_000_000;
 const MAX_ARTIFACT_BYTES = 8_000_000;
@@ -42,6 +49,7 @@ const MAX_JSON_BYTES = 1_100_000;
 const DRY_RUN_RETENTION = 30;
 const JOB_RETENTION = 100;
 const RUNNER_ACTIONS = new Set<RunnerAction>(["build", "validate", "dry-run", "run"]);
+const RUNNER_TRIGGERS = new Set<RunnerJobTrigger>(["manual", "schedule"]);
 const ARTIFACTS = new Map([
   ["manifest.json", "application/json"],
   ["sources.jsonl", "application/x-ndjson"],
@@ -402,6 +410,9 @@ export class ProjectRunnerServer {
       const workspaceId = url.searchParams.get("workspace") ?? "";
       const action = url.searchParams.get("action") as RunnerAction;
       const revision = url.searchParams.get("revision") ?? "";
+      const trigger = (url.searchParams.get("trigger") ?? "manual") as RunnerJobTrigger;
+      const scheduleId = url.searchParams.get("schedule") ?? "";
+      const scheduledFor = url.searchParams.get("scheduled_for") ?? "";
       if (!PROJECT_ID.test(projectId) || !WORKSPACE_ID.test(workspaceId)) {
         throw new RunnerHttpError(400, "invalid project or workspace id");
       }
@@ -409,6 +420,14 @@ export class ProjectRunnerServer {
         throw new RunnerHttpError(400, "invalid runner action");
       }
       if (!REVISION.test(revision)) throw new RunnerHttpError(400, "invalid revision");
+      if (!RUNNER_TRIGGERS.has(trigger)) throw new RunnerHttpError(400, "invalid runner trigger");
+      if (trigger === "schedule") {
+        if (!SCHEDULE_ID.test(scheduleId) || !scheduledFor || !Number.isFinite(Date.parse(scheduledFor))) {
+          throw new RunnerHttpError(400, "invalid runner schedule metadata");
+        }
+      } else if (scheduleId || scheduledFor) {
+        throw new RunnerHttpError(400, "manual jobs cannot contain schedule metadata");
+      }
       const project = this.projectConfig(projectId);
       const job: RunnerJob = {
         id: randomUUID(),
@@ -416,6 +435,8 @@ export class ProjectRunnerServer {
         workspaceId,
         action,
         revision,
+        trigger,
+        ...(trigger === "schedule" ? { scheduleId, scheduledFor: new Date(scheduledFor).toISOString() } : {}),
         status: "queued",
         createdAt: new Date().toISOString(),
       };
@@ -501,6 +522,23 @@ export class ProjectRunnerServer {
       json(response, 200, {
         artifact: { name, bytes: metadata.size, contentType, content: readFileSync(path, "utf8") },
       });
+      return;
+    }
+    if (request.method === "DELETE" && url.pathname === "/artifact") {
+      const workspaceId = url.searchParams.get("workspace") ?? "";
+      if (!WORKSPACE_ID.test(workspaceId)) {
+        throw new RunnerHttpError(400, "invalid artifact workspace");
+      }
+      const { projectId, jobId, project, job } = this.artifactScope(url);
+      if ((job.workspaceId ?? "repo") !== workspaceId) {
+        throw new RunnerHttpError(404, "dry-run artifacts are not available for this workspace");
+      }
+      if (job.status === "queued" || job.status === "running" || job.status === "cancelling") {
+        throw new RunnerHttpError(409, "artifacts cannot be deleted while the job is active");
+      }
+      const name = url.searchParams.get("name") ?? "";
+      const deleted = this.trashArtifact(projectId, jobId, name, project);
+      json(response, 200, { deleted });
       return;
     }
     throw new RunnerHttpError(404, "not found");
@@ -637,7 +675,8 @@ export class ProjectRunnerServer {
     const path = resolve(this.jobDirectory(projectId, jobId), "job.json");
     if (!existsSync(path)) throw new RunnerHttpError(404, "runner job not found");
     try {
-      return JSON.parse(readFileSync(path, "utf8")) as RunnerJob;
+      const job = JSON.parse(readFileSync(path, "utf8")) as RunnerJob;
+      return { ...job, trigger: job.trigger ?? "manual" };
     } catch {
       throw new RunnerHttpError(409, "runner job is malformed");
     }
@@ -733,9 +772,12 @@ export class ProjectRunnerServer {
     if (!existsSync(directory)) return [];
     return readdirSync(directory)
       .filter((entry) => JOB_ID.test(entry))
-      .map((entry) => {
+      .map((entry): RunnerJob | null => {
         try {
-          return JSON.parse(readFileSync(resolve(directory, entry, "job.json"), "utf8")) as RunnerJob;
+          const job = JSON.parse(
+            readFileSync(resolve(directory, entry, "job.json"), "utf8"),
+          ) as RunnerJob;
+          return { ...job, trigger: job.trigger ?? "manual" };
         } catch {
           return null;
         }
@@ -750,6 +792,7 @@ export class ProjectRunnerServer {
     projectId: string;
     jobId: string;
     project: RunnerProjectConfig;
+    job: RunnerJob;
   } {
     const projectId = url.searchParams.get("project") ?? "";
     const jobId = url.searchParams.get("job") ?? "";
@@ -763,7 +806,41 @@ export class ProjectRunnerServer {
     if (job.projectId !== projectId || job.id !== jobId || job.action !== "dry-run") {
       throw new RunnerHttpError(404, "dry-run artifacts are not available for this job");
     }
-    return { projectId, jobId, project };
+    return { projectId, jobId, project, job };
+  }
+
+  private trashArtifact(
+    projectId: string,
+    jobId: string,
+    name: string,
+    project: RunnerProjectConfig,
+  ): RunnerArtifactDeletion {
+    const contentType = ARTIFACTS.get(name);
+    if (!contentType) throw new RunnerHttpError(400, "invalid artifact name");
+    const directory = this.safeArtifactDirectory(project, jobId);
+    if (!directory) throw new RunnerHttpError(404, "artifact not found");
+    const source = resolve(directory, name);
+    if (!existsSync(source)) throw new RunnerHttpError(404, "artifact not found");
+    const metadata = lstatSync(source);
+    if (!metadata.isFile()) throw new RunnerHttpError(404, "artifact not found");
+
+    const trashRoot = resolve(this.dataRoot, "artifact-trash", projectId);
+    if (existsSync(trashRoot) && !lstatSync(trashRoot).isDirectory()) {
+      throw new RunnerHttpError(500, "artifact trash is not a directory");
+    }
+    mkdirSync(trashRoot, { recursive: true, mode: 0o700 });
+    const trashJobDirectory = resolve(trashRoot, jobId);
+    if (existsSync(trashJobDirectory) && !lstatSync(trashJobDirectory).isDirectory()) {
+      throw new RunnerHttpError(500, "artifact trash job path is not a directory");
+    }
+    mkdirSync(trashJobDirectory, { recursive: true, mode: 0o700 });
+    const deletedAt = new Date().toISOString();
+    renameSync(source, resolve(trashJobDirectory, `${randomUUID()}-${name}`));
+
+    const job = this.storedJob(projectId, jobId);
+    job.artifactCount = this.listArtifacts(jobId, project).length;
+    this.saveJob(job);
+    return { jobId, name, bytes: metadata.size, contentType, deletedAt };
   }
 
   private listArtifacts(jobId: string, project: RunnerProjectConfig): Array<{
