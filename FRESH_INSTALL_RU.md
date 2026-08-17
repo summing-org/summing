@@ -47,6 +47,30 @@ ssh root@SERVER cloud-init status --wait
 Terraform state содержит инфраструктурные идентификаторы и IP. Держите его в
 зашифрованном remote backend либо в защищённом operator-каталоге.
 
+### Уже rebuilt VPS без Cloud Config
+
+Hetzner показывает Cloud Config при создании сервера, но не в обычном UI-flow
+rebuild. Такой чистый Ubuntu 24.04 host не нужно удалять ещё раз: передайте
+`--provision` в основной installer. Он доставит secret-free
+`deploy/provision-host`, проверит `x86_64`, отсутствие старого SUMMING state,
+установит тот же системный baseline и только после этого перейдёт к secure
+bootstrap.
+
+После rebuild SSH host key закономерно меняется. Installer использует
+`StrictHostKeyChecking=accept-new`: он добавит совершенно новый host, но
+отклонит изменившийся ключ для уже известного IP. Сначала сверяйте новый ED25519
+fingerprint через Hetzner Web Console:
+
+```bash
+ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+```
+
+И только после совпадения удаляйте старую локальную запись:
+
+```bash
+ssh-keygen -R SERVER
+```
+
 ## 2. Одноразовый install manifest
 
 Скопируйте [пример manifest](deploy/fresh-install.example.json) за пределы Git
@@ -77,6 +101,8 @@ token в URL.
 ```bash
 deploy/install-fresh \
   --target root@SERVER \
+  --identity ~/.ssh/summing-deploy \
+  --port 22 \
   --secrets /secure/path/fresh-install.json \
   --origin git@github.com:ORG/REPOSITORY.git \
   --source-key /secure/path/summing-readonly-key
@@ -94,6 +120,12 @@ installer:
 - закрепляет переданный origin одновременно в Git и root-only deployment policy;
 - удаляет удалённые копии manifest, bundle и deploy key при любом завершении
   root-bootstrap; повторная попытка загружает их заново.
+
+Для уже rebuilt VPS добавьте `--provision` к той же команде. Provisioner
+идемпотентен, не принимает application secrets и отказывается работать поверх
+непустого `/opt/summing`, systemd unit или SQLite state. Если системные
+обновления требуют reboot, installer перезагрузит host, дождётся реального
+disconnect/reconnect по тому же identity/port и продолжит автоматически.
 
 Root-bootstrap атомарно создаёт `/etc/summing/summing.env` с режимом `0640` и
 `/var/lib/summing/data/config.toml` с режимом `0600`. MTProto master key и ключ

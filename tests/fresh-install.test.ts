@@ -110,9 +110,11 @@ test("provisioning and secure bootstrap assets keep application secrets out of m
   const cloudInit = asset("deploy/cloud-init.yaml");
   const bootstrapPath = join(root, "deploy/secure-bootstrap");
   const installerPath = join(root, "deploy/install-fresh");
+  const provisionerPath = join(root, "deploy/provision-host");
   const bootstrap = asset("deploy/secure-bootstrap");
   const installer = asset("deploy/install-fresh");
-  for (const path of [bootstrapPath, installerPath]) {
+  const provisioner = asset("deploy/provision-host");
+  for (const path of [bootstrapPath, installerPath, provisionerPath]) {
     const syntax = spawnSync("bash", ["-n", path], { encoding: "utf8" });
     assert.equal(syntax.status, 0, syntax.stderr);
     assert.notEqual(statSync(path).mode & 0o111, 0, `${path} must be executable`);
@@ -132,9 +134,27 @@ test("provisioning and secure bootstrap assets keep application secrets out of m
   assert.match(installer, /Refusing to install from a checkout with tracked changes/);
   assert.match(installer, /scripts\/render-fresh-install\.mjs/);
   assert.match(installer, /requires Node\.js 24 or newer/);
+  assert.match(installer, /--provision/);
+  assert.match(installer, /--identity/);
+  assert.match(installer, /--port/);
+  assert.match(installer, /StrictHostKeyChecking=accept-new/);
+  assert.match(installer, /deploy\/provision-host/);
+  assert.match(installer, /reboot_and_wait/);
+  assert.doesNotMatch(installer, /StrictHostKeyChecking=no/);
   assert.match(installer, /git bundle create "\$\{bundle\}" HEAD/);
   assert.match(installer, /cloud-init status --wait/);
   assert.match(installer, /--consume-inputs/);
+  assert.match(provisioner, /Host provisioning requires Ubuntu 24\.04/);
+  assert.match(provisioner, /Host provisioning requires x86_64/);
+  assert.match(provisioner, /Refusing to provision over existing SUMMING state/);
+  assert.match(provisioner, /node_version=v24\.18\.0/);
+  assert.match(provisioner, /SHASUMS256\.txt/);
+  assert.match(provisioner, /ufw allow "\$\{ssh_port\}\/tcp"/);
+  assert.match(provisioner, /\/etc\/summing\/provisioned/);
+  assert.doesNotMatch(
+    provisioner,
+    /TELEGRAM_BOT_TOKEN|OPENAI_API_KEY|SUMMING_S3_SECRET_ACCESS_KEY/,
+  );
 });
 
 test("Hetzner provisioning uses protected Ubuntu 24.04 and restricted SSH", () => {
@@ -149,6 +169,26 @@ test("Hetzner provisioning uses protected Ubuntu 24.04 and restricted SSH", () =
   assert.match(variables, /cidr != "0\.0\.0\.0\/0"/);
   assert.match(variables, /cidr != "::\/0"/);
   assert.doesNotMatch(main + variables, /telegram|openai|secret_access_key/i);
+});
+
+test("SSH provisioning entry points reject unsafe ports before any remote action", () => {
+  const installer = spawnSync("bash", [
+    join(root, "deploy/install-fresh"),
+    "--target", "root@example.com",
+    "--secrets", "/does/not/exist",
+    "--port", "0",
+    "--yes",
+  ], { encoding: "utf8" });
+  assert.equal(installer.status, 2);
+  assert.match(installer.stderr, /between 1 and 65535/);
+  assert.doesNotMatch(installer.stderr, /SSH did not become ready/);
+
+  const provisioner = spawnSync("bash", [
+    join(root, "deploy/provision-host"),
+    "--ssh-port", "65536",
+  ], { encoding: "utf8" });
+  assert.equal(provisioner.status, 2);
+  assert.match(provisioner.stderr, /between 1 and 65535/);
 });
 
 function assetFrom(path: string): string {

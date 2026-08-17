@@ -150,9 +150,15 @@ terraform init && terraform apply
 chmod 0600 /secure/path/fresh-install.json /secure/path/source-deploy-key
 deploy/install-fresh \
   --target root@SERVER \
+  --identity ~/.ssh/summing-deploy \
   --secrets /secure/path/fresh-install.json \
   --source-key /secure/path/source-deploy-key
 ```
+
+Если Ubuntu 24.04 уже установлен через Hetzner **Rebuild**, но Cloud Config не
+применялся, добавьте `--provision`. Installer подготовит чистый host по SSH и
+продолжит установку; изменившийся после rebuild SSH fingerprint всё равно нужно
+предварительно сверить через Hetzner Console.
 
 Installer передаёт проверенный bundle текущего commit, закрепляет read-only Git
 origin для будущих atomic updates, формирует конфигурацию с закрытыми правами,

@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+umask 0027
+
+usage() {
+  cat <<'EOF'
+Usage: provision-host [--ssh-port PORT]
+
+Idempotently prepares one clean Ubuntu 24.04 x86_64 host for SUMMING.
+The script contains and accepts no application credentials.
+EOF
+}
+
+ssh_port=22
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --ssh-port) ssh_port=${2:-}; shift 2 ;;
+    --help|-h) usage; exit 0 ;;
+    *) printf 'Unknown option: %s\n' "$1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+case "${ssh_port}" in
+  ''|*[!0-9]*) printf '%s\n' 'SSH port must be an integer.' >&2; exit 2 ;;
+esac
+if [ "${ssh_port}" -lt 1 ] || [ "${ssh_port}" -gt 65535 ]; then
+  printf '%s\n' 'SSH port must be between 1 and 65535.' >&2
+  exit 2
+fi
+if [ "${EUID}" -ne 0 ]; then
+  printf '%s\n' 'Run provision-host as root.' >&2
+  exit 2
+fi
+if [ ! -f /etc/os-release ] || ! grep -q '^ID=ubuntu$' /etc/os-release || \
+  ! grep -q '^VERSION_ID="24.04"$' /etc/os-release; then
+  printf '%s\n' 'Host provisioning requires Ubuntu 24.04.' >&2
+  exit 2
+fi
+if [ "$(uname -m)" != x86_64 ]; then
+  printf '%s\n' 'Host provisioning requires x86_64.' >&2
+  exit 2
+fi
+
+marker=/etc/summing/provisioned
+node_version=v24.18.0
+node_archive=node-${node_version}-linux-x64.tar.xz
+node_dir=/opt/node-${node_version}
+
+valid_marker() {
+  [ ! -L "${marker}" ] && [ -f "${marker}" ] && \
+    [ "$(stat -c '%u:%a' "${marker}" 2>/dev/null || true)" = "0:600" ]
+}
+
+if [ -e "${marker}" ] || [ -L "${marker}" ]; then
+  if ! valid_marker; then
+    printf '%s\n' 'Existing provisioning marker is unsafe.' >&2
+    exit 2
+  fi
+  if ! id summing >/dev/null 2>&1 || ! command -v node >/dev/null 2>&1 || \
+    ! command -v codex >/dev/null 2>&1 || ! command -v caddy >/dev/null 2>&1; then
+    printf '%s\n' 'Provisioning marker exists but the host is incomplete.' >&2
+    exit 2
+  fi
+  existing_node_major=$(node -p 'Number(process.versions.node.split(".")[0])')
+  if [ "${existing_node_major}" -lt 24 ]; then
+    printf '%s\n' 'Provisioning marker exists but Node.js is older than 24.' >&2
+    exit 2
+  fi
+  printf '%s\n' 'SUMMING host provisioning is already complete.'
+  exit 0
+fi
+
+for durable in \
+  /etc/summing/summing.env \
+  /etc/systemd/system/summing.service \
+  /var/lib/summing/data/state.sqlite3 \
+  /var/lib/summing/data/core.sqlite \
+  /var/lib/summing/data/runner-control.sqlite3 \
+  /var/lib/summing-runner/jobs; do
+  if [ -e "${durable}" ] || [ -L "${durable}" ]; then
+    printf 'Refusing to provision over existing SUMMING state: %s\n' "${durable}" >&2
+    exit 2
+  fi
+done
+if systemctl is-active --quiet summing.service 2>/dev/null; then
+  printf '%s\n' 'Refusing to provision while summing.service is active.' >&2
+  exit 2
+fi
+if [ -d /opt/summing ] && find /opt/summing -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+  printf '%s\n' 'Refusing to provision over a non-empty /opt/summing.' >&2
+  exit 2
+fi
+
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+apt-get update
+apt-get upgrade -y
+apt-get install -y \
+  apparmor-profiles \
+  apparmor-utils \
+  bubblewrap \
+  ca-certificates \
+  caddy \
+  curl \
+  file \
+  git \
+  jq \
+  openssh-client \
+  rsync \
+  sqlite3 \
+  sudo \
+  ufw \
+  unattended-upgrades \
+  unzip \
+  xz-utils
+timedatectl set-timezone Etc/UTC
+
+if ! id summing >/dev/null 2>&1; then
+  useradd \
+    --system \
+    --create-home \
+    --home-dir /var/lib/summing \
+    --shell /usr/sbin/nologin \
+    summing
+fi
+
+install -d -o summing -g summing -m 0700 /var/lib/summing/data
+install -d -o summing -g summing -m 0700 /var/lib/summing/data/codex
+install -d -o summing -g summing -m 0700 /var/lib/summing/data/worktrees
+install -d -o root -g summing -m 0750 /etc/summing
+install -d -o summing -g summing -m 0750 /opt/summing
+install -d -o summing -g summing -m 0750 /srv/projects
+
+if ! swapon --show=NAME --noheadings | grep -qx /swapfile; then
+  if [ ! -f /swapfile ]; then
+    fallocate -l 4G /swapfile
+    chmod 0600 /swapfile
+    mkswap /swapfile
+  fi
+  swapon /swapfile
+fi
+if ! grep -q '^/swapfile ' /etc/fstab; then
+  printf '%s\n' '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
+printf '%s\n' 'vm.swappiness=10' > /etc/sysctl.d/60-summing-swap.conf
+sysctl --system >/dev/null
+
+if [ ! -x "${node_dir}/bin/node" ]; then
+  download_dir=$(mktemp -d)
+  trap 'rm -rf "${download_dir}"' EXIT
+  curl -fsSL \
+    "https://nodejs.org/dist/${node_version}/${node_archive}" \
+    -o "${download_dir}/${node_archive}"
+  curl -fsSL \
+    "https://nodejs.org/dist/${node_version}/SHASUMS256.txt" \
+    -o "${download_dir}/SHASUMS256.txt"
+  (
+    cd "${download_dir}"
+    grep " ${node_archive}$" SHASUMS256.txt | sha256sum -c -
+  )
+  install -d -m 0755 "${node_dir}"
+  tar -xJf "${download_dir}/${node_archive}" \
+    -C "${node_dir}" \
+    --strip-components=1
+  rm -rf "${download_dir}"
+  trap - EXIT
+fi
+ln -sfn "${node_dir}/bin/node" /usr/local/bin/node
+ln -sfn "${node_dir}/bin/npm" /usr/local/bin/npm
+ln -sfn "${node_dir}/bin/npx" /usr/local/bin/npx
+ln -sfn "${node_dir}/bin/corepack" /usr/local/bin/corepack
+
+if [ ! -x /var/lib/summing/.local/bin/codex ]; then
+  sudo -u summing \
+    env HOME=/var/lib/summing PATH=/usr/local/bin:/usr/bin:/bin \
+    bash -c \
+    'cd /var/lib/summing && curl -fsSL https://chatgpt.com/codex/install.sh | sh'
+fi
+test -x /var/lib/summing/.local/bin/codex
+ln -sfn /var/lib/summing/.local/bin/codex /usr/local/bin/codex
+
+printf '%s\n' \
+  'APT::Periodic::Update-Package-Lists "1";' \
+  'APT::Periodic::Unattended-Upgrade "1";' \
+  > /etc/apt/apt.conf.d/20auto-upgrades
+systemctl enable --now unattended-upgrades
+
+ufw default deny incoming
+ufw default allow outgoing
+ufw allow "${ssh_port}/tcp"
+ufw allow 80/tcp
+ufw allow 443/tcp
+ufw --force enable
+
+printf '%s\n' \
+  'PermitRootLogin prohibit-password' \
+  'PasswordAuthentication no' \
+  'KbdInteractiveAuthentication no' \
+  > /etc/ssh/sshd_config.d/60-summing-hardening.conf
+sshd -t
+systemctl reload ssh
+
+node_major=$(/usr/local/bin/node -p 'Number(process.versions.node.split(".")[0])')
+if [ "${node_major}" -lt 24 ]; then
+  printf '%s\n' 'Provisioned Node.js is older than 24.' >&2
+  exit 2
+fi
+/usr/local/bin/node --version
+/usr/local/bin/npm --version
+/usr/local/bin/codex --version
+caddy version
+git --version
+install -o root -g root -m 0600 /dev/null "${marker}"
+
+if [ -f /var/run/reboot-required ]; then
+  printf '%s\n' 'SUMMING host provisioning completed; reboot is required.'
+else
+  printf '%s\n' 'SUMMING host provisioning completed.'
+fi

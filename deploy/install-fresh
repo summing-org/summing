@@ -6,11 +6,14 @@ usage() {
 Usage: deploy/install-fresh --target root@HOST --secrets FILE [options]
 
 Streams the current clean Git commit as a verified bundle and runs the
-root-only secure bootstrap on a cloud-init-provisioned Ubuntu 24.04 host.
+root-only secure bootstrap on a provisioned Ubuntu 24.04 host.
 
 Options:
   --origin URL       Future self-update origin (defaults to local origin)
   --source-key FILE  SSH deploy key for that origin
+  --identity FILE    SSH identity used to reach the target host
+  --port PORT        SSH port (default: 22)
+  --provision        Prepare a clean rebuilt Ubuntu host before installation
   --yes              Skip the final target/commit confirmation
 EOF
 }
@@ -19,6 +22,9 @@ target=
 secrets=
 origin=
 source_key=
+identity=
+ssh_port=22
+provision=0
 assume_yes=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -26,6 +32,9 @@ while [ "$#" -gt 0 ]; do
     --secrets) secrets=${2:-}; shift 2 ;;
     --origin) origin=${2:-}; shift 2 ;;
     --source-key) source_key=${2:-}; shift 2 ;;
+    --identity) identity=${2:-}; shift 2 ;;
+    --port) ssh_port=${2:-}; shift 2 ;;
+    --provision) provision=1; shift ;;
     --yes) assume_yes=1; shift ;;
     --help|-h) usage; exit 0 ;;
     *) printf 'Unknown option: %s\n' "$1" >&2; usage >&2; exit 2 ;;
@@ -39,6 +48,23 @@ fi
 case "${target}" in
   *[!A-Za-z0-9@._:-]*|'') printf '%s\n' 'Invalid SSH target.' >&2; exit 2 ;;
 esac
+case "${ssh_port}" in
+  ''|*[!0-9]*) printf '%s\n' 'SSH port must be an integer.' >&2; exit 2 ;;
+esac
+if [ "${ssh_port}" -lt 1 ] || [ "${ssh_port}" -gt 65535 ]; then
+  printf '%s\n' 'SSH port must be between 1 and 65535.' >&2
+  exit 2
+fi
+
+absolute_input_path() {
+  case "$1" in
+    /*) printf '%s\n' "$1" ;;
+    *) printf '%s/%s\n' "$(pwd -P)" "$1" ;;
+  esac
+}
+secrets=$(absolute_input_path "${secrets}")
+if [ -n "${source_key}" ]; then source_key=$(absolute_input_path "${source_key}"); fi
+if [ -n "${identity}" ]; then identity=$(absolute_input_path "${identity}"); fi
 
 repo_root=$(git rev-parse --show-toplevel)
 if [ "$(pwd -P)" != "$(cd "${repo_root}" && pwd -P)" ]; then
@@ -86,6 +112,51 @@ private_mode() {
 }
 private_mode "${secrets}"
 if [ -n "${source_key}" ]; then private_mode "${source_key}"; fi
+if [ -n "${identity}" ]; then private_mode "${identity}"; fi
+
+ssh_args=(
+  -p "${ssh_port}"
+  -o BatchMode=yes
+  -o ConnectTimeout=10
+  -o StrictHostKeyChecking=accept-new
+)
+scp_args=(
+  -P "${ssh_port}"
+  -o BatchMode=yes
+  -o ConnectTimeout=10
+  -o StrictHostKeyChecking=accept-new
+)
+if [ -n "${identity}" ]; then
+  ssh_args+=(-i "${identity}")
+  scp_args+=(-i "${identity}")
+fi
+
+wait_for_ssh() {
+  local attempt
+  for attempt in $(seq 1 90); do
+    if ssh "${ssh_args[@]}" "${target}" true >/dev/null 2>&1; then return 0; fi
+    sleep 2
+  done
+  printf 'SSH did not become ready on %s:%s.\n' "${target}" "${ssh_port}" >&2
+  return 1
+}
+
+reboot_and_wait() {
+  local attempt offline=0
+  if ssh "${ssh_args[@]}" "${target}" systemctl reboot >/dev/null 2>&1; then :; fi
+  for attempt in $(seq 1 30); do
+    if ! ssh "${ssh_args[@]}" "${target}" true >/dev/null 2>&1; then
+      offline=1
+      break
+    fi
+    sleep 1
+  done
+  if [ "${offline}" -ne 1 ]; then
+    printf '%s\n' 'Target did not disconnect for the required reboot.' >&2
+    return 1
+  fi
+  wait_for_ssh
+}
 
 if ! command -v node >/dev/null 2>&1 || [ "$(node -p 'Number(process.versions.node.split(".")[0])')" -lt 24 ]; then
   printf '%s\n' 'The operator machine requires Node.js 24 or newer.' >&2
@@ -112,12 +183,30 @@ git bundle create "${bundle}" HEAD
 git bundle verify "${bundle}" >/dev/null
 
 remote_dir=/run/summing-fresh-${commit}
-ssh "${target}" cloud-init status --wait
-ssh "${target}" install -d -o root -g root -m 0700 "${remote_dir}"
-scp -q "${bundle}" "${repo_root}/deploy/secure-bootstrap" "${target}:${remote_dir}/"
-scp -q "${secrets}" "${target}:${remote_dir}/secrets.json"
-ssh "${target}" chmod 0600 "${remote_dir}/release.bundle" "${remote_dir}/secrets.json"
-ssh "${target}" chmod 0700 "${remote_dir}/secure-bootstrap"
+ssh "${ssh_args[@]}" "${target}" cloud-init status --wait
+if [ "${provision}" -eq 1 ]; then
+  provision_dir=/run/summing-provision-${commit}
+  ssh "${ssh_args[@]}" "${target}" install -d -o root -g root -m 0700 "${provision_dir}"
+  scp -q "${scp_args[@]}" "${repo_root}/deploy/provision-host" \
+    "${target}:${provision_dir}/provision-host"
+  ssh "${ssh_args[@]}" "${target}" chmod 0700 "${provision_dir}/provision-host"
+  ssh "${ssh_args[@]}" "${target}" "${provision_dir}/provision-host" \
+    --ssh-port "${ssh_port}"
+  reboot_required=0
+  if ssh "${ssh_args[@]}" "${target}" test -f /var/run/reboot-required; then
+    reboot_required=1
+  fi
+  ssh "${ssh_args[@]}" "${target}" rm -f -- "${provision_dir}/provision-host"
+  ssh "${ssh_args[@]}" "${target}" rmdir "${provision_dir}"
+  if [ "${reboot_required}" -eq 1 ]; then reboot_and_wait; fi
+fi
+ssh "${ssh_args[@]}" "${target}" install -d -o root -g root -m 0700 "${remote_dir}"
+scp -q "${scp_args[@]}" "${bundle}" "${repo_root}/deploy/secure-bootstrap" \
+  "${target}:${remote_dir}/"
+scp -q "${scp_args[@]}" "${secrets}" "${target}:${remote_dir}/secrets.json"
+ssh "${ssh_args[@]}" "${target}" chmod 0600 \
+  "${remote_dir}/release.bundle" "${remote_dir}/secrets.json"
+ssh "${ssh_args[@]}" "${target}" chmod 0700 "${remote_dir}/secure-bootstrap"
 
 remote_args=(
   "${remote_dir}/secure-bootstrap"
@@ -128,13 +217,13 @@ remote_args=(
   --consume-inputs
 )
 if [ -n "${source_key}" ]; then
-  scp -q "${source_key}" "${target}:${remote_dir}/source-key"
-  ssh "${target}" chmod 0600 "${remote_dir}/source-key"
+  scp -q "${scp_args[@]}" "${source_key}" "${target}:${remote_dir}/source-key"
+  ssh "${ssh_args[@]}" "${target}" chmod 0600 "${remote_dir}/source-key"
   remote_args+=(--source-key "${remote_dir}/source-key")
 fi
 printf -v remote_command '%q ' "${remote_args[@]}"
-ssh "${target}" "${remote_command}"
-ssh "${target}" rm -f -- "${remote_dir}/secure-bootstrap"
-ssh "${target}" rmdir "${remote_dir}"
+ssh "${ssh_args[@]}" "${target}" "${remote_command}"
+ssh "${ssh_args[@]}" "${target}" rm -f -- "${remote_dir}/secure-bootstrap"
+ssh "${ssh_args[@]}" "${target}" rmdir "${remote_dir}"
 
 printf 'Fresh installation completed on %s at %s.\n' "${target}" "${commit}"
