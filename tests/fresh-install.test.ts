@@ -139,6 +139,9 @@ test("provisioning and secure bootstrap assets keep application secrets out of m
   assert.match(installer, /--port/);
   assert.match(installer, /StrictHostKeyChecking=accept-new/);
   assert.match(installer, /deploy\/provision-host/);
+  assert.match(installer, /"\$\{target\}" bash "\$\{provision_dir\}\/provision-host"/);
+  assert.match(installer, /remote_args=\(\s+bash\s+"\$\{remote_dir\}\/secure-bootstrap"/);
+  assert.match(installer, /cleanup_install_inputs/);
   assert.match(installer, /reboot_and_wait/);
   assert.doesNotMatch(installer, /StrictHostKeyChecking=no/);
   assert.match(installer, /git bundle create "\$\{bundle\}" HEAD/);

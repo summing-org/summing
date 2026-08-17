@@ -164,7 +164,30 @@ if ! command -v node >/dev/null 2>&1 || [ "$(node -p 'Number(process.versions.no
 fi
 temporary=$(mktemp -d)
 chmod 0700 "${temporary}"
-trap 'rm -rf "${temporary}"' EXIT
+remote_dir=
+provision_dir=
+cleanup_install_inputs() {
+  local exit_status=$?
+  if [ -n "${provision_dir}" ]; then
+    ssh "${ssh_args[@]}" "${target}" rm -f -- \
+      "${provision_dir}/provision-host" >/dev/null 2>&1 || true
+    ssh "${ssh_args[@]}" "${target}" rmdir \
+      "${provision_dir}" >/dev/null 2>&1 || true
+  fi
+  if [ -n "${remote_dir}" ]; then
+    ssh "${ssh_args[@]}" "${target}" rm -f -- \
+      "${remote_dir}/release.bundle" \
+      "${remote_dir}/secrets.json" \
+      "${remote_dir}/source-key" \
+      "${remote_dir}/secure-bootstrap" >/dev/null 2>&1 || true
+    ssh "${ssh_args[@]}" "${target}" rmdir \
+      "${remote_dir}" >/dev/null 2>&1 || true
+  fi
+  rm -rf "${temporary}"
+  trap - EXIT
+  exit "${exit_status}"
+}
+trap cleanup_install_inputs EXIT
 node "${repo_root}/scripts/render-fresh-install.mjs" \
   --input "${secrets}" \
   --env-output "${temporary}/validated.env" \
@@ -190,7 +213,7 @@ if [ "${provision}" -eq 1 ]; then
   scp -q "${scp_args[@]}" "${repo_root}/deploy/provision-host" \
     "${target}:${provision_dir}/provision-host"
   ssh "${ssh_args[@]}" "${target}" chmod 0700 "${provision_dir}/provision-host"
-  ssh "${ssh_args[@]}" "${target}" "${provision_dir}/provision-host" \
+  ssh "${ssh_args[@]}" "${target}" bash "${provision_dir}/provision-host" \
     --ssh-port "${ssh_port}"
   reboot_required=0
   if ssh "${ssh_args[@]}" "${target}" test -f /var/run/reboot-required; then
@@ -209,6 +232,7 @@ ssh "${ssh_args[@]}" "${target}" chmod 0600 \
 ssh "${ssh_args[@]}" "${target}" chmod 0700 "${remote_dir}/secure-bootstrap"
 
 remote_args=(
+  bash
   "${remote_dir}/secure-bootstrap"
   --bundle "${remote_dir}/release.bundle"
   --secrets "${remote_dir}/secrets.json"
