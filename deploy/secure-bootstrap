@@ -115,7 +115,6 @@ if ! git -C "${bundle_verify_dir}" bundle verify "${bundle}" >/dev/null; then
   printf '%s\n' 'Release bundle verification failed.' >&2
   exit 2
 fi
-remove_bundle_verify_dir
 if ! jq -e 'type == "object"' "${secrets}" >/dev/null; then
   printf '%s\n' 'Secrets manifest must contain one JSON object.' >&2
   exit 2
@@ -162,8 +161,12 @@ if [ ! -d "${repo_dir}/.git" ]; then
     printf '%s\n' '/opt/summing is not an empty Git checkout.' >&2
     exit 2
   fi
-  sudo -u summing git clone --no-local "${bundle}" "${repo_dir}"
+  staged_bundle=${bundle_verify_dir}/release.bundle
+  install -o summing -g summing -m 0600 "${bundle}" "${staged_bundle}"
+  chown summing:summing "${bundle_verify_dir}"
+  sudo -u summing git clone --no-local "${staged_bundle}" "${repo_dir}"
 fi
+remove_bundle_verify_dir
 
 release_commit=$(sudo -u summing git -C "${repo_dir}" rev-parse HEAD)
 if ! printf '%s' "${release_commit}" | grep -Eq '^[0-9a-f]{40}$'; then

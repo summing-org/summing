@@ -127,6 +127,8 @@ test("provisioning and secure bootstrap assets keep application secrets out of m
   assert.match(bootstrap, /Trusted cloud-init provisioning marker is missing or unsafe/);
   assert.match(bootstrap, /git init --bare "\$\{bundle_verify_dir\}"/);
   assert.match(bootstrap, /git -C "\$\{bundle_verify_dir\}" bundle verify/);
+  assert.match(bootstrap, /install -o summing -g summing -m 0600 "\$\{bundle\}" "\$\{staged_bundle\}"/);
+  assert.match(bootstrap, /sudo -u summing git clone --no-local "\$\{staged_bundle\}"/);
   assert.match(bootstrap, /SUMMING_DEPLOY_EXPECTED_REMOTE=\$\{origin\}/);
   assert.match(bootstrap, /consume_install_inputs/);
   assert.match(bootstrap, /trap consume_install_inputs EXIT/);
