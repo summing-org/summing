@@ -52,8 +52,18 @@ test("node recovery exports, verifies and stages portable node state", async () 
   writeFileSync(join(dataDir, "projects", "demo", "memory.md"), "project memory\n");
   const configPath = join(root, "config.toml");
   const environmentPath = join(root, "summing.env");
+  const mtprotoMasterKeyPath = join(root, "mtproto.key");
+  const knowledgeTransferKeyPath = join(root, "kb-transfer.key");
+  const tdlibRoot = join(root, "tdlib");
+  const repositoryCredentialsRoot = join(root, "repository-credentials");
+  mkdirSync(tdlibRoot);
+  mkdirSync(repositoryCredentialsRoot);
   writeFileSync(configPath, "[projects.demo]\n", { mode: 0o600 });
   writeFileSync(environmentPath, "TELEGRAM_TOKEN=test-only\n", { mode: 0o600 });
+  writeFileSync(mtprotoMasterKeyPath, `${"a".repeat(64)}\n`, { mode: 0o600 });
+  writeFileSync(knowledgeTransferKeyPath, `${"b".repeat(64)}\n`, { mode: 0o600 });
+  writeFileSync(join(tdlibRoot, "session.bin"), "test-session\n", { mode: 0o600 });
+  writeFileSync(join(repositoryCredentialsRoot, "deploy.key"), "test-key\n", { mode: 0o600 });
 
   const workspace: WorkspaceConfig = { id: "repo", path: repository };
   const config = new RuntimeConfig(
@@ -104,7 +114,14 @@ test("node recovery exports, verifies and stages portable node state", async () 
         updatedAt: "2026-08-18T00:00:00.000Z",
       };
     },
-    { configPath, environmentPath },
+    {
+      configPath,
+      environmentPath,
+      mtprotoMasterKeyPath,
+      knowledgeTransferKeyPath,
+      tdlibRoot,
+      repositoryCredentialsRoot,
+    },
   );
   try {
     const exported = await manager.export({ includeSecrets: false });
@@ -250,6 +267,15 @@ test("node recovery exports, verifies and stages portable node state", async () 
         "summing",
         "summing.env",
       ), "utf8"), "TELEGRAM_TOKEN=test-only\n");
+      assert.equal(readFileSync(join(
+        staged.stagePath,
+        "components",
+        "secrets",
+        "payload",
+        "etc",
+        "summing",
+        "mtproto.key",
+      ), "utf8"), `${"a".repeat(64)}\n`);
       const objectFiles = readdirSync(join(root, "objects"), { recursive: true, withFileTypes: true })
         .filter((entry) => entry.isFile() && entry.name.endsWith(".enc"));
       assert.equal(objectFiles.length > 0, true);

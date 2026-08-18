@@ -88,6 +88,10 @@ export interface NodeRecoveryProjectEnvironment {
 export interface NodeRecoverySecretSources {
   configPath: string;
   environmentPath: string;
+  mtprotoMasterKeyPath: string;
+  knowledgeTransferKeyPath: string;
+  tdlibRoot: string;
+  repositoryCredentialsRoot: string;
 }
 
 export interface NodeRecoveryWorkspaceRecord {
@@ -782,6 +786,10 @@ export class NodeRecoveryManager {
     readonly secretSources: NodeRecoverySecretSources = {
       configPath: resolve(process.env.SUMMING_CONFIG || join(config.dataDir, "config.toml")),
       environmentPath: resolve(process.env.SUMMING_ENV_FILE || "/etc/summing/summing.env"),
+      mtprotoMasterKeyPath: resolve(config.knowledgeSync.mtprotoMasterKeyPath),
+      knowledgeTransferKeyPath: resolve(config.knowledgeSync.knowledgeTransferKeyPath),
+      tdlibRoot: resolve(dirname(config.knowledgeSync.spoolRoot), "tdlib"),
+      repositoryCredentialsRoot: resolve(config.dataDir, "repository-credentials"),
     },
   ) {
     const idPath = join(config.dataDir, "node-id");
@@ -991,20 +999,23 @@ export class NodeRecoveryManager {
         }
         const configPath = resolve(this.secretSources.configPath);
         const environmentPath = resolve(this.secretSources.environmentPath);
-        const tdlibRoot = resolve(dirname(this.config.knowledgeSync.spoolRoot), "tdlib");
+        const mtprotoMasterKeyPath = resolve(this.secretSources.mtprotoMasterKeyPath);
+        const knowledgeTransferKeyPath = resolve(this.secretSources.knowledgeTransferKeyPath);
+        const tdlibRoot = resolve(this.secretSources.tdlibRoot);
+        const repositoryCredentialsRoot = resolve(this.secretSources.repositoryCredentialsRoot);
         await addComponent("secrets", "secrets", [
           { sourcePath: secretRoot, archivePath: "payload/data/connector-core", optional: true },
           { sourcePath: configPath, archivePath: "payload/data/config.toml", optional: true },
           { sourcePath: environmentPath, archivePath: "payload/etc/summing/summing.env", optional: true },
-          { sourcePath: this.config.knowledgeSync.mtprotoMasterKeyPath, archivePath: "payload/etc/summing/mtproto.key", optional: true },
-          { sourcePath: this.config.knowledgeSync.knowledgeTransferKeyPath, archivePath: "payload/etc/summing/kb-transfer.key", optional: true },
+          { sourcePath: mtprotoMasterKeyPath, archivePath: "payload/etc/summing/mtproto.key", optional: true },
+          { sourcePath: knowledgeTransferKeyPath, archivePath: "payload/etc/summing/kb-transfer.key", optional: true },
           { sourcePath: tdlibRoot, archivePath: "payload/data/tdlib", optional: true },
-          { sourcePath: join(this.config.dataDir, "repository-credentials"), archivePath: "payload/data/repository-credentials", optional: true },
+          { sourcePath: repositoryCredentialsRoot, archivePath: "payload/data/repository-credentials", optional: true },
         ], false);
         mappings.push(
           { componentId: "secrets", archivePath: "payload/data/config.toml", destination: configPath },
           { componentId: "secrets", archivePath: "payload/etc/summing", destination: "/etc/summing" },
-          { componentId: "secrets", archivePath: "payload/data/repository-credentials", destination: join(this.config.dataDir, "repository-credentials") },
+          { componentId: "secrets", archivePath: "payload/data/repository-credentials", destination: repositoryCredentialsRoot },
           { componentId: "secrets", archivePath: "payload/data/tdlib", destination: tdlibRoot },
           { componentId: "secrets", archivePath: "payload/data/connector-core/core.sqlite", destination: join(this.config.dataDir, "core.sqlite") },
         );
