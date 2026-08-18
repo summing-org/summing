@@ -606,6 +606,12 @@ Worker никогда не делает `pull`, `reset` или checkout рабо
 активных Codex runs, атомарно переключает `/opt/summing-current` и проверяет
 SUMMING и runner. При неуспешном health check symlink и сервисы автоматически
 возвращаются на предыдущий release. Non-fast-forward обновления отклоняются.
+После успешного health check worker атомарно синхронизирует из release основные
+systemd units, выполняет `daemon-reload` и перезапускает deployment path/timer.
+Перед заменой сохраняются временные root-only копии; ошибка reload/restart
+восстанавливает прежние units. Release-hook обеспечивает тот же переход при
+первом обновлении со старого worker, поэтому новый интервал timer применяется
+без ручного SSH.
 После успешной установки runtime отправляет администратору Telegram-событие с новой
 версией и commit. Ошибка typecheck, сборки или тестов создаёт отдельное fail-событие
 с фазой, количеством и именами упавших тестов; хвост build-журнала и секреты в

@@ -12,6 +12,8 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
   const report = asset("deploy/summing-deploy-report");
   const cutoverPath = join(root, "deploy/project-environment-cutover");
   const cutover = asset("deploy/project-environment-cutover");
+  const systemdSyncPath = join(root, "deploy/sync-systemd-units");
+  const systemdSync = asset("deploy/sync-systemd-units");
   const timer = asset("deploy/summing-deploy.timer");
   const path = asset("deploy/summing-deploy.path");
   const service = asset("deploy/summing-deploy.service");
@@ -24,7 +26,16 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
   assert.equal(syntax.status, 0, syntax.stderr);
   const cutoverSyntax = spawnSync("bash", ["-n", cutoverPath], { encoding: "utf8" });
   assert.equal(cutoverSyntax.status, 0, cutoverSyntax.stderr);
+  const systemdSyncSyntax = spawnSync("bash", ["-n", systemdSyncPath], {
+    encoding: "utf8",
+  });
+  assert.equal(systemdSyncSyntax.status, 0, systemdSyncSyntax.stderr);
   assert.notEqual(statSync(cutoverPath).mode & 0o111, 0, "cutover hook must be executable");
+  assert.notEqual(
+    statSync(systemdSyncPath).mode & 0o111,
+    0,
+    "systemd sync hook must be executable",
+  );
   assert.match(script, /git_as_summing -C "\$\{repo_dir\}" fetch --prune/);
   assert.match(script, /SUMMING_DEPLOY_EXPECTED_REMOTE/);
   assert.match(script, /runuser -u summing-builder -- env -i/);
@@ -59,17 +70,24 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
   assert.match(script, /mv -f -- "\$\{candidate\}" "\$\{target\}"/);
   assert.match(script, /sync_project_runner_configs "\$\{previous_target\}"/);
   assert.match(script, /sync_project_runner_configs "\$\{release_dir\}"/);
+  assert.match(script, /sync_systemd_units\(\)/);
+  assert.match(script, /sync_systemd_units "\$\{previous_target\}"/);
+  assert.match(script, /sync_systemd_units "\$\{release_dir\}"/);
   const unchangedRelease = script.indexOf('if [ "${previous_sha}" = "${target_sha}" ]; then');
   const unchangedSync = script.indexOf(
     'sync_project_runner_configs "${previous_target}"',
     unchangedRelease,
+  );
+  const unchangedUnitSync = script.indexOf(
+    'sync_systemd_units "${previous_target}"',
+    unchangedSync,
   );
   const unchangedCutover = script.indexOf(
     'finalize_project_environment_cutover "${previous_target}"',
     unchangedRelease,
   );
   assert.ok(unchangedRelease >= 0 && unchangedSync > unchangedRelease);
-  assert.ok(unchangedCutover > unchangedSync, "same-SHA checks must repair configs before cutover");
+  assert.ok(unchangedUnitSync > unchangedSync && unchangedCutover > unchangedUnitSync);
   const releaseSwitch = script.indexOf('switch_current "${release_dir}"');
   const releaseSync = script.indexOf(
     'sync_project_runner_configs "${release_dir}"',
@@ -78,6 +96,14 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
   const releaseRestart = script.indexOf("restart_services", releaseSync);
   assert.ok(releaseSwitch >= 0 && releaseSync > releaseSwitch);
   assert.ok(releaseRestart > releaseSync, "new configs must be installed before runner restart");
+  const releaseHealth = script.indexOf("wait_for_health", releaseRestart);
+  const releaseUnitSync = script.indexOf(
+    'sync_systemd_units "${release_dir}"',
+    releaseHealth,
+  );
+  const releaseCommit = script.indexOf("switched=0", releaseUnitSync);
+  assert.ok(releaseHealth > releaseRestart && releaseUnitSync > releaseHealth);
+  assert.ok(releaseCommit > releaseUnitSync, "unit sync must finish before release commit");
   assert.match(script, /finalize_project_environment_cutover "\$\{previous_target\}"/);
   assert.match(script, /finalize_project_environment_cutover "\$\{release_dir\}"/);
   assert.match(script, /cutover_status.*75/);
@@ -87,6 +113,20 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
   assert.doesNotMatch(service, /summing\.env/);
   assert.match(service, /ExecStart=\/opt\/summing-current\/deploy\/summing-deploy/);
   assert.match(timer, /OnUnitActiveSec=30min/);
+  assert.match(systemdSync, /units=\([\s\S]*summing\.service[\s\S]*summing-deploy\.timer/);
+  assert.match(systemdSync, /backup_dir=\$\(mktemp -d/);
+  assert.match(systemdSync, /trap rollback ERR/);
+  assert.match(systemdSync, /mv -f -- "\$\{temporary\}" "\$\{target_path\}"/);
+  assert.match(systemdSync, /"\$\{systemctl_command\}" daemon-reload/);
+  assert.match(systemdSync, /"\$\{systemctl_command\}" restart summing-deploy\.path/);
+  assert.match(systemdSync, /"\$\{systemctl_command\}" restart summing-deploy\.timer/);
+  assert.doesNotMatch(systemdSync, /restart summing-deploy\.service/);
+  assert.match(cutover, /SUMMING_SYSTEMD_RELEASE="\$\{release_root\}" "\$\{systemd_sync\}"/);
+  assert.ok(
+    cutover.indexOf('SUMMING_SYSTEMD_RELEASE="${release_root}" "${systemd_sync}"') <
+      cutover.indexOf('if [ ! -f "${imported_marker}" ]'),
+    "the compatibility sync must run even when no environment migration exists",
+  );
   assert.match(path, /PathChanged=\/var\/lib\/summing\/deploy\/request\.json/);
   assert.match(activation, /systemctl start summing-deploy\.path summing-deploy\.timer/);
   assert.match(activation, /kb_transfer_key=\/etc\/summing\/kb-transfer\.key/);

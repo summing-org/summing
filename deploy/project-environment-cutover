@@ -27,6 +27,14 @@ if [[ ! "${project_id}" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ ]] || \
   exit 2
 fi
 
+# Compatibility bridge: a deployment that was started by an older worker has
+# already switched /opt/summing-current before invoking this release hook.
+# This lets that first deployment install the new self-maintaining units.
+systemd_sync=${release_root}/deploy/sync-systemd-units
+if [ -x "${systemd_sync}" ]; then
+  SUMMING_SYSTEMD_RELEASE="${release_root}" "${systemd_sync}"
+fi
+
 private_regular_file() {
   local path=$1
   local mode=

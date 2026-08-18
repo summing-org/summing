@@ -1,6 +1,6 @@
 # SUMMING 9.14: архитектура, эксплуатация и разработка
 
-> Версия: **9.14.0**
+> Версия: **9.14.1**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
 > Последняя сверка с кодом: **18 августа 2026 года**.
 
@@ -1385,6 +1385,16 @@ Telegram Mini App signature и точный `TELEGRAM_OWNER_ID`; project owner �
 `403`. Локальный SSH-tunnel bearer token считается
 администраторским доступом, как и для остальных Viewer diagnostics.
 
+После health нового release root-worker запускает `deploy/sync-systemd-units`.
+Helper сверяет и атомарно заменяет только четыре allowlisted unit-файла:
+`summing.service`, `summing-deploy.service`, `summing-deploy.path` и
+`summing-deploy.timer`; затем выполняет `daemon-reload` и перезапускает активные
+или enabled path/timer. До commit он держит root-only backup в `/run` и при любой
+ошибке восстанавливает прежние units и расписание. Same-SHA deployment также
+чинит рассинхронизацию. Поскольку первый self-update запускается кодом прежнего
+worker, `project-environment-cutover` содержит идемпотентный compatibility-вызов
+helper уже из нового release; так изменение timer применяется в той же попытке.
+
 Порядок deployment:
 
 1. под process-wide `flock` получить закреплённый `origin/master` от имени
@@ -1398,7 +1408,8 @@ Telegram Mini App signature и точный `TELEGRAM_OWNER_ID`; project owner �
    основной сервис;
 6. проверить оба loopback health endpoints; при ошибке вернуть прежний symlink
    и повторно запустить старый release;
-7. сохранить JSON-состояние для Mini App и оставить последние пять releases.
+7. атомарно синхронизировать systemd units и перезапустить deployment path/timer;
+8. сохранить JSON-состояние для Mini App и оставить последние пять releases.
 
 Каждая значимая завершённая попытка (`succeeded`, `failed` или migration
 `waiting`) попадает в ограниченную историю из 20 записей. Для ошибки worker
@@ -1541,7 +1552,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "9.14.0",
+  "version": "9.14.1",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",

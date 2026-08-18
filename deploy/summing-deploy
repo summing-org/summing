@@ -403,6 +403,13 @@ finalize_project_environment_cutover() {
   SUMMING_ENV_MIGRATION_RELEASE="${release}" "${hook}"
 }
 
+sync_systemd_units() {
+  local release=$1
+  local hook=${release}/deploy/sync-systemd-units
+  if [ ! -x "${hook}" ]; then return 0; fi
+  SUMMING_SYSTEMD_RELEASE="${release}" "${hook}"
+}
+
 restart_services() {
   if systemctl is-enabled --quiet summing-runner.service 2>/dev/null; then
     systemctl restart summing-runner.service
@@ -609,6 +616,9 @@ if [ "${previous_sha}" = "${target_sha}" ]; then
     systemctl restart summing-runner.service
     wait_for_health
   fi
+  phase=systemd-sync
+  failure_kind=runtime
+  sync_systemd_units "${previous_target}"
   phase=cutover
   failure_kind=cutover
   cutover_status=0
@@ -711,6 +721,9 @@ phase=health
 failure_kind=health
 write_state deploying "Проверяем health ${target_sha:0:12}" "${previous_sha}" "${target_sha}"
 wait_for_health
+phase=systemd-sync
+failure_kind=runtime
+sync_systemd_units "${release_dir}"
 switched=0
 installed=1
 

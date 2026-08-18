@@ -1,4 +1,4 @@
-export const SUMMING_VERSION = "9.14.0";
+export const SUMMING_VERSION = "9.14.1";
 export const SUMMING_VERSION_LABEL = `ς ${SUMMING_VERSION}`;
 
 const TELEGRAM_SHORT_DESCRIPTION_LIMIT = 120;

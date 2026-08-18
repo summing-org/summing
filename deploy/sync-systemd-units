@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+umask 0027
+
+if [ "${EUID}" -ne 0 ]; then
+  printf '%s\n' 'SUMMING systemd unit sync must run as root.' >&2
+  exit 2
+fi
+
+release_root=${SUMMING_SYSTEMD_RELEASE:-$(readlink -f /opt/summing-current)}
+unit_root=${SUMMING_SYSTEMD_UNIT_ROOT:-/etc/systemd/system}
+backup_parent=${SUMMING_SYSTEMD_BACKUP_PARENT:-/run}
+systemctl_command=${SUMMING_SYSTEMCTL:-systemctl}
+units=(
+  summing.service
+  summing-deploy.service
+  summing-deploy.path
+  summing-deploy.timer
+)
+backup_dir=
+temporary=
+changed=0
+committed=0
+path_should_run=0
+timer_should_run=0
+
+if [ -z "${release_root}" ] || [ ! -d "${release_root}/deploy" ] || \
+  [ -L "${release_root}/deploy" ]; then
+  printf '%s\n' 'SUMMING release deploy directory is missing or unsafe.' >&2
+  exit 2
+fi
+if [ ! -d "${unit_root}" ] || [ -L "${unit_root}" ]; then
+  printf '%s\n' 'systemd unit directory is missing or unsafe.' >&2
+  exit 2
+fi
+if [ ! -d "${backup_parent}" ] || [ -L "${backup_parent}" ]; then
+  printf '%s\n' 'systemd unit backup directory is missing or unsafe.' >&2
+  exit 2
+fi
+if [ ! -x "${systemctl_command}" ] && ! command -v "${systemctl_command}" >/dev/null 2>&1; then
+  printf '%s\n' 'systemctl command is unavailable.' >&2
+  exit 2
+fi
+
+for unit in "${units[@]}"; do
+  source_path=${release_root}/deploy/${unit}
+  target_path=${unit_root}/${unit}
+  if [ ! -f "${source_path}" ] || [ -L "${source_path}" ]; then
+    printf 'Release systemd unit is missing or unsafe: %s\n' "${source_path}" >&2
+    exit 2
+  fi
+  if [ -L "${target_path}" ] || { [ -e "${target_path}" ] && [ ! -f "${target_path}" ]; }; then
+    printf 'Installed systemd unit is unsafe: %s\n' "${target_path}" >&2
+    exit 2
+  fi
+done
+
+if "${systemctl_command}" is-active --quiet summing-deploy.path 2>/dev/null || \
+  "${systemctl_command}" is-enabled --quiet summing-deploy.path 2>/dev/null; then
+  path_should_run=1
+fi
+if "${systemctl_command}" is-active --quiet summing-deploy.timer 2>/dev/null || \
+  "${systemctl_command}" is-enabled --quiet summing-deploy.timer 2>/dev/null; then
+  timer_should_run=1
+fi
+
+cleanup_backup() {
+  local -a backup_files=()
+  if [ -n "${temporary}" ]; then
+    rm -f -- "${temporary}"
+    temporary=
+  fi
+  if [ -z "${backup_dir}" ] || [ ! -d "${backup_dir}" ]; then return 0; fi
+  shopt -s nullglob
+  backup_files=("${backup_dir}"/*)
+  shopt -u nullglob
+  if [ "${#backup_files[@]}" -gt 0 ]; then rm -f -- "${backup_files[@]}"; fi
+  rmdir "${backup_dir}"
+  backup_dir=
+}
+
+rollback() {
+  local status=$?
+  local unit target_path
+  trap - ERR
+  set +e
+  if [ "${committed}" = 0 ] && [ -n "${backup_dir}" ] && [ -d "${backup_dir}" ]; then
+    for unit in "${units[@]}"; do
+      target_path=${unit_root}/${unit}
+      if [ -f "${backup_dir}/${unit}" ]; then
+        install -o root -g root -m 0644 "${backup_dir}/${unit}" "${target_path}"
+      elif [ -f "${backup_dir}/${unit}.missing" ]; then
+        rm -f -- "${target_path}"
+      fi
+    done
+    "${systemctl_command}" daemon-reload >/dev/null 2>&1
+    if [ "${path_should_run}" = 1 ]; then
+      "${systemctl_command}" restart summing-deploy.path >/dev/null 2>&1
+    fi
+    if [ "${timer_should_run}" = 1 ]; then
+      "${systemctl_command}" restart summing-deploy.timer >/dev/null 2>&1
+    fi
+  fi
+  cleanup_backup
+  exit "${status}"
+}
+trap rollback ERR
+
+backup_dir=$(mktemp -d "${backup_parent}/summing-systemd-units.XXXXXX")
+chmod 0700 "${backup_dir}"
+for unit in "${units[@]}"; do
+  source_path=${release_root}/deploy/${unit}
+  target_path=${unit_root}/${unit}
+  if [ -f "${target_path}" ] && cmp -s "${source_path}" "${target_path}"; then
+    continue
+  fi
+  if [ -f "${target_path}" ]; then
+    cp -p -- "${target_path}" "${backup_dir}/${unit}"
+  else
+    : > "${backup_dir}/${unit}.missing"
+  fi
+  temporary=$(mktemp "${unit_root}/.${unit}.XXXXXX")
+  install -o root -g root -m 0644 "${source_path}" "${temporary}"
+  mv -f -- "${temporary}" "${target_path}"
+  temporary=
+  changed=1
+done
+
+if [ "${changed}" = 1 ]; then
+  "${systemctl_command}" daemon-reload
+  if [ "${path_should_run}" = 1 ]; then
+    "${systemctl_command}" restart summing-deploy.path
+  fi
+  if [ "${timer_should_run}" = 1 ]; then
+    "${systemctl_command}" restart summing-deploy.timer
+  fi
+fi
+committed=1
+cleanup_backup
+
+if [ "${changed}" = 1 ]; then
+  printf '%s\n' 'SUMMING systemd units synchronized.'
+fi
