@@ -66,7 +66,11 @@ test("streaming updates and the final edit both use Telegram HTML", async () => 
   api.editMessage = async (_chatId, _messageId, text, options) => {
     edited.push({ text, parseMode: options?.parseMode });
   };
-  const stream = new TelegramStream(api, -10042, 17, 0, 1_000);
+  const stream = new TelegramStream(api, -10042, 17, 0, 1_000, {
+    firstMessageDelayMilliseconds: 0,
+    firstMessageMaxWaitMilliseconds: 0,
+    minimumEditIntervalMilliseconds: 0,
+  });
   try {
     stream.start(9);
     stream.append("**Готов");
@@ -80,6 +84,108 @@ test("streaming updates and the final edit both use Telegram HTML", async () => 
       text: "<b>Готово</b>",
       parseMode: "HTML",
     });
+  } finally {
+    stream.stopTyping();
+    await api.close();
+  }
+});
+
+test("the first stream message waits for a useful fragment but final flush stays immediate", async () => {
+  const api = new TelegramAPI("token");
+  const sent: string[] = [];
+  api.sendChatAction = async () => undefined;
+  api.sendMessage = async (_chatId, text) => {
+    sent.push(text);
+    return 101;
+  };
+  const stream = new TelegramStream(api, -10042, 17, 0, 1_000, {
+    firstMessageDelayMilliseconds: 20,
+    firstMessageMaxWaitMilliseconds: 50,
+    firstMessageMinCharacters: 24,
+    minimumEditIntervalMilliseconds: 40,
+  });
+  try {
+    stream.append("Первое слово ");
+    await wait(10);
+    assert.deepEqual(sent, []);
+    await wait(20);
+    assert.deepEqual(sent, ["Первое слово"]);
+
+    const shortApi = new TelegramAPI("token");
+    const shortSent: string[] = [];
+    shortApi.sendChatAction = async () => undefined;
+    shortApi.sendMessage = async (_chatId, text) => {
+      shortSent.push(text);
+      return 102;
+    };
+    const shortStream = new TelegramStream(shortApi, -10042, 17, 0, 1_000, {
+      firstMessageDelayMilliseconds: 20,
+      firstMessageMaxWaitMilliseconds: 50,
+      firstMessageMinCharacters: 24,
+    });
+    try {
+      shortStream.append("Да");
+      await wait(30);
+      assert.deepEqual(shortSent, []);
+      await wait(30);
+      assert.deepEqual(shortSent, ["Да"]);
+    } finally {
+      shortStream.stopTyping();
+      await shortApi.close();
+    }
+
+    const finalApi = new TelegramAPI("token");
+    const finalSent: string[] = [];
+    finalApi.sendChatAction = async () => undefined;
+    finalApi.sendMessage = async (_chatId, text) => {
+      finalSent.push(text);
+      return 103;
+    };
+    const finalStream = new TelegramStream(finalApi, -10042, 17, 0, 1_000, {
+      firstMessageDelayMilliseconds: 1_000,
+      firstMessageMaxWaitMilliseconds: 2_000,
+    });
+    try {
+      finalStream.append("Ок");
+      await finalStream.flush();
+      assert.deepEqual(finalSent, ["Ок"]);
+    } finally {
+      finalStream.stopTyping();
+      await finalApi.close();
+    }
+  } finally {
+    stream.stopTyping();
+    await api.close();
+  }
+});
+
+test("stream edits respect the configured five-second production floor", async () => {
+  const api = new TelegramAPI("token");
+  const sent: string[] = [];
+  const edited: string[] = [];
+  api.sendChatAction = async () => undefined;
+  api.sendMessage = async (_chatId, text) => {
+    sent.push(text);
+    return 101;
+  };
+  api.editMessage = async (_chatId, _messageId, text) => {
+    edited.push(text);
+  };
+  const stream = new TelegramStream(api, -10042, 17, 0, 1_000, {
+    firstMessageDelayMilliseconds: 0,
+    firstMessageMaxWaitMilliseconds: 0,
+    minimumEditIntervalMilliseconds: 40,
+  });
+  try {
+    stream.append("Первый фрагмент");
+    await wait(10);
+    assert.deepEqual(sent, ["Первый фрагмент"]);
+
+    stream.append(" продолжается");
+    await wait(20);
+    assert.deepEqual(edited, []);
+    await wait(30);
+    assert.deepEqual(edited, ["Первый фрагмент продолжается"]);
   } finally {
     stream.stopTyping();
     await api.close();

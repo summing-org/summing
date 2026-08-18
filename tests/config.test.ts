@@ -70,6 +70,7 @@ test("loads the explicit project model", () => {
     });
     assert.equal(config.telegramOwnerId, 42);
     assert.equal(config.maxParallelConversations, 3);
+    assert.equal(config.streamIntervalSec, 5);
     assert.equal(config.participantBatchSeconds, 20);
     assert.equal(config.participantMessagesPerWindow, 8);
     assert.equal(config.participantRateLimitWindowSeconds, 90);

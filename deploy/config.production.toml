@@ -4,7 +4,7 @@ model = ""
 effort = "medium"
 # A safe starting point for a 4 GiB VPS. Increase on a larger server.
 max_parallel_conversations = 2
-stream_interval_sec = 1.0
+stream_interval_sec = 5.0
 participant_rate_limit_messages = 12
 participant_rate_limit_window_sec = 60
 network_access = true

@@ -3,7 +3,7 @@
 model = ""
 effort = "medium"
 max_parallel_conversations = 4
-stream_interval_sec = 1.0
+stream_interval_sec = 5.0
 # Per participant and group. This protects explicitly addressed participant turns;
 # background evidence is admitted before this limit and uses the Team Space loop.
 participant_rate_limit_messages = 12

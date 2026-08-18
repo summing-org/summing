@@ -1,6 +1,6 @@
 # SUMMING 9.15: архитектура, эксплуатация и разработка
 
-> Версия: **9.15.0**
+> Версия: **9.15.1**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
 > Последняя сверка с кодом: **18 августа 2026 года**.
 
@@ -1135,7 +1135,7 @@ Telegram-проекты находятся в SQLite и не записываю�
 | `agent.model` | Явная Codex model; пусто = default. | пусто |
 | `agent.effort` | Reasoning effort. | `medium` |
 | `agent.max_parallel_conversations` | Общий предел параллельных topics. | 4 |
-| `agent.stream_interval_sec` | Частота edit Telegram. | 1.0 |
+| `agent.stream_interval_sec` | Минимальный интервал между edit Telegram. | 5.0 |
 | `agent.participant_rate_limit_messages` | Явных direct Q&A одного участника на окно. | 12 |
 | `agent.participant_rate_limit_window_sec` | Длина rate-limit окна. | 60 |
 | `agent.network_access` | Сеть внутри Codex sandbox. | true |
@@ -1170,8 +1170,9 @@ Project/Workspace id имеют длину от 1 до 64 символов, на
 `[a-z0-9]`, а дальше допускают `[a-z0-9._-]`. Должен существовать хотя бы один
 Project и один Workspace в нём. Пути проверяются на абсолютность при старте, но
 существование каталога проверяется только при подготовке конкретного Run.
-Допустимые диапазоны: parallel conversations — 1–32, stream interval — 0.5–10
-секунд, participant batch — 5–120 секунд, participant messages — 1–100,
+Допустимые диапазоны: parallel conversations — 1–32, stream interval — 0.5–60
+секунд (значения ниже 5 принимаются для совместимости и нормализуются до 5),
+participant batch — 5–120 секунд, participant messages — 1–100,
 rate-limit window — 10–3600 секунд, Codex usage refresh — 60–86400 секунд,
 health port — 1–65535. `codex_usage.timezone` проверяется через `Intl` при старте.
 
@@ -1573,7 +1574,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "9.15.0",
+  "version": "9.15.1",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",

@@ -221,7 +221,7 @@ function render(input) {
 model = ""
 effort = "medium"
 max_parallel_conversations = ${maximumParallel}
-stream_interval_sec = 1.0
+stream_interval_sec = 5.0
 participant_rate_limit_messages = 12
 participant_rate_limit_window_sec = 60
 network_access = true

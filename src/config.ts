@@ -358,7 +358,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig 
       32,
       true,
     ),
-    boundedNumber(agent.stream_interval_sec ?? 1, "agent.stream_interval_sec", 0.5, 10, false),
+    Math.max(
+      5,
+      boundedNumber(agent.stream_interval_sec ?? 5, "agent.stream_interval_sec", 0.5, 60, false),
+    ),
     String(agent.model || "").trim(),
     String(agent.effort || "medium").trim(),
     Boolean(agent.network_access ?? true),

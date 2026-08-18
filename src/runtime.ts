@@ -178,6 +178,20 @@ const TEAM_UNDERSTANDING_INSTRUCTIONS = [
   "Return only the structured object required by the output schema.",
 ].join("\n");
 
+export interface TelegramStreamTiming {
+  firstMessageDelayMilliseconds: number;
+  firstMessageMaxWaitMilliseconds: number;
+  firstMessageMinCharacters: number;
+  minimumEditIntervalMilliseconds: number;
+}
+
+const DEFAULT_TELEGRAM_STREAM_TIMING: TelegramStreamTiming = {
+  firstMessageDelayMilliseconds: 900,
+  firstMessageMaxWaitMilliseconds: 1_800,
+  firstMessageMinCharacters: 24,
+  minimumEditIntervalMilliseconds: 5_000,
+};
+
 export class TelegramStream {
   readonly messageIds: number[] = [];
   private readonly rendered: string[] = [];
@@ -191,6 +205,8 @@ export class TelegramStream {
   private audioTranscript: AudioTranscript | null = null;
   private workLog: { title: string; text: string } | null = null;
   private startedAt: number | null = null;
+  private firstBufferedAt: number | null = null;
+  private readonly timing: TelegramStreamTiming;
 
   constructor(
     readonly api: TelegramAPI,
@@ -198,7 +214,10 @@ export class TelegramStream {
     readonly topicId: number,
     readonly intervalSeconds: number,
     readonly typingIntervalMilliseconds = 4_000,
-  ) {}
+    timing: Partial<TelegramStreamTiming> = {},
+  ) {
+    this.timing = { ...DEFAULT_TELEGRAM_STREAM_TIMING, ...timing };
+  }
 
   start(replyTo?: number): void {
     this.replyTo = replyTo ?? null;
@@ -254,12 +273,35 @@ export class TelegramStream {
 
   append(delta: string): void {
     this.text += delta;
-    if (this.timer) return;
-    const wait = Math.max(0, this.intervalSeconds * 1_000 - (performance.now() - this.lastFlush));
+    const now = performance.now();
+    let wait: number;
+    if (this.messageIds.length === 0) {
+      this.firstBufferedAt ??= now;
+      const elapsed = now - this.firstBufferedAt;
+      const meaningful = this.hasMeaningfulFirstFragment();
+      wait = meaningful
+        ? Math.max(0, this.timing.firstMessageDelayMilliseconds - elapsed)
+        : Math.max(0, this.timing.firstMessageMaxWaitMilliseconds - elapsed);
+      if (this.timer) clearTimeout(this.timer);
+    } else {
+      if (this.timer) return;
+      const editInterval = Math.max(
+        this.timing.minimumEditIntervalMilliseconds,
+        this.intervalSeconds * 1_000,
+      );
+      wait = Math.max(0, editInterval - (now - this.lastFlush));
+    }
     this.timer = setTimeout(() => {
       this.timer = null;
       void this.queueFlush("");
     }, wait);
+  }
+
+  private hasMeaningfulFirstFragment(): boolean {
+    const content = this.text.trim();
+    return Array.from(content).length >= this.timing.firstMessageMinCharacters ||
+      /\s/.test(this.text) ||
+      /[.!?…,:;]$/.test(content);
   }
 
   async flush(fallback = ""): Promise<void> {
@@ -318,6 +360,7 @@ export class TelegramStream {
       }
     }
     this.lastFlush = performance.now();
+    this.firstBufferedAt = null;
   }
 }
 
