@@ -113,7 +113,7 @@ test("a stream keeps an expandable audio transcript before every edit", async ()
   }
 });
 
-test("a completed stream keeps the work log and audio transcript collapsed before the final answer", async () => {
+test("a completed stream keeps the transcript before and work log after the final answer", async () => {
   const api = new TelegramAPI("token");
   const messages: string[] = [];
   api.sendChatAction = async () => undefined;
@@ -131,14 +131,12 @@ test("a completed stream keeps the work log and audio transcript collapsed befor
 
     assert.match(
       messages.at(-1) ?? "",
-      /^<blockquote expandable><b>Ход работы · 1 сек<\/b>\n/,
+      /^<blockquote expandable><b>🎙 Транскрипция «voice\.ogg»<\/b>\n/,
     );
     assert.match(messages.at(-1) ?? "", /Проверил код\n\nЗапустил тесты/);
-    assert.match(
-      messages.at(-1) ?? "",
-      /<blockquote expandable><b>🎙 Транскрипция «voice\.ogg»<\/b>\nТекст аудио/,
-    );
-    assert.match(messages.at(-1) ?? "", /<b>Готово<\/b>$/);
+    assert.match(messages.at(-1) ?? "", /Текст аудио\n<\/blockquote>\n\n<b>Готово<\/b>/);
+    assert.match(messages.at(-1) ?? "", /<blockquote expandable><b>Ход работы · 1 сек<\/b>\n/);
+    assert.match(messages.at(-1) ?? "", /Запустил тесты\n<\/blockquote>$/);
   } finally {
     stream.stopTyping();
     await api.close();

@@ -145,7 +145,7 @@ export const ADMIN_HTML = `<!doctype html>
         <div><span class="eyebrow">SYSTEM</span><h2 id="settingsTitle">Настройки SUMMING</h2></div>
       </div>
       <article class="deployment-card">
-        <div class="deployment-heading"><div><h3>Обновление приложения</h3><p>Каждые 10 минут сервер проверяет <code>origin/master</code>. Новая версия собирается и тестируется до перезапуска.</p></div><span id="deploymentBadge" class="deployment-badge">Проверка…</span></div>
+        <div class="deployment-heading"><div><h3>Обновление приложения</h3><p>Каждые 30 минут сервер проверяет <code>origin/master</code>. Новая версия собирается и тестируется до перезапуска.</p></div><span id="deploymentBadge" class="deployment-badge">Проверка…</span></div>
         <dl class="deployment-details">
           <div><dt>Установлено</dt><dd id="deploymentCurrent">—</dd></div>
           <div><dt>В origin</dt><dd id="deploymentRemote">—</dd></div>

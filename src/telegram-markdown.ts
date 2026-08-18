@@ -27,6 +27,29 @@ export interface TelegramExpandableQuote {
   text: string;
 }
 
+function appendExpandableQuotes(
+  rendered: RenderedBlock[],
+  expandableQuote: TelegramExpandableQuote | TelegramExpandableQuote[] | undefined,
+  limit: number,
+): void {
+  const expandableQuotes = Array.isArray(expandableQuote)
+    ? expandableQuote
+    : expandableQuote
+      ? [expandableQuote]
+      : [];
+  for (const quoteContent of expandableQuotes) {
+    if (!quoteContent.text.trim()) continue;
+    const quote = [
+      `<blockquote expandable><b>${escapeHtml(quoteContent.title.trim())}</b>`,
+      escapeHtml(quoteContent.text.trim()),
+      "</blockquote>",
+    ].join("\n");
+    for (const [index, html] of splitBalancedHtml(quote, limit).entries()) {
+      rendered.push({ html, separator: index > 0 ? "\n" : "\n\n" });
+    }
+  }
+}
+
 function escapeHtml(value: string): string {
   return value.replace(/[&<>]/g, (character) => ({
     "&": "&amp;",
@@ -413,6 +436,7 @@ export function markdownToTelegramHtmlChunks(
   markdown: string,
   limit = DEFAULT_TELEGRAM_HTML_LIMIT,
   expandableQuote?: TelegramExpandableQuote | TelegramExpandableQuote[],
+  trailingExpandableQuote?: TelegramExpandableQuote | TelegramExpandableQuote[],
 ): string[] {
   if (!Number.isSafeInteger(limit) || limit < 128) {
     throw new RangeError("Telegram HTML chunk limit must be an integer of at least 128");
@@ -420,22 +444,7 @@ export function markdownToTelegramHtmlChunks(
   const source = markdown.trim();
   if (!source) return ["Готово."];
   const rendered: RenderedBlock[] = [];
-  const expandableQuotes = Array.isArray(expandableQuote)
-    ? expandableQuote
-    : expandableQuote
-      ? [expandableQuote]
-      : [];
-  for (const quoteContent of expandableQuotes) {
-    if (!quoteContent.text.trim()) continue;
-    const quote = [
-      `<blockquote expandable><b>${escapeHtml(quoteContent.title.trim())}</b>`,
-      escapeHtml(quoteContent.text.trim()),
-      "</blockquote>",
-    ].join("\n");
-    for (const [index, html] of splitBalancedHtml(quote, limit).entries()) {
-      rendered.push({ html, separator: index > 0 ? "\n" : "\n\n" });
-    }
-  }
+  appendExpandableQuotes(rendered, expandableQuote, limit);
   for (const block of parseBlocks(source)) {
     const pieces = splitBalancedHtml(renderBlock(block), limit);
     for (const [index, html] of pieces.entries()) {
@@ -445,6 +454,7 @@ export function markdownToTelegramHtmlChunks(
       });
     }
   }
+  appendExpandableQuotes(rendered, trailingExpandableQuote, limit);
 
   const chunks: string[] = [];
   let current = "";

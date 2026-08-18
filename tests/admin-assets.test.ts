@@ -27,6 +27,7 @@ test("administrator Mini App exposes projects, bindings and global settings", ()
   assert.match(ADMIN_HTML, /Интерактивный onboarding/);
   assert.match(ADMIN_HTML, /id="systemPanel"[^>]+role="tabpanel"/);
   assert.match(ADMIN_HTML, /Обновиться сейчас/);
+  assert.match(ADMIN_HTML, /Каждые 30 минут сервер проверяет/);
   assert.match(ADMIN_HTML, /id="deploymentPhase"/);
   assert.match(ADMIN_HTML, /id="deploymentFailedTests"/);
   assert.match(ADMIN_HTML, /id="deploymentHistory"/);

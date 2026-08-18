@@ -86,7 +86,7 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
   assert.doesNotMatch(script, /git .*\b(?:pull|reset|checkout)\b/);
   assert.doesNotMatch(service, /summing\.env/);
   assert.match(service, /ExecStart=\/opt\/summing-current\/deploy\/summing-deploy/);
-  assert.match(timer, /OnUnitActiveSec=10min/);
+  assert.match(timer, /OnUnitActiveSec=30min/);
   assert.match(path, /PathChanged=\/var\/lib\/summing\/deploy\/request\.json/);
   assert.match(activation, /systemctl start summing-deploy\.path summing-deploy\.timer/);
   assert.match(activation, /kb_transfer_key=\/etc\/summing\/kb-transfer\.key/);

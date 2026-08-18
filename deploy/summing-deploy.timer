@@ -1,9 +1,9 @@
 [Unit]
-Description=Check origin/master for a SUMMING update every ten minutes
+Description=Check origin/master for a SUMMING update every thirty minutes
 
 [Timer]
 OnBootSec=3min
-OnUnitActiveSec=10min
+OnUnitActiveSec=30min
 RandomizedDelaySec=30
 Unit=summing-deploy.service
 

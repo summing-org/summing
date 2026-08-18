@@ -278,15 +278,13 @@ export class TelegramStream {
     const chunks = markdownToTelegramHtmlChunks(
       content,
       undefined,
-      [
-        ...(this.workLog ? [this.workLog] : []),
-        ...(this.audioTranscript
-          ? [{
-              title: `🎙 Транскрипция «${this.audioTranscript.fileName}»`,
-              text: this.audioTranscript.text,
-            }]
-          : []),
-      ],
+      this.audioTranscript
+        ? {
+            title: `🎙 Транскрипция «${this.audioTranscript.fileName}»`,
+            text: this.audioTranscript.text,
+          }
+        : undefined,
+      this.workLog ?? undefined,
     );
     for (const [index, chunk] of chunks.entries()) {
       const messageId = this.messageIds[index];

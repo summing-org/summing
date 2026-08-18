@@ -825,10 +825,13 @@ test("explicit questions in unbound topics run without Project access", async ()
     assert.deepEqual(replies[0]?.options, { topicId: 77, replyTo: 10, parseMode: "HTML" });
     assert.match(
       replies[0]?.text ?? "",
-      /^<blockquote expandable><b>Ход работы · 1 сек<\/b>\n/,
+      /^<b>Короткий ответ<\/b> по обсуждению\./,
     );
     assert.match(replies[0]?.text ?? "", /Проверил контекст обсуждения\./);
-    assert.match(replies[0]?.text ?? "", /<b>Короткий ответ<\/b> по обсуждению\.$/);
+    assert.match(
+      replies[0]?.text ?? "",
+      /<blockquote expandable><b>Ход работы · 1 сек<\/b>\nПроверил контекст обсуждения\.\n<\/blockquote>$/,
+    );
 
     replies.length = 0;
     runtime.codex.startThread = async () => {

@@ -121,6 +121,24 @@ test("renders multiple expandable sections in their declared order", () => {
   );
 });
 
+test("renders a trailing expandable section after the response", () => {
+  assert.deepEqual(
+    markdownToTelegramHtmlChunks(
+      "**Финал**",
+      3_900,
+      { title: "🎙 Транскрипция", text: "Текст аудио" },
+      { title: "Ход работы · 2 мин 5 сек", text: "Проверил сборку" },
+    ),
+    [
+      "<blockquote expandable><b>🎙 Транскрипция</b>\n" +
+        "Текст аудио\n</blockquote>\n\n" +
+        "<b>Финал</b>\n\n" +
+        "<blockquote expandable><b>Ход работы · 2 мин 5 сек</b>\n" +
+        "Проверил сборку\n</blockquote>",
+    ],
+  );
+});
+
 test("long formatted answers are split into independently balanced chunks", () => {
   const limit = 180;
   const markdown = [
