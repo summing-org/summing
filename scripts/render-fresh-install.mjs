@@ -229,9 +229,11 @@ network_access = true
 [team_memory]
 enabled = true
 model_egress_enabled = false
-understanding_quiet_sec = 20
-understanding_max_wait_sec = 90
-understanding_max_events = 40
+model = "gpt-5.6-luna"
+effort = "low"
+understanding_quiet_sec = 60
+understanding_max_wait_sec = 300
+understanding_max_events = 100
 orientation_event_threshold = 50
 intervention_cooldown_sec = 3600
 raw_retention_days = 365

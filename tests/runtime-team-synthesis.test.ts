@@ -26,6 +26,8 @@ test("one background understanding loop creates an episode, memory, and optional
   );
   Object.assign(config, {
     teamModelEgressEnabled: true,
+    teamUnderstandingModel: "gpt-5.6-luna",
+    teamUnderstandingEffort: "low",
     teamUnderstandingMaxEvents: 20,
     teamOrientationEventThreshold: 2,
     teamInterventionCooldownSeconds: 0,
@@ -41,6 +43,7 @@ test("one background understanding loop creates an episode, memory, and optional
     } | undefined;
   }> = [];
   const threadOptions: Array<Record<string, unknown>> = [];
+  const threadModels: Array<string | undefined> = [];
   const turnOptions: Array<Record<string, unknown>> = [];
   const prompts: string[] = [];
   const unsubscribed: string[] = [];
@@ -51,7 +54,8 @@ test("one background understanding loop creates an episode, memory, and optional
     return 900 + sent.length;
   };
   runtime.codex.account = async () => ({ account: { type: "chatgpt" } });
-  runtime.codex.startThread = async (_cwd, _model, options) => {
+  runtime.codex.startThread = async (_cwd, model, options) => {
+    threadModels.push(model);
     threadOptions.push(options as Record<string, unknown>);
     sequence += 1;
     return `thr-team-${sequence}`;
@@ -266,12 +270,18 @@ test("one background understanding loop creates an episode, memory, and optional
       "<b>Это пока открытый вопрос.</b> Кто владеет проверкой rollback?",
     );
     assert.deepEqual(sent[2]?.options, { topicId: 9, replyTo: 103, parseMode: "HTML" });
+    assert.deepEqual(threadModels, ["gpt-5.6-luna", "gpt-5.6-luna"]);
     assert.equal(threadOptions.every((item) => item.readOnly === true), true);
     assert.equal(threadOptions.every((item) => item.networkAccess === false), true);
     assert.equal(threadOptions.every((item) => item.ephemeral === true), true);
     assert.equal(turnOptions.every((item) => item.readOnly === true), true);
     assert.equal(turnOptions.every((item) => item.networkAccess === false), true);
+    assert.equal(turnOptions.every((item) => item.model === "gpt-5.6-luna"), true);
+    assert.equal(turnOptions.every((item) => item.effort === "low"), true);
     assert.equal(turnOptions.every((item) => typeof item.outputSchema === "object"), true);
+    const teamMemoryStatus = runtime.status().team_memory as Record<string, unknown>;
+    assert.equal(teamMemoryStatus.model, "gpt-5.6-luna");
+    assert.equal(teamMemoryStatus.effort, "low");
     assert.match(prompts[0] ?? "", /single background Conversation Understanding Loop/);
     assert.match(prompts[0] ?? "", /Silence is the default/);
     assert.match(prompts[0] ?? "", /Релиз хотим сделать в пятницу/);

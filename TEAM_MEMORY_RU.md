@@ -95,6 +95,11 @@ Server администратора.
 продолжает прежний ограниченный projectless Q&A flow: это явный запрос пользователя,
 а не фоновый egress.
 
+Фоновая модель не наследуется от coding-turns: `team_memory.model` и
+`team_memory.effort` по умолчанию равны `gpt-5.6-luna` и `low`. Поэтому дешёвое
+source-local осмысление не меняет `agent.model`/`agent.effort` для Project runs и
+явных projectless Q&A.
+
 ### Один проход понимания, два результата
 
 У SUMMING нет отдельного Project ambient-turn «нужно ли ответить?» и отдельного
@@ -136,20 +141,21 @@ bounded `reply_target` snapshot, поэтому способен связать 
 Планировщик использует три совместных триггера:
 
 1. `team_memory.understanding_quiet_sec` — trailing debounce; каждое новое событие
-   source перезапускает окно тишины, по умолчанию 20 секунд;
+   source перезапускает окно тишины, по умолчанию 60 секунд;
 2. `team_memory.understanding_max_wait_sec` — hard deadline от первого ожидающего
-   события, по умолчанию 90 секунд, поэтому непрерывный разговор не откладывает
+   события, по умолчанию 300 секунд, поэтому непрерывный разговор не откладывает
    понимание бесконечно;
 3. `team_memory.understanding_max_events` — немедленный запуск при достижении размера
-   batch, по умолчанию 40 событий.
+   batch, по умолчанию 100 событий.
 
-Следовательно, это не polling «один вызов каждые 20 секунд». Один короткий burst
+Следовательно, это не polling «один вызов каждую минуту». Один короткий burst
 обычно создаёт один model turn после паузы; длинный непрерывный разговор режется hard
 deadline или event cap. Одновременно выполняется один background loop; остальные
 Sources сохраняют evidence и ждут своей очереди. После ошибки batch остаётся pending,
 а retry получает экспоненциальный backoff до одного часа.
 
-С точки зрения model usage один успешно обработанный batch равен одному Codex turn —
+С точки зрения model usage один успешно обработанный batch равен одному Codex turn на
+модели `team_memory.model` с effort `team_memory.effort` —
 не одному turn на сообщение и не двум turn для attention/memory. Runtime не рассылает
 один episode одновременно в Codex, OpenAI API, Anthropic и Gemini: background reasoning
 использует одну настроенную модель через Codex App Server. Direct mention/reply создаёт

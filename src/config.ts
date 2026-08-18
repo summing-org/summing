@@ -127,14 +127,16 @@ export class RuntimeConfig {
     readonly codexLimitsTimeZone = "Europe/Moscow",
     readonly teamMemoryEnabled = true,
     readonly teamModelEgressEnabled = false,
-    readonly teamUnderstandingQuietSeconds = 20,
-    readonly teamUnderstandingMaxWaitSeconds = 90,
-    readonly teamUnderstandingMaxEvents = 40,
+    readonly teamUnderstandingQuietSeconds = 60,
+    readonly teamUnderstandingMaxWaitSeconds = 300,
+    readonly teamUnderstandingMaxEvents = 100,
     readonly teamOrientationEventThreshold = 50,
     readonly teamInterventionCooldownSeconds = 3_600,
     readonly teamRawRetentionDays = 365,
     readonly teamAnnounceOnJoin = true,
     readonly knowledgeSync: KnowledgeSyncConfig = defaultKnowledgeSyncConfig(dataDir),
+    readonly teamUnderstandingModel = "gpt-5.6-luna",
+    readonly teamUnderstandingEffort = "low",
   ) {}
 
   project(projectId: string): ProjectConfig {
@@ -425,21 +427,21 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig 
     Boolean(teamMemory.enabled ?? true),
     Boolean(teamMemory.model_egress_enabled ?? false),
     boundedNumber(
-      teamMemory.understanding_quiet_sec ?? teamMemory.synthesis_batch_sec ?? 20,
+      teamMemory.understanding_quiet_sec ?? teamMemory.synthesis_batch_sec ?? 60,
       "team_memory.understanding_quiet_sec",
       10,
       300,
       false,
     ),
     boundedNumber(
-      teamMemory.understanding_max_wait_sec ?? 90,
+      teamMemory.understanding_max_wait_sec ?? 300,
       "team_memory.understanding_max_wait_sec",
       20,
       3_600,
       false,
     ),
     boundedNumber(
-      teamMemory.understanding_max_events ?? teamMemory.max_batch_events ?? 40,
+      teamMemory.understanding_max_events ?? teamMemory.max_batch_events ?? 100,
       "team_memory.understanding_max_events",
       10,
       500,
@@ -535,5 +537,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig 
           "gpt-5.4-nano",
       ).trim(),
     },
+    String(teamMemory.model || "gpt-5.6-luna").trim(),
+    String(teamMemory.effort || "low").trim(),
   );
 }

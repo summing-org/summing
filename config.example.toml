@@ -17,12 +17,15 @@ enabled = true
 # Keep false until the operator explicitly approves sending bounded team-event
 # conversation episodes to the administrator's Codex App Server.
 model_egress_enabled = false
+# Background understanding uses a cheaper model without changing coding turns.
+model = "gpt-5.6-luna"
+effort = "low"
 # One Conversation Understanding Loop resets this quiet window on every new event.
-understanding_quiet_sec = 20
+understanding_quiet_sec = 60
 # Continuous chatter cannot postpone understanding beyond this hard deadline.
-understanding_max_wait_sec = 90
+understanding_max_wait_sec = 300
 # Reaching this source-local batch size starts the loop immediately.
-understanding_max_events = 40
+understanding_max_events = 100
 orientation_event_threshold = 50
 intervention_cooldown_sec = 3600
 # Raw text is redacted after this many days; 0 keeps it indefinitely. Knowledge

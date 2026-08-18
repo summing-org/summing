@@ -1,4 +1,4 @@
-# SUMMING 9.14
+# SUMMING 9.15
 
 SUMMING — один постоянно живущий агент с одним администратором и назначаемыми
 владельцами проектов. Он работает на Linux VPS, принимает команды из Telegram
@@ -273,6 +273,10 @@ Projectless Q&A имеет отдельную от Project Conversation очер
 внешних инструментов. Quiet timer сбрасывается новым событием, но
 `understanding_max_wait_sec` гарантирует обработку непрерывной беседы, а
 `understanding_max_events` запускает заполненный batch немедленно.
+Background loop использует собственные `team_memory.model` и `team_memory.effort`,
+по умолчанию `gpt-5.6-luna`/`low`, поэтому выбор модели основных coding-turns не
+меняется. Производственные defaults объединяют bursts в более крупные batch: 60 секунд
+тишины, hard deadline 300 секунд и до 100 событий одного Source.
 
 Один structured output содержит Conversation Episode, обновлённый summary,
 evidence-backed knowledge и `silent/reply` decision. Runtime принимает его только после

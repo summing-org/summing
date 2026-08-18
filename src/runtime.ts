@@ -718,6 +718,8 @@ export class SummingRuntime {
       team_memory: {
         enabled: this.config.teamMemoryEnabled,
         model_egress_enabled: this.config.teamModelEgressEnabled,
+        model: this.config.teamUnderstandingModel,
+        effort: this.config.teamUnderstandingEffort,
         scheduled_understanding_loops: this.teamUnderstandingTimers.size,
         active_understanding_loops: this.teamUnderstandingProcessors.size,
       },
@@ -1029,7 +1031,7 @@ export class SummingRuntime {
       if (!record(account.account)) throw new Error("Codex is not authenticated");
       const cwd = resolve(this.config.dataDir, "conversation-understanding");
       mkdirSync(cwd, { recursive: true, mode: 0o700 });
-      const threadId = await this.codex.startThread(cwd, this.config.model, {
+      const threadId = await this.codex.startThread(cwd, this.config.teamUnderstandingModel, {
         deniedPaths: [],
         disableEnvironments: true,
         ephemeral: true,
@@ -1055,8 +1057,8 @@ export class SummingRuntime {
         this.teamUnderstandingPrompt(sourceId, events),
         cwd,
         {
-          model: this.config.model,
-          effort: this.config.effort,
+          model: this.config.teamUnderstandingModel,
+          effort: this.config.teamUnderstandingEffort,
           networkAccess: false,
           outputSchema: TEAM_UNDERSTANDING_OUTPUT_SCHEMA as JsonRecord,
           gitMetadataRoots: [],

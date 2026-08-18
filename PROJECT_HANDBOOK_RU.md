@@ -1,6 +1,6 @@
-# SUMMING 9.14: архитектура, эксплуатация и разработка
+# SUMMING 9.15: архитектура, эксплуатация и разработка
 
-> Версия: **9.14.1**
+> Версия: **9.15.0**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
 > Последняя сверка с кодом: **18 августа 2026 года**.
 
@@ -245,6 +245,10 @@ items в `needs-review`; provider redelivery идемпотентна.
 отдельный egress notice. Без consent pending evidence остаётся локальным и не
 передаётся фоновым Codex turns.
 
+Background loop выбирает модель независимо от Project runs через
+`team_memory.model`/`team_memory.effort`; defaults `gpt-5.6-luna`/`low` оставляют
+`agent.model` и `agent.effort` без изменений.
+
 При включении runtime собирает source-local bounded batch по quiet window, hard deadline
 или event cap, создаёт fresh ephemeral read-only Codex thread в пустом runtime CWD с
 выключенными network, environments и внешними capabilities и требует единый structured
@@ -325,9 +329,9 @@ Conversation Episode. Это единственный фоновый model loop:
 turn и отдельного Team Space synthesis turn больше нет.
 
 Окно адаптивно. Новое событие перезапускает trailing quiet timer
-`team_memory.understanding_quiet_sec` (20 секунд), но время от первого pending event
-ограничено `understanding_max_wait_sec` (90 секунд). При
-`understanding_max_events` (40) loop стартует немедленно. Поэтому короткий burst даёт
+`team_memory.understanding_quiet_sec` (60 секунд), но время от первого pending event
+ограничено `understanding_max_wait_sec` (300 секунд). При
+`understanding_max_events` (100) loop стартует немедленно. Поэтому короткий burst даёт
 один вызов после паузы, а непрерывная беседа не зависает и не смешивается с другим
 Telegram topic. Background processors глобально сериализованы; события продолжают
 durable ingest, пока другой Source ждёт model capacity.
@@ -1122,9 +1126,11 @@ Telegram-проекты находятся в SQLite и не записываю�
 | `agent.network_access` | Сеть внутри Codex sandbox. | true |
 | `team_memory.enabled` | Локальный Team Space journal и privacy commands. | true |
 | `team_memory.model_egress_enabled` | Consent-gated Conversation Understanding Loop в Codex. | false |
-| `team_memory.understanding_quiet_sec` | Trailing quiet window одного Source. | 20 |
-| `team_memory.understanding_max_wait_sec` | Hard deadline непрерывного episode. | 90 |
-| `team_memory.understanding_max_events` | Event cap и немедленный trigger batch. | 40 |
+| `team_memory.model` | Модель только для background Conversation Understanding Loop. | `gpt-5.6-luna` |
+| `team_memory.effort` | Reasoning effort только для background loop. | `low` |
+| `team_memory.understanding_quiet_sec` | Trailing quiet window одного Source. | 60 |
+| `team_memory.understanding_max_wait_sec` | Hard deadline непрерывного episode. | 300 |
+| `team_memory.understanding_max_events` | Event cap и немедленный trigger batch. | 100 |
 | `team_memory.orientation_event_threshold` | Минимум evidence до первого orientation. | 50 |
 | `team_memory.intervention_cooldown_sec` | Минимальный интервал proactive replies. | 3600 |
 | `team_memory.raw_retention_days` | Дни хранения raw evidence; 0 = бессрочно. | 365 |
@@ -1552,7 +1558,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "9.14.1",
+  "version": "9.15.0",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",
@@ -1565,6 +1571,14 @@ curl --fail --silent http://127.0.0.1:8765/state
     "provider": "openai",
     "configured": true,
     "model": "gpt-transcribe"
+  },
+  "team_memory": {
+    "enabled": true,
+    "model_egress_enabled": true,
+    "model": "gpt-5.6-luna",
+    "effort": "low",
+    "scheduled_understanding_loops": 2,
+    "active_understanding_loops": 0
   },
   "telegram_last_poll": 1786450000.0,
   "conversations": 4,
