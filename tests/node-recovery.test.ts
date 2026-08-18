@@ -50,6 +50,10 @@ test("node recovery exports, verifies and stages portable node state", async () 
   git(discoveredRepository, "commit", "-m", "orphan base");
   writeFileSync(join(dataDir, "memory", "identity.md"), "node identity\n");
   writeFileSync(join(dataDir, "projects", "demo", "memory.md"), "project memory\n");
+  const configPath = join(root, "config.toml");
+  const environmentPath = join(root, "summing.env");
+  writeFileSync(configPath, "[projects.demo]\n", { mode: 0o600 });
+  writeFileSync(environmentPath, "TELEGRAM_TOKEN=test-only\n", { mode: 0o600 });
 
   const workspace: WorkspaceConfig = { id: "repo", path: repository };
   const config = new RuntimeConfig(
@@ -85,13 +89,22 @@ test("node recovery exports, verifies and stages portable node state", async () 
     mode: "portable",
     createdAt: 123,
   }];
+  let projectEnvironmentReads = 0;
   const manager = new NodeRecoveryManager(
     config,
     state,
     new ProjectCatalog(config, state),
     store,
     () => teamReferences,
-    async () => ({ text: "PRIVATE_TOKEN=recovered\n", revision: 3, updatedAt: "2026-08-18T00:00:00.000Z" }),
+    async () => {
+      projectEnvironmentReads += 1;
+      return {
+        text: "PRIVATE_TOKEN=recovered\n",
+        revision: 3,
+        updatedAt: "2026-08-18T00:00:00.000Z",
+      };
+    },
+    { configPath, environmentPath },
   );
   try {
     const exported = await manager.export({ includeSecrets: false });
@@ -201,10 +214,12 @@ test("node recovery exports, verifies and stages portable node state", async () 
       joinedAt: 100,
     }).space;
     teamReferences = [];
+    const readsBeforeMissingBundle = projectEnvironmentReads;
     await assert.rejects(
       manager.export({ includeSecrets: true }),
       /has no successful export bundle/,
     );
+    assert.equal(projectEnvironmentReads, readsBeforeMissingBundle);
     teamReferences = [{
       spaceId: team.id,
       title: team.name,
@@ -226,6 +241,15 @@ test("node recovery exports, verifies and stages portable node state", async () 
         "project-environments.json",
       ), "utf8");
       assert.match(recoveredEnvironments, /PRIVATE_TOKEN=recovered/);
+      assert.equal(readFileSync(join(
+        staged.stagePath,
+        "components",
+        "secrets",
+        "payload",
+        "etc",
+        "summing",
+        "summing.env",
+      ), "utf8"), "TELEGRAM_TOKEN=test-only\n");
       const objectFiles = readdirSync(join(root, "objects"), { recursive: true, withFileTypes: true })
         .filter((entry) => entry.isFile() && entry.name.endsWith(".enc"));
       assert.equal(objectFiles.length > 0, true);

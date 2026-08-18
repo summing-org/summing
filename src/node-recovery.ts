@@ -85,6 +85,11 @@ export interface NodeRecoveryProjectEnvironment {
   updatedAt: string | null;
 }
 
+export interface NodeRecoverySecretSources {
+  configPath: string;
+  environmentPath: string;
+}
+
 export interface NodeRecoveryWorkspaceRecord {
   id: string;
   projectId: string;
@@ -774,6 +779,10 @@ export class NodeRecoveryManager {
       revision: 0,
       updatedAt: null,
     }),
+    readonly secretSources: NodeRecoverySecretSources = {
+      configPath: resolve(process.env.SUMMING_CONFIG || join(config.dataDir, "config.toml")),
+      environmentPath: resolve(process.env.SUMMING_ENV_FILE || "/etc/summing/summing.env"),
+    },
   ) {
     const idPath = join(config.dataDir, "node-id");
     mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
@@ -782,6 +791,24 @@ export class NodeRecoveryManager {
     const value = readFileSync(idPath, "utf8").trim();
     if (!/^[0-9a-f-]{36}$/.test(value)) throw new Error("SUMMING node id is invalid");
     this.nodeId = value;
+  }
+
+  private currentTeamSpaceBundles(): NodeRecoveryTeamSpaceReference[] {
+    const references = this.teamSpaceBundles();
+    for (const space of this.state.listTeamSpaces()) {
+      const latest = references
+        .filter((reference) => reference.spaceId === space.id)
+        .sort((left, right) => right.createdAt - left.createdAt)[0];
+      if (!latest) {
+        throw new Error(`Team Space '${space.name || space.id}' has no successful export bundle`);
+      }
+      if (latest.createdAt < space.updatedAt) {
+        throw new Error(
+          `Team Space '${space.name || space.id}' changed after its last export; pause sync and export it again`,
+        );
+      }
+    }
+    return references;
   }
 
   async export(input: { includeSecrets: boolean; recoveryKey?: Buffer }): Promise<NodeRecoveryExportResult> {
@@ -831,6 +858,7 @@ export class NodeRecoveryManager {
       if (this.state.listConversations().some((conversation) => conversation.activeTurnId)) {
         throw new Error("node recovery export requires every active Codex turn to finish");
       }
+      let teamSpaces = this.currentTeamSpaceBundles();
       mkdirSync(work, { recursive: true, mode: 0o700 });
       const conversations = this.state.listConversations();
       const candidates = workspaceCandidates(this.config, this.projects, conversations);
@@ -961,8 +989,8 @@ export class NodeRecoveryManager {
         } else {
           warnings.push("knowledge core.sqlite was missing; MTProto connector metadata was not captured");
         }
-        const configPath = resolve(process.env.SUMMING_CONFIG || join(this.config.dataDir, "config.toml"));
-        const environmentPath = resolve(process.env.SUMMING_ENV_FILE || "/etc/summing/summing.env");
+        const configPath = resolve(this.secretSources.configPath);
+        const environmentPath = resolve(this.secretSources.environmentPath);
         const tdlibRoot = resolve(dirname(this.config.knowledgeSync.spoolRoot), "tdlib");
         await addComponent("secrets", "secrets", [
           { sourcePath: secretRoot, archivePath: "payload/data/connector-core", optional: true },
@@ -986,20 +1014,7 @@ export class NodeRecoveryManager {
       if (this.state.listConversations().some((conversation) => conversation.activeTurnId)) {
         throw new Error("a Codex turn started during node recovery export; retry after it finishes");
       }
-      const teamSpaces = this.teamSpaceBundles();
-      for (const space of this.state.listTeamSpaces()) {
-        const latest = teamSpaces
-          .filter((reference) => reference.spaceId === space.id)
-          .sort((left, right) => right.createdAt - left.createdAt)[0];
-        if (!latest) {
-          throw new Error(`Team Space '${space.name || space.id}' has no successful export bundle`);
-        }
-        if (latest.createdAt < space.updatedAt) {
-          throw new Error(
-            `Team Space '${space.name || space.id}' changed after its last export; pause sync and export it again`,
-          );
-        }
-      }
+      teamSpaces = this.currentTeamSpaceBundles();
       const manifest: NodeRecoveryManifest = {
         format: FORMAT,
         version: FORMAT_VERSION,
