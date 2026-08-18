@@ -107,6 +107,9 @@ install -d -o root -g root -m 0755 /etc/codex
 install -o root -g root -m 0644 \
   "${repo_dir}/deploy/codex-requirements.toml" \
   /etc/codex/requirements.toml
+install -o root -g root -m 0750 \
+  "${repo_dir}/deploy/restore-node-recovery" \
+  /usr/local/sbin/restore-node-recovery
 if [ ! -f "${config_file}" ]; then
   install -o summing -g summing -m 0600 \
     "${repo_dir}/deploy/config.production.toml" \

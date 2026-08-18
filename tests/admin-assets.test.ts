@@ -30,6 +30,11 @@ test("administrator Mini App exposes projects, bindings and global settings", ()
   assert.match(ADMIN_HTML, /id="deploymentPhase"/);
   assert.match(ADMIN_HTML, /id="deploymentFailedTests"/);
   assert.match(ADMIN_HTML, /id="deploymentHistory"/);
+  assert.match(ADMIN_HTML, /id="nodeRecoveryExportForm"/);
+  assert.match(ADMIN_HTML, /id="nodeRecoveryRestoreForm"/);
+  assert.match(ADMIN_HTML, /INCLUDE SECRETS/);
+  assert.match(ADMIN_JS, /\/api\/viewer\/admin\/recovery\/jobs/);
+  assert.match(ADMIN_JS, /data-confirm-recovery/);
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/projects/);
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/project-owners/);
   assert.match(ADMIN_JS, /Сделать primary/);

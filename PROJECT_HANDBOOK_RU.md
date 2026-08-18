@@ -1,6 +1,6 @@
-# SUMMING 9.11: архитектура, эксплуатация и разработка
+# SUMMING 9.12: архитектура, эксплуатация и разработка
 
-> Версия: **9.11.0**
+> Версия: **9.12.0**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
 > Последняя сверка с кодом: **18 августа 2026 года**.
 
@@ -1532,7 +1532,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "9.11.0",
+  "version": "9.12.0",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",
@@ -1590,12 +1590,13 @@ at-least-once recovery: prompt может выполниться повторн�
 
 - `config.toml`;
 - `state.sqlite3*`;
+- `runner-control.sqlite3*` и node-local recovery metadata;
 - `CODEX_HOME`;
 - `memory/`;
 - `projects/`;
 - `repositories/` со всеми управляемыми Git refs и незапушенными commits;
 - `SUMMING_WORKTREE_ROOT`, если нужно сохранить незакоммиченные изменения;
-- `run-artifacts/`, `/etc/summing-runner` и `/var/lib/summing-runs` при
+- `run-artifacts/`, `/etc/summing-runner` и `/var/lib/summing-runner` при
   использовании Viewer/runner;
 - `repository-credentials/`, если встроенные deploy keys должны пережить
   восстановление без перевыпуска на стороне Git-сервиса;
@@ -1631,6 +1632,31 @@ sudo systemctl start summing
 5. проверить journal, health и `/status`;
 6. если Codex thread больше не возобновляется, SUMMING автоматически создаст
    новый и сохранит Project memory/worktree.
+
+### 15.4. S3 node-recovery bundle
+
+Для rebuild/reinstall штатный формат `summing-node-recovery` v1 заменяет ручной
+tar data dir. Admin Mini App создаёт durable export job, снимает SQLite backup,
+удаляет из node snapshot физические `team_*` tables, а затем формирует отдельные
+AES-256-GCM компоненты: node state, Codex sessions, artifacts, attachments,
+identity/project memory, configuration, каждый Git workspace и опциональные secrets. Git workspace
+сохраняется как repository bundle + staged/working binary patches + untracked;
+generated dependencies не копируются. Recovery также обнаруживает Git-каталоги
+в managed repository/worktree roots, которых уже нет в текущем project catalog.
+
+Manifest подписан HMAC от одноразового recovery key и публикуется последним.
+Team Space bundle входят только как ссылки, потому что их catalog/originals уже
+лежат в S3. Codex auth/OAuth не экспортируются никогда. Сессии получают один из
+статусов `resumable`, `archive_only`, `broken_dependency` по наличию JSONL,
+conversation binding и полностью захваченного workspace.
+
+Restore API сначала скачивает, проверяет и распаковывает bundle в staging без
+изменения live paths. Root-команда `restore-node-recovery` после fresh install
+повторяет криптографическую проверку независимо от app-owned staging, создаёт
+root-only rollback, останавливает services и активирует только фиксированные
+data/config/runner paths и workspaces внутри managed roots. Любая ошибка запускает
+обратное копирование и оставляет services остановленными. Recovery key вводится
+через `/dev/tty` и не хранится в argv.
 
 ## 16. Диагностика
 

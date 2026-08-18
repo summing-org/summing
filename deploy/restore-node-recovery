@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: restore-node-recovery --bundle OBJECT_KEY [--environment-file FILE]
+
+Stops SUMMING, asks for the one-time node recovery key through /dev/tty,
+downloads and verifies every S3 component again as root, activates the
+recovery transactionally, and starts SUMMING services after success.
+EOF
+}
+
+bundle=
+environment_file=/etc/summing/summing.env
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --bundle) bundle=${2:-}; shift 2 ;;
+    --environment-file) environment_file=${2:-}; shift 2 ;;
+    --help|-h) usage; exit 0 ;;
+    *) usage; exit 2 ;;
+  esac
+done
+
+if [ "$(id -u)" -ne 0 ]; then
+  printf '%s\n' 'Run restore-node-recovery as root.' >&2
+  exit 2
+fi
+if [ -z "${bundle}" ]; then
+  usage
+  exit 2
+fi
+case "${bundle}" in
+  /*|*\\*|*//*|.|./*|*/./*|*/.|..|../*|*/../*|*/..) printf '%s\n' 'Invalid node recovery object key.' >&2; exit 2 ;;
+esac
+if [ -L "${environment_file}" ] || [ ! -f "${environment_file}" ]; then
+  printf '%s\n' 'SUMMING environment file must be a regular file.' >&2
+  exit 2
+fi
+
+key_file=$(mktemp /run/summing-node-recovery-key.XXXXXX)
+chmod 0600 "${key_file}"
+cleanup() {
+  rm -f -- "${key_file}"
+}
+trap cleanup EXIT HUP INT TERM
+
+printf '%s' 'Node recovery key: ' >/dev/tty
+IFS= read -r -s recovery_key </dev/tty
+printf '\n' >/dev/tty
+if ! printf '%s\n' "${recovery_key}" | grep -Eq '^[0-9a-fA-F]{64}$'; then
+  recovery_key=
+  printf '%s\n' 'Recovery key must contain 64 hexadecimal characters.' >&2
+  exit 2
+fi
+printf '%s\n' "${recovery_key}" >"${key_file}"
+recovery_key=
+
+systemctl stop summing.service summing-runner.service
+if systemctl is-active --quiet summing.service || systemctl is-active --quiet summing-runner.service; then
+  printf '%s\n' 'SUMMING services did not stop; recovery was not started.' >&2
+  exit 1
+fi
+
+set +e
+/usr/local/bin/node --enable-source-maps \
+  /opt/summing-current/dist/src/node-recovery-activate.js \
+  --bundle "${bundle}" \
+  --key-file "${key_file}" \
+  --environment-file "${environment_file}"
+activation_status=$?
+set -e
+if [ "${activation_status}" -ne 0 ]; then
+  printf '%s\n' 'Recovery failed. Automatic file rollback was attempted; services remain stopped for inspection.' >&2
+  exit "${activation_status}"
+fi
+
+systemctl start summing-runner.service summing.service
+systemctl is-active --quiet summing-runner.service
+systemctl is-active --quiet summing.service
+printf '%s\n' 'Node recovery activated and SUMMING services are running.'

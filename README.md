@@ -1,4 +1,4 @@
-# SUMMING 9.11
+# SUMMING 9.12
 
 SUMMING — один постоянно живущий агент с одним администратором и назначаемыми
 владельцами проектов. Он работает на Linux VPS, принимает команды из Telegram
@@ -357,6 +357,8 @@ $SUMMING_DATA_DIR/
 ├── core.sqlite                    # sync, consent, jobs, objects и canonical blocks
 ├── search.sqlite                  # восстанавливаемые FTS5/sqlite-vec индексы
 ├── runner-control.sqlite3         # расписания, исполнения, планы подтверждения и audit
+├── node-recovery.sqlite3          # durable export/restore jobs
+├── node-id                        # стабильная идентичность recovery-ноды
 ├── codex/
 ├── memory/identity.md
 ├── projects/<id>/memory.md
@@ -394,6 +396,51 @@ key. В durable job хранится только его AES-GCM envelope, за�
 ноде. Коннекторы, MTProto-сессии, operational queues и outbox в bundle не входят,
 а `search.sqlite` пересобирается из импортированного canonical-слоя. После import
 Telegram-источники явно перепривязываются к локальному MTProto-коннектору.
+
+### Node recovery и переустановка VPS
+
+Team Space bundle и node recovery решают разные задачи. Team Space переносит
+бизнес-библиотеку между нодами. Формат `summing-node-recovery` v1 восстанавливает
+состояние конкретной ноды после rebuild: основной SQLite без физической копии
+Team Space, runner-control, conversations, identity/project memory, Codex session
+JSONL, run artifacts, attachments и Git workspaces. Каждый workspace представлен Git bundle,
+отдельными staged/working binary patches и untracked-файлами; дополнительно
+обнаруживаются Git-каталоги в managed repository/worktree roots, даже если они
+уже не перечислены в project catalog. `node_modules`, `dist` и caches не архивируются.
+
+Recovery состоит из независимо зашифрованных AES-256-GCM компонентов. Manifest
+с HMAC и checksums загружается в S3 последним и является commit marker. В него
+входят только object keys уже созданных Team Space bundle — сами события,
+документы и content-addressed S3 originals второй раз не копируются. Codex
+`auth.json`, GitHub OAuth и внешние OAuth tokens всегда исключены. При выборе
+**«Включить секреты»** дополнительно сохраняются SUMMING env/config, локальные
+ключи, MTProto connector metadata/TDLib session, repository credentials и
+project environments, полученные через runner и зашифрованные внутри recovery.
+
+В **Управление → Система → Node recovery** создание export требует S3 и один раз
+показывает отдельный recovery key. Job должен перейти в `succeeded`; сохраните
+и `bundleKey`, и recovery key вне VPS. Restore сначала выполняет полный dry-run,
+классифицирует Codex sessions как `resumable`, `archive_only` или
+`broken_dependency` и только после отдельного подтверждения создаёт staging,
+не меняя рабочие данные.
+
+После fresh install на rebuilt VPS повторная root-активация скачивает компоненты
+напрямую из S3 и заново проверяет HMAC, SHA-256, AES-GCM и внутренние file hashes.
+Recovery key читается из `/dev/tty` без аргумента процесса:
+
+```bash
+sudo restore-node-recovery \
+  --bundle 'summing/node-recovery/<node-id>/<backup-id>/manifest.json'
+```
+
+Команда останавливает SUMMING и runner, создаёт root-only rollback в
+`/var/backups/summing-node-recovery-*`, восстанавливает разрешённые пути
+транзакционно и запускает services только после успеха. При ошибке выполняется
+file rollback, а services остаются остановленными для проверки. После запуска
+нужно заново авторизовать Codex/OAuth, импортировать указанные в manifest Team
+Space bundle и проверить/reconcile их MTProto bindings. Старый VPS нельзя
+rebuild/delete, пока node-recovery job не завершился, ключи не сохранены и хотя
+бы dry-run не подтвердил целостность.
 
 Полная архитектура и VPS runbook: [PROJECT_HANDBOOK_RU.md](PROJECT_HANDBOOK_RU.md).
 Конституционные принципы: [BIBLE.md](BIBLE.md).

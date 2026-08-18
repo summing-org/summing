@@ -114,7 +114,9 @@ test("provisioning and secure bootstrap assets keep application secrets out of m
   const bootstrap = asset("deploy/secure-bootstrap");
   const installer = asset("deploy/install-fresh");
   const provisioner = asset("deploy/provision-host");
-  for (const path of [bootstrapPath, installerPath, provisionerPath]) {
+  const recoveryPath = join(root, "deploy/restore-node-recovery");
+  const recovery = asset("deploy/restore-node-recovery");
+  for (const path of [bootstrapPath, installerPath, provisionerPath, recoveryPath]) {
     const syntax = spawnSync("bash", ["-n", path], { encoding: "utf8" });
     assert.equal(syntax.status, 0, syntax.stderr);
     assert.notEqual(statSync(path).mode & 0o111, 0, `${path} must be executable`);
@@ -170,6 +172,12 @@ test("provisioning and secure bootstrap assets keep application secrets out of m
     provisioner,
     /TELEGRAM_BOT_TOKEN|OPENAI_API_KEY|SUMMING_S3_SECRET_ACCESS_KEY/,
   );
+  assert.match(asset("deploy/activate.sh"), /\/usr\/local\/sbin\/restore-node-recovery/);
+  assert.match(recovery, /read -r -s recovery_key <\/dev\/tty/);
+  assert.match(recovery, /systemctl stop summing\.service summing-runner\.service/);
+  assert.match(recovery, /dist\/src\/node-recovery-activate\.js/);
+  assert.match(recovery, /services remain stopped for inspection/);
+  assert.doesNotMatch(recovery, /rm\s+-rf/);
 });
 
 test("Hetzner provisioning uses protected Ubuntu 24.04 and restricted SSH", () => {

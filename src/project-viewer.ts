@@ -14,6 +14,7 @@ import {
 } from "./git-inspector.js";
 import { ProjectCatalogError, type ProjectCatalog } from "./project-catalog.js";
 import type { KnowledgeSyncAdmin } from "./knowledge-sync.js";
+import type { NodeRecoveryAdmin } from "./node-recovery-service.js";
 import {
   ProjectRunnerClient,
   ProjectRunnerClientError,
@@ -160,6 +161,7 @@ export class ProjectViewerServer {
       botConnected: false,
       codexAuthenticated: false,
     }),
+    readonly nodeRecovery?: NodeRecoveryAdmin,
   ) {
     this.auth = new ViewerAuthenticator(
       config.telegramToken,
@@ -251,6 +253,47 @@ export class ProjectViewerServer {
     if (request.method === "GET" && url.pathname === "/api/viewer/admin/onboarding") {
       this.requireAdminAccess(telegramUser);
       json(response, 200, this.onboardingOverview());
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/api/viewer/admin/recovery") {
+      this.requireAdminAccess(telegramUser);
+      json(response, 200, this.requireNodeRecovery().overview());
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/viewer/admin/recovery/jobs") {
+      this.requireAdminAccess(telegramUser);
+      const body = await requestBody(request) as Record<string, unknown> | null;
+      try {
+        const recovery = this.requireNodeRecovery();
+        const kind = String(body?.kind ?? "");
+        if (kind === "export") {
+          json(response, 202, recovery.startExport({
+            includeSecrets: body?.includeSecrets === true,
+            ...(body?.confirmation ? { confirmation: String(body.confirmation) } : {}),
+          }));
+        } else if (kind === "restore") {
+          json(response, 202, recovery.startRestore({
+            bundleKey: String(body?.bundleKey ?? ""),
+            recoveryKey: String(body?.recoveryKey ?? ""),
+          }));
+        } else {
+          throw new Error("node recovery job kind must be export or restore");
+        }
+      } catch (error) {
+        throw new ViewerHttpError(400, error instanceof Error ? error.message : String(error));
+      }
+      return;
+    }
+    const recoveryConfirmation = url.pathname.match(
+      /^\/api\/viewer\/admin\/recovery\/jobs\/([0-9a-f-]{36})\/confirm$/,
+    );
+    if (request.method === "POST" && recoveryConfirmation) {
+      this.requireAdminAccess(telegramUser);
+      try {
+        json(response, 202, this.requireNodeRecovery().confirmRestore(recoveryConfirmation[1]!));
+      } catch (error) {
+        throw new ViewerHttpError(409, error instanceof Error ? error.message : String(error));
+      }
       return;
     }
     if (request.method === "POST" && url.pathname === "/api/viewer/admin/mtproto/connectors") {
@@ -733,6 +776,11 @@ export class ProjectViewerServer {
   private requireKnowledgeSync(): KnowledgeSyncAdmin {
     if (!this.knowledgeSync) throw new ViewerHttpError(503, "синхронизация базы знаний не настроена");
     return this.knowledgeSync;
+  }
+
+  private requireNodeRecovery(): NodeRecoveryAdmin {
+    if (!this.nodeRecovery) throw new ViewerHttpError(503, "node recovery не настроен");
+    return this.nodeRecovery;
   }
 
   private onboardingOverview(): Record<string, unknown> {

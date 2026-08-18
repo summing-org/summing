@@ -7,6 +7,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { ProjectConfig, RuntimeConfig, type WorkspaceConfig } from "../src/config.js";
 import type { KnowledgeSyncAdmin } from "../src/knowledge-sync.js";
+import type { NodeRecoveryAdmin } from "../src/node-recovery-service.js";
 import { ProjectCatalog } from "../src/project-catalog.js";
 import { ProjectViewerServer } from "../src/project-viewer.js";
 import { StateStore } from "../src/state-store.js";
@@ -110,6 +111,21 @@ test("owner-only Admin API exposes MTProto, consent and source sync actions", as
       return { id } as never;
     },
   };
+  const recovery: NodeRecoveryAdmin = {
+    overview: () => ({ configured: true, jobs: [] }),
+    startExport: (input) => {
+      calls.push(["node-export", input]);
+      return { id: "node-export", recoveryKey: "b".repeat(64) } as never;
+    },
+    startRestore: (input) => {
+      calls.push(["node-restore", input]);
+      return { id: "node-restore" } as never;
+    },
+    confirmRestore: (id) => {
+      calls.push(["node-confirm", id]);
+      return { id } as never;
+    },
+  };
   const viewer = new ProjectViewerServer(
     config,
     state,
@@ -119,6 +135,7 @@ test("owner-only Admin API exposes MTProto, consent and source sync actions", as
     () => {},
     fake,
     () => ({ botConnected: true, codexAuthenticated: true }),
+    recovery,
   );
   const endpoint = `http://127.0.0.1:${port}`;
   const auth = (userId: number) => ({ "x-telegram-init-data": signedInitData("bot-token", userId) });
@@ -202,6 +219,46 @@ test("owner-only Admin API exposes MTProto, consent and source sync actions", as
     assert.equal(
       calls.map(([name]) => name).join(","),
       "authorize,consent,start,export,import",
+    );
+
+    assert.equal(
+      (await fetch(`${endpoint}/api/viewer/admin/recovery`, { headers: auth(2) })).status,
+      403,
+    );
+    const recoveryOverview = await fetch(
+      `${endpoint}/api/viewer/admin/recovery`,
+      { headers: auth(1) },
+    );
+    assert.deepEqual(await recoveryOverview.json(), { configured: true, jobs: [] });
+    const nodeExport = await fetch(`${endpoint}/api/viewer/admin/recovery/jobs`, {
+      method: "POST",
+      headers: { ...auth(1), "content-type": "application/json" },
+      body: JSON.stringify({
+        kind: "export",
+        includeSecrets: true,
+        confirmation: "INCLUDE SECRETS",
+      }),
+    });
+    assert.equal(nodeExport.status, 202);
+    assert.equal((await nodeExport.json() as { recoveryKey: string }).recoveryKey, "b".repeat(64));
+    const nodeRestore = await fetch(`${endpoint}/api/viewer/admin/recovery/jobs`, {
+      method: "POST",
+      headers: { ...auth(1), "content-type": "application/json" },
+      body: JSON.stringify({
+        kind: "restore",
+        bundleKey: "summing/node-recovery/node/backup/manifest.json",
+        recoveryKey: "b".repeat(64),
+      }),
+    });
+    assert.equal(nodeRestore.status, 202);
+    const confirmedRecovery = await fetch(
+      `${endpoint}/api/viewer/admin/recovery/jobs/11111111-1111-4111-8111-111111111111/confirm`,
+      { method: "POST", headers: auth(1) },
+    );
+    assert.equal(confirmedRecovery.status, 202);
+    assert.equal(
+      calls.map(([name]) => name).join(","),
+      "authorize,consent,start,export,import,node-export,node-restore,node-confirm",
     );
   } finally {
     await viewer.close();

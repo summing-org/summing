@@ -31,6 +31,7 @@ import { HealthServer } from "./health-server.js";
 import { productionEnvironmentMigrationCoordinator } from "./project-environment-coordinator.js";
 import { helpMessage } from "./help-message.js";
 import { KnowledgeSyncService } from "./knowledge-sync.js";
+import { NodeRecoveryService } from "./node-recovery-service.js";
 import { ProjectCatalog, ProjectCatalogError } from "./project-catalog.js";
 import { GitInspector } from "./git-inspector.js";
 import { ProjectViewerServer } from "./project-viewer.js";
@@ -446,6 +447,7 @@ export class SummingRuntime {
   readonly runnerControl: RunnerControlPlane;
   readonly deploymentEvents: DeploymentEventNotifier;
   readonly knowledgeSync: KnowledgeSyncService;
+  readonly nodeRecovery: NodeRecoveryService;
   private readonly shutdown = new Deferred<void>();
   private readonly shutdownController = new AbortController();
   private stopping = false;
@@ -494,6 +496,23 @@ export class SummingRuntime {
         if (config.teamModelEgressEnabled) this.scheduleTeamUnderstanding(sourceId);
       },
     );
+    this.nodeRecovery = new NodeRecoveryService(
+      config,
+      this.state,
+      this.projects,
+      () => this.knowledgeSync.store.listKnowledgeTransfers()
+        .filter((transfer) => transfer.kind === "export" && transfer.state === "succeeded" && transfer.bundleKey)
+        .map((transfer) => {
+          const spaceId = String(transfer.request.spaceId ?? transfer.sourceId ?? "");
+          return {
+            spaceId,
+            title: this.state.teamSpace(spaceId)?.name ?? spaceId,
+            bundleKey: transfer.bundleKey,
+            mode: transfer.mode,
+            createdAt: transfer.completedAt ?? transfer.updatedAt,
+          };
+        }),
+    );
     this.workspaces = new WorkspaceManager(config);
     this.attachments = new AttachmentService(
       this.telegram,
@@ -528,6 +547,7 @@ export class SummingRuntime {
         botConnected: this.telegramBotId > 0,
         codexAuthenticated: Boolean(record(this.accountState.account)),
       }),
+      this.nodeRecovery,
     );
     this.runnerControl = new RunnerControlPlane(
       resolve(config.dataDir, "runner-control.sqlite3"),
@@ -576,6 +596,7 @@ export class SummingRuntime {
       this.telegramUsername = String(me.username ?? "").replace(/^@/, "").toLowerCase();
       console.info(`Telegram bot connected: @${this.telegramUsername || "unknown"}`);
       await this.knowledgeSync.start();
+      this.nodeRecovery.start();
       await this.deploymentEvents.observeState();
       this.deploymentEvents.start();
       if (this.config.teamModelEgressEnabled) {
@@ -629,6 +650,7 @@ export class SummingRuntime {
       this.clearTeamUnderstandingTimers();
       this.deploymentEvents.stop();
       await this.runnerControl.stopAndWait();
+      await this.nodeRecovery.close();
       await this.knowledgeSync.close();
       await this.telegram.close();
       await this.deploymentEvents.close();
@@ -705,6 +727,11 @@ export class SummingRuntime {
         enabled: this.config.knowledgeSync.enabled,
         groups: this.knowledgeSync.store.listSyncStatuses().length,
         connectors: this.knowledgeSync.store.listConnectors().length,
+      },
+      node_recovery: {
+        object_store: this.nodeRecovery.objectStore.backend,
+        node_id: this.nodeRecovery.manager.nodeId,
+        jobs: this.nodeRecovery.store.list().length,
       },
       telegram_last_poll: this.lastTelegramPoll,
       viewer: {

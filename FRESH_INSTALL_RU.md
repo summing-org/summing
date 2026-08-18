@@ -183,3 +183,47 @@ ssh root@SERVER curl --fail http://127.0.0.1:8765/health
 новый не прошёл onboarding, контрольный поиск и проверку `/sync_status`.
 Переключайте DNS только после приёмки. Удаление старого VPS — отдельное
 подтверждённое действие после backup/export и периода наблюдения.
+
+## Rebuild той же ноды через node recovery
+
+Если цель — не параллельная миграция, а полная переустановка той же VPS, сначала
+на старой ноде откройте **Управление → Система → Node recovery**:
+
+1. Создайте export с секретами и введите точное подтверждение
+   `INCLUDE SECRETS`.
+2. Отдельно сохраните показанный один раз recovery key и S3 object key
+   `manifest.json`.
+3. Дождитесь `succeeded`. Ошибки capture workspace/project environment должны
+   быть устранены до rebuild.
+4. Запустите restore dry-run теми же object key/key и проверьте число
+   conversations, runs, workspaces, sessions и статусы `resumable`.
+
+Только после этого rebuild VPS допустим. На чистом Ubuntu выполните обычный
+`deploy/install-fresh --provision` с доступом к тому же S3 bucket/prefix. Fresh
+install создаёт новую пустую ноду и устанавливает root recovery command; затем:
+
+```bash
+ssh -i ~/.ssh/summing-deploy root@SERVER
+restore-node-recovery \
+  --bundle 'summing/node-recovery/<node-id>/<backup-id>/manifest.json'
+```
+
+Recovery key вводится скрыто через `/dev/tty` и не попадает в command line.
+Команда повторно скачивает и проверяет bundle как root, останавливает оба
+service, создаёт rollback в `/var/backups`, восстанавливает node state и запускает
+services. Она не импортирует Team Space физически: соответствующие Team Space
+bundle перечислены в recovery manifest и импортируются отдельно через Mini App.
+Codex browser/device login, GitHub OAuth и остальные внешние OAuth grants также
+проходятся заново.
+
+После восстановления проверьте:
+
+```bash
+systemctl status summing summing-runner --no-pager
+curl --fail http://127.0.0.1:8765/health
+journalctl -u summing -n 200 --no-pager
+```
+
+Если activation упала, services остаются остановленными, а команда сообщает
+root-only rollback path. Не запускайте их до проверки причины и результата
+автоматического file rollback.
