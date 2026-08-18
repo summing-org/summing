@@ -7,6 +7,51 @@ import { setTimeout as delay } from "node:timers/promises";
 import { RuntimeConfig } from "../src/config.js";
 import { SummingRuntime } from "../src/runtime.js";
 
+test("administrator model-egress override survives a runtime restart", () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-team-egress-toggle-"));
+  const config = new RuntimeConfig(
+    join(root, "data"),
+    join(root, "codex"),
+    join(root, "worktrees"),
+    "token",
+    1,
+    "codex",
+    8_765,
+    1,
+    1,
+    "",
+    "medium",
+    false,
+    new Map(),
+  );
+  Object.assign(config, { teamModelEgressEnabled: true });
+  const first = new SummingRuntime(config);
+  try {
+    assert.equal(
+      (first.status().team_memory as Record<string, unknown>).model_egress_enabled,
+      true,
+    );
+    (first as unknown as { setTeamModelEgressEnabled(enabled: boolean): void })
+      .setTeamModelEgressEnabled(false);
+    assert.equal(
+      (first.status().team_memory as Record<string, unknown>).model_egress_enabled,
+      false,
+    );
+  } finally {
+    first.state.close();
+  }
+  const reopened = new SummingRuntime(config);
+  try {
+    assert.equal(
+      (reopened.status().team_memory as Record<string, unknown>).model_egress_enabled,
+      false,
+    );
+  } finally {
+    reopened.state.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("one background understanding loop creates an episode, memory, and optional intervention", async () => {
   const root = mkdtempSync(join(tmpdir(), "summing-team-synthesis-"));
   const config = new RuntimeConfig(
@@ -53,7 +98,24 @@ test("one background understanding loop creates an episode, memory, and optional
     sent.push({ chatId, text, options });
     return 900 + sent.length;
   };
+  runtime.telegram.setMyShortDescription = async () => {};
   runtime.codex.account = async () => ({ account: { type: "chatgpt" } });
+  let rateLimitRead = 0;
+  runtime.codex.rateLimits = async () => {
+    const usedPercent = [10, 11, 11, 13][rateLimitRead++] ?? 13;
+    return {
+      rateLimits: {
+        secondary: {
+          usedPercent,
+          windowDurationMins: 10_080,
+          resetsAt: 1_800_000_000,
+        },
+      },
+    };
+  };
+  runtime.codex.usage = async (threadId) => ({
+    threadUsage: { threadId, estimatedUsageCreditsMicros: 250_000 },
+  });
   runtime.codex.startThread = async (_cwd, model, options) => {
     threadModels.push(model);
     threadOptions.push(options as Record<string, unknown>);
@@ -290,6 +352,14 @@ test("one background understanding loop creates an episode, memory, and optional
     assert.match(prompts[1] ?? "", /"reply_target": \{/);
     assert.match(prompts[1] ?? "", /Миграция пока блокирует релиз/);
     assert.deepEqual(unsubscribed, ["thr-team-1", "thr-team-2"]);
+    assert.deepEqual(runtime.state.teamModelEgressUsage(), {
+      weeklyResetsAt: 1_800_000_000,
+      turns: 2,
+      measuredTurns: 2,
+      estimatedCreditsMicros: 500_000,
+      observedWeeklyPercent: 3,
+      updatedAt: runtime.state.teamModelEgressUsage()?.updatedAt,
+    });
   } finally {
     runtime.state.close();
     rmSync(root, { recursive: true, force: true });

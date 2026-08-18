@@ -44,6 +44,11 @@ export interface OnboardingRuntimeStatus {
   codexAuthenticated: boolean;
 }
 
+export interface TeamModelEgressAdmin {
+  overview(): Promise<Record<string, unknown>> | Record<string, unknown>;
+  setEnabled(enabled: boolean): Promise<Record<string, unknown>> | Record<string, unknown>;
+}
+
 interface ViewerRepositoryConnection {
   mode: "none" | "external" | "managed-ssh";
   publicKey: string;
@@ -162,6 +167,7 @@ export class ProjectViewerServer {
       codexAuthenticated: false,
     }),
     readonly nodeRecovery?: NodeRecoveryAdmin,
+    readonly teamModelEgress?: TeamModelEgressAdmin,
   ) {
     this.auth = new ViewerAuthenticator(
       config.telegramToken,
@@ -243,6 +249,20 @@ export class ProjectViewerServer {
     if (request.method === "GET" && url.pathname === "/api/viewer/admin") {
       this.requireAdminAccess(telegramUser);
       json(response, 200, this.adminOverview());
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/api/viewer/admin/model-egress") {
+      this.requireAdminAccess(telegramUser);
+      json(response, 200, await this.requireTeamModelEgress().overview());
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/viewer/admin/model-egress") {
+      this.requireAdminAccess(telegramUser);
+      const body = await requestBody(request) as Record<string, unknown> | null;
+      if (typeof body?.enabled !== "boolean") {
+        throw new ViewerHttpError(400, "enabled must be boolean");
+      }
+      json(response, 200, await this.requireTeamModelEgress().setEnabled(body.enabled));
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/viewer/admin/sync") {
@@ -811,6 +831,13 @@ export class ProjectViewerServer {
   private requireNodeRecovery(): NodeRecoveryAdmin {
     if (!this.nodeRecovery) throw new ViewerHttpError(503, "node recovery не настроен");
     return this.nodeRecovery;
+  }
+
+  private requireTeamModelEgress(): TeamModelEgressAdmin {
+    if (!this.teamModelEgress) {
+      throw new ViewerHttpError(503, "управление model egress не настроено");
+    }
+    return this.teamModelEgress;
   }
 
   private onboardingOverview(): Record<string, unknown> {

@@ -31,6 +31,10 @@ import { HealthServer } from "./health-server.js";
 import { productionEnvironmentMigrationCoordinator } from "./project-environment-coordinator.js";
 import { helpMessage } from "./help-message.js";
 import { KnowledgeSyncService } from "./knowledge-sync.js";
+import {
+  modelEgressThreadCreditsMicros,
+  observeModelEgressWeeklyUsage,
+} from "./model-egress-usage.js";
 import { NodeRecoveryService } from "./node-recovery-service.js";
 import { ProjectCatalog, ProjectCatalogError } from "./project-catalog.js";
 import { GitInspector } from "./git-inspector.js";
@@ -455,6 +459,7 @@ export class SummingRuntime {
   private codexLimitsRefresh: Promise<CodexRateLimitsSnapshot | null> | null = null;
   private codexLimitsTimer: NodeJS.Timeout | null = null;
   private teamRetentionTimer: NodeJS.Timeout | null = null;
+  private teamModelEgressEnabledState: boolean;
   private codexLimitsProfileDescription = "";
   private lastTelegramPoll: number | null = null;
   private readonly processors = new Map<string, Promise<void>>();
@@ -480,6 +485,8 @@ export class SummingRuntime {
 
   constructor(readonly config: RuntimeConfig) {
     this.state = new StateStore(resolve(config.dataDir, "state.sqlite3"));
+    this.teamModelEgressEnabledState =
+      this.state.teamModelEgressEnabledOverride() ?? config.teamModelEgressEnabled;
     this.projects = new ProjectCatalog(config, this.state);
     this.codex = new CodexAppServer(config.codexBinary, config.codexHome);
     this.telegram = new TelegramAPI(config.telegramToken);
@@ -491,7 +498,7 @@ export class SummingRuntime {
       config.dataDir,
       config.telegramOwnerId,
       (sourceId) => {
-        if (config.teamModelEgressEnabled) this.scheduleTeamUnderstanding(sourceId);
+        if (this.teamModelEgressEnabled()) this.scheduleTeamUnderstanding(sourceId);
       },
     );
     this.nodeRecovery = new NodeRecoveryService(
@@ -546,6 +553,20 @@ export class SummingRuntime {
         codexAuthenticated: Boolean(record(this.accountState.account)),
       }),
       this.nodeRecovery,
+      {
+        overview: async () => {
+          try {
+            await this.refreshCodexLimits();
+          } catch {
+            // The card still exposes the last successful snapshot and local counters.
+          }
+          return this.teamModelEgressAdminOverview();
+        },
+        setEnabled: (enabled) => {
+          this.setTeamModelEgressEnabled(enabled);
+          return this.teamModelEgressAdminOverview();
+        },
+      },
     );
     this.runnerControl = new RunnerControlPlane(
       resolve(config.dataDir, "runner-control.sqlite3"),
@@ -597,7 +618,7 @@ export class SummingRuntime {
       this.nodeRecovery.start();
       await this.deploymentEvents.observeState();
       this.deploymentEvents.start();
-      if (this.config.teamModelEgressEnabled) {
+      if (this.teamModelEgressEnabled()) {
         for (const sourceId of this.state.sourcesWithPendingTeamEvents()) {
           this.scheduleTeamUnderstanding(sourceId);
         }
@@ -717,7 +738,8 @@ export class SummingRuntime {
       },
       team_memory: {
         enabled: this.config.teamMemoryEnabled,
-        model_egress_enabled: this.config.teamModelEgressEnabled,
+        model_egress_enabled: this.teamModelEgressEnabled(),
+        model_egress_config_default: this.config.teamModelEgressEnabled,
         model: this.config.teamUnderstandingModel,
         effort: this.config.teamUnderstandingEffort,
         scheduled_understanding_loops: this.teamUnderstandingTimers.size,
@@ -753,18 +775,110 @@ export class SummingRuntime {
         );
         return null;
       }
-      const snapshot = parseCodexRateLimits(await this.codex.rateLimits());
-      this.codexLimitsState = snapshot;
-      await this.updateCodexLimitsProfile(
-        codexLimitsProfileText(snapshot, this.config.codexLimitsTimeZone),
-      );
-      return snapshot;
+      return this.readCodexLimitsSnapshot();
     })();
     this.codexLimitsRefresh = refresh;
     try {
       return await refresh;
     } finally {
       if (this.codexLimitsRefresh === refresh) this.codexLimitsRefresh = null;
+    }
+  }
+
+  private async readCodexLimitsSnapshot(): Promise<CodexRateLimitsSnapshot> {
+    const snapshot = parseCodexRateLimits(await this.codex.rateLimits());
+    this.codexLimitsState = snapshot;
+    await this.updateCodexLimitsProfile(
+      codexLimitsProfileText(snapshot, this.config.codexLimitsTimeZone),
+    );
+    return snapshot;
+  }
+
+  private teamModelEgressEnabled(): boolean {
+    return this.teamModelEgressEnabledState;
+  }
+
+  private setTeamModelEgressEnabled(enabled: boolean): void {
+    this.state.setTeamModelEgressEnabled(enabled);
+    this.teamModelEgressEnabledState = enabled;
+    if (!enabled) {
+      this.clearTeamUnderstandingTimers();
+      return;
+    }
+    if (!this.config.teamMemoryEnabled || this.stopping) return;
+    for (const sourceId of this.state.sourcesWithPendingTeamEvents()) {
+      this.scheduleTeamUnderstanding(sourceId);
+    }
+  }
+
+  private teamModelEgressAdminOverview(): Record<string, unknown> {
+    const weekly = this.codexLimitsState?.weekly ?? null;
+    const stored = this.state.teamModelEgressUsage();
+    const current = stored && (
+      !weekly || stored.weeklyResetsAt === null || stored.weeklyResetsAt === weekly.resetsAt
+    )
+      ? stored
+      : null;
+    return {
+      enabled: this.teamModelEgressEnabled(),
+      config_default: this.config.teamModelEgressEnabled,
+      team_memory_enabled: this.config.teamMemoryEnabled,
+      model: this.config.teamUnderstandingModel,
+      effort: this.config.teamUnderstandingEffort,
+      active_turns: this.teamUnderstandingProcessors.size,
+      scheduled_turns: this.teamUnderstandingTimers.size,
+      account_weekly: weekly
+        ? {
+            used_percent: weekly.usedPercent,
+            remaining_percent: weekly.remainingPercent,
+            resets_at: weekly.resetsAt,
+            updated_at: this.codexLimitsState?.capturedAt ?? null,
+          }
+        : null,
+      usage: {
+        observed_weekly_percent: current?.observedWeeklyPercent ?? 0,
+        estimated_credits: (current?.estimatedCreditsMicros ?? 0) / 1_000_000,
+        turns: current?.turns ?? 0,
+        measured_turns: current?.measuredTurns ?? 0,
+        weekly_resets_at: current?.weeklyResetsAt ?? weekly?.resetsAt ?? null,
+        updated_at: current?.updatedAt ?? null,
+        attribution: "observed-rate-limit-delta",
+      },
+    };
+  }
+
+  private async recordTeamModelEgressUsage(
+    threadId: string,
+    before: CodexRateLimitsSnapshot | null,
+  ): Promise<void> {
+    const [usageResult, limitsResult] = await Promise.allSettled([
+      this.codex.usage(threadId),
+      this.readCodexLimitsSnapshot(),
+    ]);
+    const estimatedCreditsMicros = usageResult.status === "fulfilled"
+      ? modelEgressThreadCreditsMicros(usageResult.value)
+      : 0;
+    const after = limitsResult.status === "fulfilled"
+      ? limitsResult.value
+      : this.codexLimitsState;
+    const observation = observeModelEgressWeeklyUsage(
+      before,
+      after,
+      estimatedCreditsMicros,
+    );
+    this.state.recordTeamModelEgressUsage(observation);
+  }
+
+  private async tryRecordTeamModelEgressUsage(
+    threadId: string,
+    before: CodexRateLimitsSnapshot | null,
+  ): Promise<boolean> {
+    try {
+      await this.recordTeamModelEgressUsage(threadId, before);
+      return true;
+    } catch (error) {
+      console.warn("could not record Team Memory model-egress usage", errorText(error));
+      return false;
     }
   }
 
@@ -839,7 +953,7 @@ export class SummingRuntime {
     if (
       this.stopping ||
       !this.config.teamMemoryEnabled ||
-      !this.config.teamModelEgressEnabled ||
+      !this.teamModelEgressEnabled() ||
       this.teamUnderstandingProcessors.has(sourceId)
     ) {
       return;
@@ -993,6 +1107,7 @@ export class SummingRuntime {
   }
 
   private async understandTeamConversation(sourceId: string): Promise<void> {
+    if (!this.teamModelEgressEnabled()) return;
     const source = this.state.teamSource(sourceId);
     if (!source) return;
     const spaceId = source.spaceId;
@@ -1006,6 +1121,8 @@ export class SummingRuntime {
     const eventIds = events.map((event) => event.id);
     const startedAt = Date.now() / 1_000;
     let active: CodexResponseRun | null = null;
+    let limitsBefore: CodexRateLimitsSnapshot | null = null;
+    let usageRecorded = false;
     let applied = false;
     try {
       if (space.modelEgressAnnouncedAt === null) {
@@ -1029,6 +1146,11 @@ export class SummingRuntime {
       const account = await this.codex.account();
       this.accountState = account;
       if (!record(account.account)) throw new Error("Codex is not authenticated");
+      try {
+        limitsBefore = await this.readCodexLimitsSnapshot();
+      } catch {
+        limitsBefore = this.codexLimitsState;
+      }
       const cwd = resolve(this.config.dataDir, "conversation-understanding");
       mkdirSync(cwd, { recursive: true, mode: 0o700 });
       const threadId = await this.codex.startThread(cwd, this.config.teamUnderstandingModel, {
@@ -1069,6 +1191,7 @@ export class SummingRuntime {
       active.turnId = turnId;
       this.activeTeamByTurn.set(turnId, active);
       await this.waitForTeamUnderstandingTurn(active);
+      usageRecorded = await this.tryRecordTeamModelEgressUsage(active.threadId, limitsBefore);
       if (active.status !== "completed") {
         throw new Error(active.error || `Conversation understanding turn ${active.status}`);
       }
@@ -1100,6 +1223,9 @@ export class SummingRuntime {
       throw error;
     } finally {
       if (active) {
+        if (!usageRecorded) {
+          await this.tryRecordTeamModelEgressUsage(active.threadId, limitsBefore);
+        }
         this.activeTeamByThread.delete(active.threadId);
         if (active.turnId) this.activeTeamByTurn.delete(active.turnId);
         if (this.codex.running) {
@@ -1364,7 +1490,7 @@ export class SummingRuntime {
     }
     const announcement = [
       `Я начал наблюдение за Team Space «${ensured.space.name}».`,
-      this.config.teamModelEgressEnabled
+      this.teamModelEgressEnabled()
         ? "Новые сообщения сохраняются локально; после паузы один Conversation Understanding Loop одновременно обновляет командную память и решает, отвечать или молчать."
         : "Новые сообщения сохраняются только локально как источник командной памяти до принятия решения отвечать или молчать; фоновая передача в Codex выключена.",
       `Raw-текст хранится ${this.config.teamRawRetentionDays === 0 ? "без автоматического удаления" : `${this.config.teamRawRetentionDays} дней`}; обнаруженные credentials не сохраняются.`,
@@ -1383,7 +1509,7 @@ export class SummingRuntime {
     const providerMessageId = await this.telegram.sendMessage(chatId, announcement);
     this.state.markTeamInterventionSent(interventionId, String(providerMessageId));
     this.state.markTeamSpaceAnnounced(ensured.space.id);
-    if (this.config.teamModelEgressEnabled) {
+    if (this.teamModelEgressEnabled()) {
       this.state.markTeamSpaceModelEgressAnnounced(ensured.space.id);
     }
   }
@@ -2459,7 +2585,7 @@ export class SummingRuntime {
         chatId,
         topicId,
         messageId,
-        `${memoryText}\nConversation Understanding Loop: ${this.config.teamModelEgressEnabled ? "включён" : "выключен"}`,
+        `${memoryText}\nConversation Understanding Loop: ${this.teamModelEgressEnabled() ? "включён" : "выключен"}`,
       );
       return true;
     }

@@ -415,6 +415,14 @@ export class CodexAppServer extends EventEmitter {
     return this.record(await this.request("account/rateLimits/read", {}, 30_000));
   }
 
+  async usage(threadId?: string): Promise<JsonRecord> {
+    return this.record(await this.request(
+      "account/usage/read",
+      threadId ? { threadId } : {},
+      30_000,
+    ));
+  }
+
   async startThread(
     cwd: string,
     model = "",

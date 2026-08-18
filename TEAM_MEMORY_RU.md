@@ -88,12 +88,15 @@ operator consent на передачу текста, sender identity, message/re
 timestamps, attachment metadata и локально полученных транскрипций в Codex App
 Server администратора.
 
-Согласие материализуется настройкой `team_memory.model_egress_enabled = true`; по
-умолчанию она выключена. До первого batch runtime публикует отдельный egress notice
-с точным составом передаваемых данных. До такого согласия события сохраняются
-локально, но Conversation Understanding Loop не запускается. Прямое упоминание
-продолжает прежний ограниченный projectless Q&A flow: это явный запрос пользователя,
-а не фоновый egress.
+Согласие материализуется настройкой `team_memory.model_egress_enabled = true` либо
+переключателем **Team Memory model egress** в системном разделе Admin Mini App; по
+умолчанию оно выключено. Admin-переключатель сохраняется в `runtime_state` SQLite и
+имеет приоритет над config default после рестарта. Выключение сразу снимает pending
+timers и запрещает новые background turns; уже активный bounded turn безопасно
+завершается. До первого batch runtime публикует отдельный egress notice с точным
+составом передаваемых данных. До такого согласия события сохраняются локально, но
+Conversation Understanding Loop не запускается. Прямое упоминание продолжает прежний
+ограниченный projectless Q&A flow: это явный запрос пользователя, а не фоновый egress.
 
 Фоновая модель не наследуется от coding-turns: `team_memory.model` и
 `team_memory.effort` по умолчанию равны `gpt-5.6-luna` и `low`. Поэтому дешёвое
@@ -162,6 +165,15 @@ Sources сохраняют evidence и ждут своей очереди. По�
 дополнительный немедленный turn, потому что это новый явный запрос пользователя.
 Транскрипция voice/audio является отдельным вызовом выбранного transcription API;
 чтение account limits раз в 15 минут — control-plane RPC без model inference.
+
+System-раздел Admin Mini App показывает `estimatedUsageCreditsMicros`, которые App
+Server рассчитывает отдельно для каждого ephemeral model-egress thread, количество
+turns и наблюдаемую долю недельного лимита. Доля помечена знаком `≈`: runtime снимает
+общий weekly `usedPercent` непосредственно до и после background turn и суммирует
+положительную разницу внутри текущего reset window. App Server не раскрывает
+denominator недельного лимита по отдельной функции, поэтому параллельный coding-turn
+может попасть в тот же интервал; точные thread credits и наблюдаемая процентная оценка
+в UI намеренно показаны раздельно.
 
 ### Structured contract
 

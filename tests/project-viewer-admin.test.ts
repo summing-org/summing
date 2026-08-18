@@ -78,6 +78,20 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
   );
   const projects = new ProjectCatalog(config, state);
   const bindingNotifications: Array<[number, number]> = [];
+  let modelEgressEnabled = true;
+  const modelEgressOverview = () => ({
+    enabled: modelEgressEnabled,
+    model: "gpt-5.6-luna",
+    effort: "low",
+    account_weekly: { used_percent: 40, remaining_percent: 60, resets_at: 1_800_000_000 },
+    usage: {
+      observed_weekly_percent: 3,
+      estimated_credits: 1.25,
+      turns: 4,
+      measured_turns: 3,
+      weekly_resets_at: 1_800_000_000,
+    },
+  });
   const viewer = new ProjectViewerServer(
     config,
     state,
@@ -85,6 +99,16 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
     undefined,
     () => false,
     (chatId, topicId) => bindingNotifications.push([chatId, topicId]),
+    undefined,
+    undefined,
+    undefined,
+    {
+      overview: modelEgressOverview,
+      setEnabled: (enabled) => {
+        modelEgressEnabled = enabled;
+        return modelEgressOverview();
+      },
+    },
   );
   const endpoint = `http://127.0.0.1:${port}`;
   const auth = (userId: number): Record<string, string> => ({
@@ -133,6 +157,29 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
 
     const denied = await fetch(`${endpoint}/api/viewer/admin`, { headers: auth(42) });
     assert.equal(denied.status, 403);
+
+    const deniedModelEgress = await fetch(
+      `${endpoint}/api/viewer/admin/model-egress`,
+      { headers: auth(42) },
+    );
+    assert.equal(deniedModelEgress.status, 403);
+    const modelEgress = await fetch(
+      `${endpoint}/api/viewer/admin/model-egress`,
+      { headers: auth(1) },
+    );
+    assert.equal(modelEgress.status, 200);
+    assert.equal((await modelEgress.json() as { usage: { observed_weekly_percent: number } })
+      .usage.observed_weekly_percent, 3);
+    const disabledModelEgress = await fetch(
+      `${endpoint}/api/viewer/admin/model-egress`,
+      {
+        method: "POST",
+        headers: { ...auth(1), "content-type": "application/json" },
+        body: JSON.stringify({ enabled: false }),
+      },
+    );
+    assert.equal(disabledModelEgress.status, 200);
+    assert.equal((await disabledModelEgress.json() as { enabled: boolean }).enabled, false);
 
     const disabledDeployment = await fetch(
       `${endpoint}/api/viewer/admin/deployment`,

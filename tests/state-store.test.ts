@@ -90,6 +90,62 @@ test("binding, input queues, and Telegram offset", () => {
   }
 });
 
+test("persists the model-egress switch and rolls usage into the active weekly window", () => {
+  const { root, path, store } = tempStore();
+  try {
+    assert.equal(store.teamModelEgressEnabledOverride(), null);
+    store.setTeamModelEgressEnabled(false);
+    assert.equal(store.teamModelEgressEnabledOverride(), false);
+    assert.deepEqual(store.recordTeamModelEgressUsage({
+      weeklyResetsAt: 200,
+      measured: true,
+      estimatedCreditsMicros: 1_250_000,
+      observedWeeklyPercent: 2,
+      updatedAt: 100,
+    }), {
+      weeklyResetsAt: 200,
+      turns: 1,
+      measuredTurns: 1,
+      estimatedCreditsMicros: 1_250_000,
+      observedWeeklyPercent: 2,
+      updatedAt: 100,
+    });
+    store.recordTeamModelEgressUsage({
+      weeklyResetsAt: 200,
+      measured: false,
+      estimatedCreditsMicros: 250_000,
+      observedWeeklyPercent: 0,
+      updatedAt: 110,
+    });
+    assert.equal(store.teamModelEgressUsage()?.turns, 2);
+    assert.equal(store.teamModelEgressUsage()?.measuredTurns, 1);
+    assert.equal(store.teamModelEgressUsage()?.estimatedCreditsMicros, 1_500_000);
+    store.recordTeamModelEgressUsage({
+      weeklyResetsAt: 300,
+      measured: true,
+      estimatedCreditsMicros: 100_000,
+      observedWeeklyPercent: 1,
+      updatedAt: 120,
+    });
+    assert.equal(store.teamModelEgressUsage()?.turns, 1);
+    store.close();
+    const reopened = new StateStore(path);
+    try {
+      assert.equal(reopened.teamModelEgressEnabledOverride(), false);
+      assert.equal(reopened.teamModelEgressUsage()?.weeklyResetsAt, 300);
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    try {
+      store.close();
+    } catch {
+      // It was closed before reopening the same database.
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("rebinding starts a fresh Codex context", () => {
   const { root, store } = tempStore();
   try {

@@ -253,6 +253,15 @@ export interface TeamUnderstandingResult {
   intervention: TeamInterventionDecision;
 }
 
+export interface TeamModelEgressUsage {
+  weeklyResetsAt: number | null;
+  turns: number;
+  measuredTurns: number;
+  estimatedCreditsMicros: number;
+  observedWeeklyPercent: number;
+  updatedAt: number;
+}
+
 export interface TeamIntervention {
   id: number;
   spaceId: string;
@@ -2920,6 +2929,100 @@ export class StateStore {
         INSERT INTO runtime_state (key, value) VALUES ('telegram_offset', ?)
         ON CONFLICT(key) DO UPDATE SET value = excluded.value
       `).run(String(offset));
+    });
+  }
+
+  teamModelEgressEnabledOverride(): boolean | null {
+    const row = this.db.prepare(
+      "SELECT value FROM runtime_state WHERE key = 'team_model_egress_enabled'",
+    ).get() as Row | undefined;
+    if (!row) return null;
+    if (row.value === "true") return true;
+    if (row.value === "false") return false;
+    return null;
+  }
+
+  setTeamModelEgressEnabled(enabled: boolean): void {
+    this.transaction(() => {
+      this.db.prepare(`
+        INSERT INTO runtime_state (key, value) VALUES ('team_model_egress_enabled', ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+      `).run(String(enabled));
+    });
+  }
+
+  teamModelEgressUsage(): TeamModelEgressUsage | null {
+    const row = this.db.prepare(
+      "SELECT value FROM runtime_state WHERE key = 'team_model_egress_usage'",
+    ).get() as Row | undefined;
+    if (!row || typeof row.value !== "string") return null;
+    try {
+      const value = JSON.parse(row.value) as Record<string, unknown>;
+      const weeklyResetsAt = value.weeklyResetsAt === null
+        ? null
+        : Number(value.weeklyResetsAt);
+      const turns = Number(value.turns);
+      const measuredTurns = Number(value.measuredTurns);
+      const estimatedCreditsMicros = Number(value.estimatedCreditsMicros);
+      const observedWeeklyPercent = Number(value.observedWeeklyPercent);
+      const updatedAt = Number(value.updatedAt);
+      if (
+        !(weeklyResetsAt === null || Number.isFinite(weeklyResetsAt)) ||
+        !Number.isSafeInteger(turns) || turns < 0 ||
+        !Number.isSafeInteger(measuredTurns) || measuredTurns < 0 ||
+        !Number.isSafeInteger(estimatedCreditsMicros) || estimatedCreditsMicros < 0 ||
+        !Number.isFinite(observedWeeklyPercent) || observedWeeklyPercent < 0 ||
+        !Number.isFinite(updatedAt) || updatedAt <= 0
+      ) {
+        return null;
+      }
+      return {
+        weeklyResetsAt,
+        turns,
+        measuredTurns,
+        estimatedCreditsMicros,
+        observedWeeklyPercent: Math.min(100, observedWeeklyPercent),
+        updatedAt,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  recordTeamModelEgressUsage(input: {
+    weeklyResetsAt: number | null;
+    measured: boolean;
+    estimatedCreditsMicros: number;
+    observedWeeklyPercent: number;
+    updatedAt?: number;
+  }): TeamModelEgressUsage {
+    return this.transaction(() => {
+      const stored = this.teamModelEgressUsage();
+      const sameWindow = stored && (
+        input.weeklyResetsAt === null ||
+        stored.weeklyResetsAt === null ||
+        stored.weeklyResetsAt === input.weeklyResetsAt
+      );
+      const current = sameWindow
+        ? stored
+        : null;
+      const value: TeamModelEgressUsage = {
+        weeklyResetsAt: input.weeklyResetsAt ?? current?.weeklyResetsAt ?? null,
+        turns: (current?.turns ?? 0) + 1,
+        measuredTurns: (current?.measuredTurns ?? 0) + (input.measured ? 1 : 0),
+        estimatedCreditsMicros:
+          (current?.estimatedCreditsMicros ?? 0) + Math.max(0, input.estimatedCreditsMicros),
+        observedWeeklyPercent: Math.min(
+          100,
+          (current?.observedWeeklyPercent ?? 0) + Math.max(0, input.observedWeeklyPercent),
+        ),
+        updatedAt: input.updatedAt ?? Date.now() / 1_000,
+      };
+      this.db.prepare(`
+        INSERT INTO runtime_state (key, value) VALUES ('team_model_egress_usage', ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+      `).run(JSON.stringify(value));
+      return value;
     });
   }
 

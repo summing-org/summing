@@ -277,6 +277,10 @@ Background loop использует собственные `team_memory.model` 
 по умолчанию `gpt-5.6-luna`/`low`, поэтому выбор модели основных coding-turns не
 меняется. Производственные defaults объединяют bursts в более крупные batch: 60 секунд
 тишины, hard deadline 300 секунд и до 100 событий одного Source.
+Системный раздел Admin Mini App позволяет включать/выключать model egress без
+рестарта; durable override имеет приоритет над config default. Там же показываются
+credits отдельных background threads и помеченная `≈` наблюдаемая доля недельного
+лимита, рассчитанная по приросту общего weekly indicator вокруг этих turns.
 
 Один structured output содержит Conversation Episode, обновлённый summary,
 evidence-backed knowledge и `silent/reply` decision. Runtime принимает его только после

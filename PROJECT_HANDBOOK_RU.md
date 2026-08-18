@@ -652,6 +652,21 @@ App Server читает `account/rateLimits/read`. Поле `usedPercent` пер
 runtime явно показывает, что данные недоступны, и не подменяет их коротким
 окном.
 
+System-раздел Admin Mini App добавляет отдельную карточку Team Memory model egress.
+GET/POST `/api/viewer/admin/model-egress` доступны только администратору: POST
+сохраняет boolean override в `runtime_state`, снимает pending understanding timers при
+выключении и ставит накопившиеся Sources в scheduler при включении. Уже активный turn
+не прерывается и завершает bounded batch; новых turns после выключения не запускают.
+
+После каждого background thread runtime вызывает `account/usage/read` с его
+`threadId` и сохраняет `estimatedUsageCreditsMicros`. Для процентной метрики он также
+снимает общий weekly `usedPercent` перед и после turn. Сумма положительных deltas в
+текущем reset window отображается как `≈<percent>%`; при новом `resetsAt` счётчики
+начинаются заново. Это наблюдаемая атрибуция, а не точный feature denominator: App
+Server не возвращает ёмкость weekly window в credits, и расход параллельного Codex
+turn может оказаться внутри того же интервала. Поэтому UI отдельно показывает thread
+credits, turns/measured turns и общий процент аккаунта.
+
 Официальные источники:
 
 - [Codex App Server](https://developers.openai.com/codex/app-server);
@@ -1575,6 +1590,7 @@ curl --fail --silent http://127.0.0.1:8765/state
   "team_memory": {
     "enabled": true,
     "model_egress_enabled": true,
+    "model_egress_config_default": true,
     "model": "gpt-5.6-luna",
     "effort": "low",
     "scheduled_understanding_loops": 2,
