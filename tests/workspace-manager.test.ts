@@ -167,6 +167,12 @@ test("conversation gets a persistent worktree and project memory", async () => {
       ".git-credentials",
     );
     git(source, "commit", "-m", "initial");
+    const hookMarker = join(root, "host-hook-ran");
+    writeFileSync(
+      join(source, ".git", "hooks", "post-checkout"),
+      `#!/bin/sh\n/usr/bin/touch ${JSON.stringify(hookMarker)}\n`,
+      { mode: 0o700 },
+    );
 
     const workspace: WorkspaceConfig = { id: "app", path: nested };
     const project = new ProjectConfig("demo", "Demo", "app", new Map([["app", workspace]]));
@@ -204,6 +210,7 @@ test("conversation gets a persistent worktree and project memory", async () => {
       worktreePath: null,
     };
     const prepared = await manager.prepare(conversation, project, workspace);
+    assert.equal(existsSync(hookMarker), false);
     assert.equal(
       readFileSync(manager.projectMemoryPath(project.id), "utf8"),
       "# Project memory: Demo\n\n",

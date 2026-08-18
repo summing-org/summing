@@ -2,10 +2,14 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   chmodSync,
+  closeSync,
+  constants,
   createWriteStream,
   existsSync,
+  fsyncSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -14,7 +18,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { basename, isAbsolute, resolve } from "node:path";
+import { basename, dirname, isAbsolute, resolve } from "node:path";
 import {
   environmentRedactions,
   ProjectEnvironmentConflictError,
@@ -868,7 +872,32 @@ export class ProjectRunnerServer {
   }
 
   private saveJob(job: RunnerJob): void {
-    writeFileSync(this.jobMetadataPath(job), `${JSON.stringify(job, null, 2)}\n`, { mode: 0o600 });
+    const metadataPath = this.jobMetadataPath(job);
+    const directory = dirname(metadataPath);
+    const temporaryPath = resolve(directory, `.job-${process.pid}-${randomUUID()}.tmp`);
+    try {
+      const descriptor = openSync(
+        temporaryPath,
+        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL,
+        0o600,
+      );
+      try {
+        writeFileSync(descriptor, `${JSON.stringify(job, null, 2)}\n`, "utf8");
+        fsyncSync(descriptor);
+      } finally {
+        closeSync(descriptor);
+      }
+      renameSync(temporaryPath, metadataPath);
+      const directoryDescriptor = openSync(directory, constants.O_RDONLY);
+      try {
+        fsyncSync(directoryDescriptor);
+      } finally {
+        closeSync(directoryDescriptor);
+      }
+    } catch (error) {
+      rmSync(temporaryPath, { force: true });
+      throw error;
+    }
   }
 
   private listJobs(projectId: string, workspaceId?: string): RunnerJob[] {

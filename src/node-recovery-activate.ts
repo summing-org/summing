@@ -161,7 +161,15 @@ function rollback(entries: Map<string, RollbackEntry>): void {
 }
 
 function git(repository: string, args: string[]): void {
-  execFileSync("git", ["-C", repository, ...args], {
+  execFileSync("git", [
+    "-C",
+    repository,
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "core.fsmonitor=false",
+    ...args,
+  ], {
     stdio: ["ignore", "ignore", "pipe"],
     env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
   });
@@ -193,7 +201,16 @@ function restoreWorkspace(
   const meta = join(payload, "meta");
   const bundle = join(meta, "repository.bundle");
   if (!metadata.git || !existsSync(bundle)) throw new Error(`workspace ${metadata.id} Git bundle is missing`);
-  execFileSync("git", ["clone", "--no-local", bundle, destination], {
+  execFileSync("git", [
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "core.fsmonitor=false",
+    "clone",
+    "--no-local",
+    bundle,
+    destination,
+  ], {
     stdio: ["ignore", "ignore", "pipe"],
     env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
   });

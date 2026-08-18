@@ -575,7 +575,11 @@ export class CodexAppServer extends EventEmitter {
     if (this.binaryReadRoot) filesystem[this.binaryReadRoot] = "read";
     if (!options.readOnly) {
       for (const gitMetadataRoot of options.gitMetadataRoots ?? []) {
-        filesystem[resolve(gitMetadataRoot)] = "write";
+        const root = resolve(gitMetadataRoot);
+        filesystem[root] = "write";
+        filesystem[resolve(root, "hooks")] = "deny";
+        filesystem[resolve(root, "config")] = "read";
+        filesystem[resolve(root, "config.worktree")] = "read";
       }
     }
     const shellEnvironment: JsonRecord = {

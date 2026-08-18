@@ -221,7 +221,13 @@ test("thread and turn requests use official v2 shapes", async (context) => {
           "/tmp/project/workspace/.summing-runtime/attachments": "read",
           "/tmp/project/workspace/.summing-runtime/outbox": "write",
           "/tmp/project-git": "write",
+          "/tmp/project-git/hooks": "deny",
+          "/tmp/project-git/config": "read",
+          "/tmp/project-git/config.worktree": "read",
           "/tmp/project-git/worktrees/project-workspace": "write",
+          "/tmp/project-git/worktrees/project-workspace/hooks": "deny",
+          "/tmp/project-git/worktrees/project-workspace/config": "read",
+          "/tmp/project-git/worktrees/project-workspace/config.worktree": "read",
           [canonicalReleaseBin]: "read",
         },
         network: { enabled: true, domains: { "*": "allow" } },
@@ -383,7 +389,13 @@ test("thread and turn requests use official v2 shapes", async (context) => {
   const writeFilesystem = writeProfile.filesystem as JsonRecord;
   assert.equal(writeFilesystem[canonicalNodeInstallation], "read");
   assert.equal(writeFilesystem["/tmp/project-git"], "write");
+  assert.equal(writeFilesystem["/tmp/project-git/hooks"], "deny");
+  assert.equal(writeFilesystem["/tmp/project-git/config"], "read");
   assert.equal(writeFilesystem["/tmp/project-git/worktrees/project-workspace"], "write");
+  assert.equal(
+    writeFilesystem["/tmp/project-git/worktrees/project-workspace/config.worktree"],
+    "read",
+  );
   assert.equal(
     Object.keys(writeFilesystem).some((path) => path.includes("project-git/.summing-runtime")),
     false,

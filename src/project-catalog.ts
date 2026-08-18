@@ -38,7 +38,13 @@ function runGit(
       reject(new ProjectCatalogError("git operation cancelled"));
       return;
     }
-    const child = spawn("git", args, {
+    const child = spawn("git", [
+      "-c",
+      "core.hooksPath=/dev/null",
+      "-c",
+      "core.fsmonitor=false",
+      ...args,
+    ], {
       stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
     });

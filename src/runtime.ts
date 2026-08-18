@@ -1233,56 +1233,7 @@ export class SummingRuntime {
         const updates = await this.telegram.getUpdates(offset);
         this.lastTelegramPoll = Date.now() / 1000;
         for (const update of updates) {
-          const nextOffset = Math.max(offset ?? 0, Number(update.update_id ?? 0) + 1);
-          const updateId = String(update.update_id ?? "");
-          const membership = record(update.my_chat_member);
-          if (membership) {
-            try {
-              await this.handleChatMemberUpdate(membership, updateId);
-            } catch (error) {
-              console.error("could not record Telegram membership update", error);
-            }
-          }
-          const member = record(update.chat_member);
-          if (member) {
-            try {
-              this.handleTeamMemberUpdate(member, updateId);
-            } catch (error) {
-              console.error("could not record Telegram team membership update", error);
-            }
-          }
-          const message = record(update.message) ?? record(update.channel_post);
-          if (message) {
-            try {
-              await this.handleMessage(message);
-            } catch (error) {
-              console.error("could not handle Telegram message", error);
-              const [chatId, topicId] = this.messageLocation(message);
-              try {
-                await this.reply(chatId, topicId, Number(message.message_id ?? 0), `Ошибка: ${errorText(error)}`);
-              } catch (replyError) {
-                console.error("could not report message failure", replyError);
-              }
-            }
-          }
-          const edited = record(update.edited_message) ?? record(update.edited_channel_post);
-          if (edited) {
-            try {
-              await this.handleTeamEditedMessage(edited, updateId);
-            } catch (error) {
-              console.error("could not record edited Telegram message", error);
-            }
-          }
-          const reaction = record(update.message_reaction) ?? record(update.message_reaction_count);
-          if (reaction) {
-            try {
-              this.handleTeamReaction(reaction, updateId);
-            } catch (error) {
-              console.error("could not record Telegram reaction", error);
-            }
-          }
-          offset = nextOffset;
-          this.state.setTelegramOffset(offset);
+          offset = await this.processAndAcknowledgeTelegramUpdate(update, offset);
         }
       } catch (error) {
         if (this.stopping) return;
@@ -1290,6 +1241,35 @@ export class SummingRuntime {
         await sleep(3_000);
       }
     }
+  }
+
+  private async processAndAcknowledgeTelegramUpdate(
+    update: TelegramObject,
+    currentOffset: number | null,
+  ): Promise<number> {
+    const numericUpdateId = Number(update.update_id);
+    if (!Number.isSafeInteger(numericUpdateId) || numericUpdateId < 0) {
+      throw new Error(`invalid Telegram update_id: ${String(update.update_id ?? "")}`);
+    }
+    const updateId = String(numericUpdateId);
+    const membership = record(update.my_chat_member);
+    if (membership) await this.handleChatMemberUpdate(membership, updateId);
+
+    const member = record(update.chat_member);
+    if (member) this.handleTeamMemberUpdate(member, updateId);
+
+    const message = record(update.message) ?? record(update.channel_post);
+    if (message) await this.handleMessage(message);
+
+    const edited = record(update.edited_message) ?? record(update.edited_channel_post);
+    if (edited) await this.handleTeamEditedMessage(edited, updateId);
+
+    const reaction = record(update.message_reaction) ?? record(update.message_reaction_count);
+    if (reaction) this.handleTeamReaction(reaction, updateId);
+
+    const nextOffset = Math.max(currentOffset ?? 0, numericUpdateId + 1);
+    this.state.setTelegramOffset(nextOffset);
+    return nextOffset;
   }
 
   private messageLocation(message: TelegramObject): [number, number, number] {

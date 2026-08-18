@@ -97,6 +97,18 @@ interface ProcessResult {
   stderr: string;
 }
 
+function safeGitArguments(root: string, args: string[]): string[] {
+  return [
+    "-C",
+    root,
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "core.fsmonitor=false",
+    ...args,
+  ];
+}
+
 function runProcess(
   command: string,
   args: string[],
@@ -454,12 +466,22 @@ export class WorkspaceManager {
   }
 
   private async gitRoot(path: string, signal?: AbortSignal): Promise<string | null> {
-    const result = await runProcess("git", ["-C", path, "rev-parse", "--show-toplevel"], 60_000, signal);
+    const result = await runProcess(
+      "git",
+      safeGitArguments(path, ["rev-parse", "--show-toplevel"]),
+      60_000,
+      signal,
+    );
     return result.code === 0 ? realpathSync(result.stdout.trim()) : null;
   }
 
   private async commonGitDir(path: string, signal?: AbortSignal): Promise<string | null> {
-    const result = await runProcess("git", ["-C", path, "rev-parse", "--git-common-dir"], 60_000, signal);
+    const result = await runProcess(
+      "git",
+      safeGitArguments(path, ["rev-parse", "--git-common-dir"]),
+      60_000,
+      signal,
+    );
     if (result.code !== 0) return null;
     const raw = result.stdout.trim();
     const resolved = resolve(path, raw);
@@ -467,7 +489,12 @@ export class WorkspaceManager {
   }
 
   private async gitDir(path: string, signal?: AbortSignal): Promise<string | null> {
-    const result = await runProcess("git", ["-C", path, "rev-parse", "--git-dir"], 60_000, signal);
+    const result = await runProcess(
+      "git",
+      safeGitArguments(path, ["rev-parse", "--git-dir"]),
+      60_000,
+      signal,
+    );
     if (result.code !== 0) return null;
     const raw = result.stdout.trim();
     const resolved = resolve(path, raw);
@@ -514,7 +541,7 @@ export class WorkspaceManager {
   ): Promise<void> {
     const current = await runProcess(
       "git",
-      ["-C", target, "symbolic-ref", "--quiet", "--short", "HEAD"],
+      safeGitArguments(target, ["symbolic-ref", "--quiet", "--short", "HEAD"]),
       60_000,
       signal,
     );
@@ -532,19 +559,17 @@ export class WorkspaceManager {
   }
 
   private async branchExists(root: string, branch: string, signal?: AbortSignal): Promise<boolean> {
-    const result = await runProcess("git", [
-      "-C",
-      root,
+    const result = await runProcess("git", safeGitArguments(root, [
       "show-ref",
       "--verify",
       "--quiet",
       `refs/heads/${branch}`,
-    ], 60_000, signal);
+    ]), 60_000, signal);
     return result.code === 0;
   }
 
   private async runGit(root: string, signal: AbortSignal | undefined, ...args: string[]): Promise<string> {
-    const result = await runProcess("git", ["-C", root, ...args], 60_000, signal);
+    const result = await runProcess("git", safeGitArguments(root, args), 60_000, signal);
     if (result.code !== 0) {
       throw new WorkspaceError(`git ${args.join(" ")} failed: ${result.stderr.trim()}`);
     }
@@ -552,13 +577,11 @@ export class WorkspaceManager {
   }
 
   private async excludeRuntimeFiles(worktree: string, signal?: AbortSignal): Promise<void> {
-    const result = await runProcess("git", [
-      "-C",
-      worktree,
+    const result = await runProcess("git", safeGitArguments(worktree, [
       "rev-parse",
       "--git-path",
       "info/exclude",
-    ], 60_000, signal);
+    ]), 60_000, signal);
     if (result.code !== 0) return;
     const raw = result.stdout.trim();
     const exclude = resolve(worktree, raw);

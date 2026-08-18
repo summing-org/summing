@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -56,6 +57,10 @@ function seedTerminalJobHistory(
     status: "queued",
     createdAt: new Date(0).toISOString(),
   }));
+  writeFileSync(
+    join(runs, queuedId, `.job-999-${randomUUID()}.tmp`),
+    '{"status":"interrupted write"',
+  );
   for (let index = 0; index < 105; index += 1) {
     const id = randomUUID();
     const directory = join(runs, id);
@@ -397,6 +402,8 @@ test("runner marks unfinished jobs interrupted on startup and retains recovery e
   mkdirSync(runs, { recursive: true });
   try {
     const { malformedId, queuedId } = seedTerminalJobHistory(runs, revision);
+    const queuedMetadata = join(runs, queuedId, "job.json");
+    const queuedMetadataInode = lstatSync(queuedMetadata).ino;
 
     new ProjectRunnerServer(
       join(root, "runner.sock"),
@@ -409,8 +416,9 @@ test("runner marks unfinished jobs interrupted on startup and retains recovery e
     assert.equal(readdirSync(runs).length, 101);
     assert.equal(existsSync(join(runs, queuedId)), true);
     assert.equal(existsSync(join(runs, malformedId)), true);
+    assert.notEqual(lstatSync(queuedMetadata).ino, queuedMetadataInode);
     const recovered = JSON.parse(
-      readFileSync(join(runs, queuedId, "job.json"), "utf8"),
+      readFileSync(queuedMetadata, "utf8"),
     ) as { status: string; error: string; completedAt?: string };
     assert.equal(recovered.status, "interrupted");
     assert.equal(recovered.error, "runner restarted before the job completed");
