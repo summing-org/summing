@@ -160,12 +160,19 @@ test("thread and turn requests use official v2 shapes", async (context) => {
   writeFileSync(releaseExecutable, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
   const launcher = join(binaryFixture, "codex");
   symlinkSync(releaseExecutable, launcher);
+  const resolverDirectory = join(binaryFixture, "run", "systemd", "resolve");
+  mkdirSync(resolverDirectory, { recursive: true });
+  const resolverTarget = join(resolverDirectory, "stub-resolv.conf");
+  writeFileSync(resolverTarget, "nameserver 127.0.0.53\n", "utf8");
+  const resolverConfig = join(binaryFixture, "resolv.conf");
+  symlinkSync(resolverTarget, resolverConfig);
   const canonicalReleaseBin = realpathSync(releaseBin);
   const canonicalNodeBin = dirname(realpathSync(process.execPath));
   const canonicalNodeInstallation =
     basename(canonicalNodeBin) === "bin" ? dirname(canonicalNodeBin) : canonicalNodeBin;
+  const canonicalResolverConfig = realpathSync(resolverConfig);
   context.after(() => rmSync(binaryFixture, { recursive: true, force: true }));
-  const client = new FakeCodex(launcher, "/tmp/codex-test");
+  const client = new FakeCodex(launcher, "/tmp/codex-test", resolverConfig);
   const permissionOptions = {
     deniedPaths: ["workspace/deep/secrets/.env"],
     networkAccess: true,
@@ -212,6 +219,7 @@ test("thread and turn requests use official v2 shapes", async (context) => {
           ":workspace_roots": {
             ".": "read",
           },
+          [canonicalResolverConfig]: "read",
           [canonicalNodeInstallation]: "read",
           "/tmp/project/workspace": "write",
           "/tmp/project/workspace/.git": "read",
@@ -388,6 +396,7 @@ test("thread and turn requests use official v2 shapes", async (context) => {
   ] as JsonRecord;
   const writeFilesystem = writeProfile.filesystem as JsonRecord;
   assert.equal(writeFilesystem[canonicalNodeInstallation], "read");
+  assert.equal(writeFilesystem[canonicalResolverConfig], "read");
   assert.equal(writeFilesystem["/tmp/project-git"], "write");
   assert.equal(writeFilesystem["/tmp/project-git/hooks"], "deny");
   assert.equal(writeFilesystem["/tmp/project-git/config"], "read");
@@ -400,6 +409,12 @@ test("thread and turn requests use official v2 shapes", async (context) => {
     Object.keys(writeFilesystem).some((path) => path.includes("project-git/.summing-runtime")),
     false,
   );
+  assert.equal(emptyFilesystem[canonicalResolverConfig], undefined);
+  const readOnlyProfile = ((readOnlyParams.config as JsonRecord).permissions as JsonRecord)[
+    "summing-project-readonly"
+  ] as JsonRecord;
+  const readOnlyFilesystem = readOnlyProfile.filesystem as JsonRecord;
+  assert.equal(readOnlyFilesystem[canonicalResolverConfig], undefined);
 
   await client.unsubscribeThread("thread-1");
   assert.deepEqual(client.calls.at(-1), ["thread/unsubscribe", { threadId: "thread-1" }]);

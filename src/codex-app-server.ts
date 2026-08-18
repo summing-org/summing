@@ -1,5 +1,13 @@
 import { EventEmitter, once } from "node:events";
-import { accessSync, constants, existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
+import {
+  accessSync,
+  constants,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+} from "node:fs";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { basename, delimiter, dirname, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -91,6 +99,16 @@ function executableInstallationReadRoot(command: string): string | null {
   return basename(binaryDirectory) === "bin" ? dirname(binaryDirectory) : binaryDirectory;
 }
 
+function readableCanonicalFile(path: string): string | null {
+  try {
+    const canonical = realpathSync(path);
+    accessSync(canonical, constants.R_OK);
+    return statSync(canonical).isFile() ? canonical : null;
+  } catch {
+    return null;
+  }
+}
+
 interface WorkspacePermissionOptions {
   deniedPaths?: string[];
   disableEnvironments?: boolean;
@@ -119,15 +137,18 @@ export class CodexAppServer extends EventEmitter {
   private closed = false;
   private readonly binaryReadRoot: string | null;
   private readonly nodeInstallationReadRoot: string | null;
+  private readonly resolverConfigReadPath: string | null;
   private readonly dynamicToolHandlers = new Map<string, DynamicToolHandler>();
 
   constructor(
     readonly binary: string,
     readonly codexHome: string,
+    resolverConfigPath = "/etc/resolv.conf",
   ) {
     super();
     this.binaryReadRoot = executableReadRoot(binary);
     this.nodeInstallationReadRoot = executableInstallationReadRoot(process.execPath);
+    this.resolverConfigReadPath = readableCanonicalFile(resolverConfigPath);
   }
 
   get running(): boolean {
@@ -532,6 +553,13 @@ export class CodexAppServer extends EventEmitter {
       ":minimal": "read",
       ":workspace_roots": workspaceRoots,
     };
+    // Linux distributions commonly expose /etc/resolv.conf as a symlink into
+    // /run. Landlock grants access to the link itself through :minimal, but it
+    // also needs an explicit rule for the canonical target before libc can
+    // resolve hostnames inside a network-enabled profile.
+    if (network && this.resolverConfigReadPath) {
+      filesystem[this.resolverConfigReadPath] = "read";
+    }
     // Node and npm are symlinked into PATH on production hosts, while their real
     // binaries and JavaScript packages live under one versioned installation root.
     // A PATH entry alone does not expose those symlink targets inside the sandbox.
