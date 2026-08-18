@@ -335,7 +335,9 @@ export class StateStore {
   analyzeKnowledgeCatalog(catalogPath: string): {
     sourceConflicts: number;
     eventConflicts: number;
+    knowledgeConflicts: number;
     existingEvents: number;
+    existingKnowledge: number;
   } {
     this.db.prepare("ATTACH DATABASE ? AS kb_import").run(catalogPath);
     try {
@@ -375,10 +377,29 @@ export class StateStore {
           AND current.event_kind = incoming.event_kind
           AND current.external_event_id = incoming.external_event_id
       `).get() as Row;
+      const knowledgeConflicts = this.db.prepare(`
+        SELECT COUNT(*) AS count
+        FROM kb_import.kb_team_knowledge incoming
+        JOIN team_knowledge current ON current.space_id = incoming.space_id
+          AND current.fingerprint = incoming.fingerprint
+        WHERE current.kind <> incoming.kind
+          OR current.subject <> incoming.subject
+          OR current.statement <> incoming.statement
+          OR current.visibility <> incoming.visibility
+          OR current.visibility_ref <> incoming.visibility_ref
+      `).get() as Row;
+      const existingKnowledge = this.db.prepare(`
+        SELECT COUNT(*) AS count
+        FROM kb_import.kb_team_knowledge incoming
+        JOIN team_knowledge current ON current.space_id = incoming.space_id
+          AND current.fingerprint = incoming.fingerprint
+      `).get() as Row;
       return {
         sourceConflicts: Number(sourceConflicts.count),
         eventConflicts: Number(eventConflicts.count),
+        knowledgeConflicts: Number(knowledgeConflicts.count),
         existingEvents: Number(existingEvents.count),
+        existingKnowledge: Number(existingKnowledge.count),
       };
     } finally {
       this.db.exec("DETACH DATABASE kb_import");
@@ -388,20 +409,67 @@ export class StateStore {
   importKnowledgeCatalog(
     catalogPath: string,
     administratorUserId: number,
-  ): { events: number; knowledge: number } {
+  ): {
+    events: number;
+    knowledge: number;
+    synthesisRuns: number;
+    interventions: number;
+    projectLinks: number;
+  } {
     this.db.prepare("ATTACH DATABASE ? AS kb_import").run(catalogPath);
     try {
       return this.transaction(() => {
+        const importedSpace = this.db.prepare(`
+          SELECT * FROM kb_import.kb_team_spaces
+        `).get() as Row | undefined;
+        if (!importedSpace) throw new Error("Team Space catalog has no space record");
         this.db.prepare(`
-          INSERT OR IGNORE INTO team_spaces
+          INSERT INTO team_spaces
             (id, name, administrator_user_id, phase, summary, summary_status,
              announced_at, model_egress_announced_at, oriented_at,
              last_intervention_at, created_at, updated_at)
-          SELECT id, name, ?, phase, summary, summary_status, announced_at,
-            model_egress_announced_at, oriented_at, last_intervention_at,
-            created_at, updated_at
-          FROM kb_import.kb_team_spaces
-        `).run(administratorUserId);
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            administrator_user_id = excluded.administrator_user_id,
+            name = CASE WHEN team_spaces.name = '' THEN excluded.name ELSE team_spaces.name END,
+            phase = CASE
+              WHEN team_spaces.phase = 'observing' THEN excluded.phase
+              ELSE team_spaces.phase
+            END,
+            summary = CASE
+              WHEN team_spaces.summary = '' THEN excluded.summary
+              ELSE team_spaces.summary
+            END,
+            summary_status = CASE
+              WHEN team_spaces.summary = '' THEN excluded.summary_status
+              ELSE team_spaces.summary_status
+            END,
+            announced_at = COALESCE(team_spaces.announced_at, excluded.announced_at),
+            model_egress_announced_at = COALESCE(
+              team_spaces.model_egress_announced_at,
+              excluded.model_egress_announced_at
+            ),
+            oriented_at = COALESCE(team_spaces.oriented_at, excluded.oriented_at),
+            last_intervention_at = CASE
+              WHEN team_spaces.last_intervention_at IS NULL THEN excluded.last_intervention_at
+              WHEN excluded.last_intervention_at IS NULL THEN team_spaces.last_intervention_at
+              ELSE MAX(team_spaces.last_intervention_at, excluded.last_intervention_at)
+            END,
+            updated_at = MAX(team_spaces.updated_at, excluded.updated_at)
+        `).run(
+          importedSpace.id ?? null,
+          importedSpace.name ?? null,
+          administratorUserId,
+          importedSpace.phase ?? null,
+          importedSpace.summary ?? null,
+          importedSpace.summary_status ?? null,
+          importedSpace.announced_at ?? null,
+          importedSpace.model_egress_announced_at ?? null,
+          importedSpace.oriented_at ?? null,
+          importedSpace.last_intervention_at ?? null,
+          importedSpace.created_at ?? null,
+          importedSpace.updated_at ?? null,
+        );
         this.db.exec(`
           INSERT OR IGNORE INTO team_sources
             (id, space_id, provider, external_space_id, external_thread_id, title,
@@ -466,6 +534,72 @@ export class StateStore {
           WHERE old_knowledge.target_knowledge_id IS NOT NULL
             AND new_knowledge.target_knowledge_id IS NOT NULL;
         `);
+        const hasPortableState = Boolean(this.db.prepare(`
+          SELECT 1 FROM kb_import.sqlite_master
+          WHERE type = 'table' AND name = 'kb_team_synthesis_runs'
+        `).get());
+        let synthesisRunCount = 0;
+        let interventionCount = 0;
+        let projectLinkCount = 0;
+        if (hasPortableState) {
+          const eventMap = new Map((this.db.prepare(`
+            SELECT export_event_id, target_event_id FROM kb_import.kb_team_events
+            WHERE target_event_id IS NOT NULL
+          `).all() as Row[]).map((row) => [Number(row.export_event_id), Number(row.target_event_id)]));
+          const synthesisRuns = this.db.prepare(`
+            SELECT * FROM kb_import.kb_team_synthesis_runs ORDER BY export_synthesis_id
+          `).all() as Row[];
+          const insertSynthesis = this.db.prepare(`
+            INSERT INTO team_synthesis_runs
+              (space_id, status, event_ids_json, response_json, error, started_at, completed_at)
+            SELECT ?, ?, ?, ?, ?, ?, ?
+            WHERE NOT EXISTS (
+              SELECT 1 FROM team_synthesis_runs current
+              WHERE current.space_id = ? AND current.status = ?
+                AND current.started_at = ? AND current.completed_at = ?
+            )
+          `);
+          for (const run of synthesisRuns) {
+            let exportedEventIds: unknown = [];
+            try { exportedEventIds = JSON.parse(String(run.event_ids_json)); } catch { /* invalid audit input */ }
+            const mappedEventIds = Array.isArray(exportedEventIds)
+              ? exportedEventIds.map(Number).map((id) => eventMap.get(id)).filter((id) => id !== undefined)
+              : [];
+            insertSynthesis.run(
+              String(run.space_id), String(run.status), JSON.stringify(mappedEventIds),
+              String(run.response_json ?? ""), run.error ?? null,
+              Number(run.started_at), Number(run.completed_at),
+              String(run.space_id), String(run.status),
+              Number(run.started_at), Number(run.completed_at),
+            );
+          }
+          this.db.exec(`
+            INSERT INTO team_interventions
+              (space_id, source_id, kind, reason, text, reply_to_external_event_id,
+               provider_message_id, created_at, sent_at)
+            SELECT incoming.space_id, incoming.source_id, incoming.kind, incoming.reason,
+              incoming.text, incoming.reply_to_external_event_id,
+              incoming.provider_message_id, incoming.created_at, incoming.sent_at
+            FROM kb_import.kb_team_interventions incoming
+            WHERE NOT EXISTS (
+              SELECT 1 FROM team_interventions current
+              WHERE current.space_id = incoming.space_id
+                AND current.source_id = incoming.source_id
+                AND current.kind = incoming.kind
+                AND current.created_at = incoming.created_at
+            );
+            INSERT OR IGNORE INTO team_space_projects (space_id, project_id, linked_at)
+            SELECT space_id, project_id, linked_at
+            FROM kb_import.kb_team_space_projects;
+          `);
+          synthesisRunCount = synthesisRuns.length;
+          interventionCount = Number((this.db.prepare(`
+            SELECT COUNT(*) AS count FROM kb_import.kb_team_interventions
+          `).get() as Row).count);
+          projectLinkCount = Number((this.db.prepare(`
+            SELECT COUNT(*) AS count FROM kb_import.kb_team_space_projects
+          `).get() as Row).count);
+        }
         const events = this.db.prepare(`
           SELECT COUNT(*) AS count FROM kb_import.kb_team_events
           WHERE target_event_id IS NOT NULL
@@ -474,7 +608,13 @@ export class StateStore {
           SELECT COUNT(*) AS count FROM kb_import.kb_team_knowledge
           WHERE target_knowledge_id IS NOT NULL
         `).get() as Row;
-        return { events: Number(events.count), knowledge: Number(knowledge.count) };
+        return {
+          events: Number(events.count),
+          knowledge: Number(knowledge.count),
+          synthesisRuns: synthesisRunCount,
+          interventions: interventionCount,
+          projectLinks: projectLinkCount,
+        };
       });
     } finally {
       this.db.exec("DETACH DATABASE kb_import");
@@ -1436,6 +1576,19 @@ export class StateStore {
   listTeamSpaces(): TeamSpace[] {
     return (this.db.prepare("SELECT * FROM team_spaces ORDER BY updated_at DESC, id").all() as Row[])
       .map((row) => this.toTeamSpace(row));
+  }
+
+  listTeamSources(spaceId?: string): TeamSource[] {
+    const rows = spaceId
+      ? this.db.prepare(`
+          SELECT * FROM team_sources WHERE space_id = ?
+          ORDER BY provider, external_space_id, external_thread_id, id
+        `).all(spaceId)
+      : this.db.prepare(`
+          SELECT * FROM team_sources
+          ORDER BY space_id, provider, external_space_id, external_thread_id, id
+        `).all();
+    return (rows as Row[]).map((row) => this.toTeamSource(row));
   }
 
   private toTeamSpace(row: Row): TeamSpace {

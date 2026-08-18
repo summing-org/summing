@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdirSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { KnowledgeSyncConfig } from "./config.js";
@@ -17,7 +17,12 @@ import {
   type SyncStageName,
   type SyncStatus,
 } from "./knowledge-sync-store.js";
-import { KnowledgeTransferManager } from "./knowledge-transfer.js";
+import {
+  KnowledgeTransferManager,
+  parsePortableTransferKey,
+  unwrapPortableTransferKey,
+  wrapPortableTransferKey,
+} from "./knowledge-transfer.js";
 import {
   MtprotoConnectorManager,
   type MtprotoAuthorizationStatus,
@@ -74,11 +79,14 @@ export interface KnowledgeSyncAdmin {
   unbindSource(chatId: number): void;
   revokeConnector(connectorId: string): Promise<void>;
   startKnowledgeExport(input: {
-    chatId: number;
+    spaceId: string;
     mode: KnowledgeTransferMode;
     includeEmbeddings?: boolean;
+  }): KnowledgeTransferRecord & { recoveryKey: string };
+  startKnowledgeImport(input: {
+    bundleKey: string;
+    recoveryKey: string;
   }): KnowledgeTransferRecord;
-  startKnowledgeImport(input: { bundleKey: string }): KnowledgeTransferRecord;
   confirmKnowledgeImport(id: string, acceptConsents: boolean): KnowledgeTransferRecord;
 }
 
@@ -347,52 +355,122 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
       consents: this.store.consentSummary(),
       statuses: this.store.listSyncStatuses(),
       notifications: this.store.outboxFailures(),
-      transfers: this.store.listKnowledgeTransfers(),
+      transfers: this.store.listKnowledgeTransfers().map((transfer) => ({
+        ...transfer,
+        request: {
+          ...transfer.request,
+          ...(transfer.request.wrappedTransferKey ? { wrappedTransferKey: "[stored]" } : {}),
+        },
+      })),
       importedSources: this.store.listImportedKnowledgeSources(),
+      spaces: this.state.listTeamSpaces().map((space) => ({
+        id: space.id,
+        title: space.name,
+        phase: space.phase,
+        sources: this.state.listTeamSources(space.id).map((source) => {
+          const binding = this.store.binding(source.id);
+          return {
+            id: source.id,
+            provider: source.provider,
+            externalSpaceId: source.externalSpaceId,
+            externalThreadId: source.externalThreadId,
+            title: binding?.title || source.title,
+            telegramChatId: binding?.telegramChatId ?? Number(source.externalSpaceId),
+            bound: Boolean(binding),
+          };
+        }),
+      })),
     };
   }
 
   startKnowledgeExport(input: {
-    chatId: number;
+    spaceId: string;
     mode: KnowledgeTransferMode;
     includeEmbeddings?: boolean;
-  }): KnowledgeTransferRecord {
+  }): KnowledgeTransferRecord & { recoveryKey: string } {
     if (!this.config.enabled) throw new Error("knowledge sync is disabled");
-    const binding = this.store.listBindings().find((item) => item.telegramChatId === input.chatId);
-    if (!binding) throw new Error("Telegram group is not bound to knowledge sync");
+    const space = this.state.teamSpace(input.spaceId);
+    if (!space) throw new Error("Team Space does not exist");
+    if (this.state.listTeamSources(space.id).length === 0) {
+      throw new Error("Team Space has no sources");
+    }
     if (input.mode !== "manifest" && input.mode !== "portable") {
       throw new Error("knowledge export mode must be manifest or portable");
     }
-    const transfer = this.store.createKnowledgeTransfer({
-      id: randomUUID(),
-      kind: "export",
-      mode: input.mode,
-      sourceId: binding.sourceId,
-      request: { includeEmbeddings: input.includeEmbeddings !== false },
-    });
-    this.scheduleTransfers(0);
-    return transfer;
+    const id = randomUUID();
+    const portableKey = randomBytes(32);
+    try {
+      const recoveryKey = portableKey.toString("hex");
+      const transfer = this.store.createKnowledgeTransfer({
+        id,
+        kind: "export",
+        mode: input.mode,
+        request: {
+          spaceId: space.id,
+          includeEmbeddings: input.includeEmbeddings !== false,
+          wrappedTransferKey: wrapPortableTransferKey(
+            this.config.knowledgeTransferKeyPath,
+            id,
+            portableKey,
+          ),
+        },
+      });
+      this.scheduleTransfers(0);
+      return {
+        ...transfer,
+        request: { ...transfer.request, wrappedTransferKey: "[stored]" },
+        recoveryKey,
+      };
+    } finally {
+      portableKey.fill(0);
+    }
   }
 
-  startKnowledgeImport(input: { bundleKey: string }): KnowledgeTransferRecord {
+  startKnowledgeImport(input: {
+    bundleKey: string;
+    recoveryKey: string;
+  }): KnowledgeTransferRecord {
     if (!this.config.enabled) throw new Error("knowledge sync is disabled");
     const bundleKey = input.bundleKey.trim();
     if (!bundleKey) throw new Error("knowledge bundle key is required");
-    const transfer = this.store.createKnowledgeTransfer({
-      id: randomUUID(),
-      kind: "import",
-      mode: "portable",
-      bundleKey,
-      request: { bundleKey, confirmed: false },
-    });
-    this.scheduleTransfers(0);
-    return transfer;
+    const id = randomUUID();
+    const portableKey = parsePortableTransferKey(input.recoveryKey);
+    try {
+      const transfer = this.store.createKnowledgeTransfer({
+        id,
+        kind: "import",
+        mode: "portable",
+        bundleKey,
+        request: {
+          bundleKey,
+          confirmed: false,
+          wrappedTransferKey: wrapPortableTransferKey(
+            this.config.knowledgeTransferKeyPath,
+            id,
+            portableKey,
+          ),
+        },
+      });
+      this.scheduleTransfers(0);
+      return {
+        ...transfer,
+        request: { ...transfer.request, wrappedTransferKey: "[stored]" },
+      };
+    } finally {
+      portableKey.fill(0);
+    }
   }
 
   confirmKnowledgeImport(id: string, acceptConsents: boolean): KnowledgeTransferRecord {
     const transfer = this.store.confirmKnowledgeImport(id, acceptConsents);
     this.scheduleTransfers(0);
-    return transfer;
+    return {
+      ...transfer,
+      request: {
+        ...transfer.request,
+        ...(transfer.request.wrappedTransferKey ? { wrappedTransferKey: "[stored]" } : {}),
+      },
+    };
   }
 
   beginAuthorization(input: {
@@ -1407,29 +1485,50 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
       if (!transfer) return;
       try {
         if (transfer.kind === "export") {
-          if (!transfer.sourceId) throw new Error("knowledge export source is missing");
-          const result = await this.transfers.export({
-            exportId: transfer.id,
-            sourceId: transfer.sourceId,
-            mode: transfer.mode,
-            includeEmbeddings: transfer.request.includeEmbeddings !== false,
-          });
-          this.store.finishKnowledgeTransfer(transfer.id, { ...result }, result.bundleKey);
+          const spaceId = String(transfer.request.spaceId ?? "").trim();
+          if (!spaceId) throw new Error("Team Space export id is missing");
+          const transferKey = unwrapPortableTransferKey(
+            this.config.knowledgeTransferKeyPath,
+            transfer.id,
+            String(transfer.request.wrappedTransferKey ?? ""),
+          );
+          try {
+            const result = await this.transfers.export({
+              exportId: transfer.id,
+              spaceId,
+              mode: transfer.mode,
+              includeEmbeddings: transfer.request.includeEmbeddings !== false,
+              transferKey,
+            });
+            this.store.finishKnowledgeTransfer(transfer.id, { ...result }, result.bundleKey);
+          } finally {
+            transferKey.fill(0);
+          }
           return;
         }
         const bundleKey = String(transfer.request.bundleKey ?? transfer.bundleKey).trim();
         if (!bundleKey) throw new Error("knowledge import bundle key is missing");
-        if (transfer.request.confirmed !== true) {
-          const inspection = await this.transfers.inspect(bundleKey);
-          this.store.awaitKnowledgeImportConfirmation(transfer.id, { ...inspection }, bundleKey);
-          return;
-        }
-        const result = await this.transfers.import(
-          bundleKey,
-          transfer.request.acceptConsents === true,
+        const transferKey = unwrapPortableTransferKey(
+          this.config.knowledgeTransferKeyPath,
+          transfer.id,
+          String(transfer.request.wrappedTransferKey ?? ""),
         );
-        await this.rebuildSearchAfterImport();
-        this.store.finishKnowledgeTransfer(transfer.id, { ...result }, bundleKey);
+        try {
+          if (transfer.request.confirmed !== true) {
+            const inspection = await this.transfers.inspect(bundleKey, transferKey);
+            this.store.awaitKnowledgeImportConfirmation(transfer.id, { ...inspection }, bundleKey);
+            return;
+          }
+          const result = await this.transfers.import(
+            bundleKey,
+            transfer.request.acceptConsents === true,
+            transferKey,
+          );
+          await this.rebuildSearchAfterImport();
+          this.store.finishKnowledgeTransfer(transfer.id, { ...result }, bundleKey);
+        } finally {
+          transferKey.fill(0);
+        }
       } catch (error) {
         this.store.failKnowledgeTransfer(transfer.id, errorText(error));
       }

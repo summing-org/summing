@@ -29,8 +29,8 @@ import type { ObjectStore } from "./object-store.js";
 import { sha256File } from "./object-store.js";
 import type { StateStore } from "./state-store.js";
 
-const FORMAT = "summing-kb-transfer";
-const FORMAT_VERSION = 1;
+const FORMAT = "summing-team-space-transfer";
+const FORMAT_VERSION = 2;
 const CIPHER = "aes-256-gcm";
 
 type Row = Record<string, SQLInputValue>;
@@ -41,7 +41,15 @@ interface TransferManifest {
   exportId: string;
   mode: KnowledgeTransferMode;
   createdAt: string;
-  source: { id: string; telegramChatId: number; title: string };
+  space: { id: string; title: string };
+  sources: Array<{
+    id: string;
+    provider: string;
+    telegramChatId: number;
+    externalThreadId: string;
+    title: string;
+    checkpoint: Record<string, unknown>;
+  }>;
   catalog: { key: string; sha256: string; size: number; iv: string; tag: string };
   counts: Record<string, number>;
   hmac: string;
@@ -59,17 +67,22 @@ export interface KnowledgeImportInspection {
   exportId: string;
   mode: KnowledgeTransferMode;
   bundleKey: string;
+  spaceId: string;
   sourceId: string;
   telegramChatId: number;
   title: string;
+  sources: TransferManifest["sources"];
+  linkedProjectIds: string[];
   counts: Record<string, number>;
   grantedConsents: number;
   missingObjects: number;
   sourceConflicts: number;
   eventConflicts: number;
+  knowledgeConflicts: number;
   objectConflicts: number;
   consentOverrides: number;
   existingEvents: number;
+  existingKnowledge: number;
   existingObjects: number;
   ready: boolean;
   warnings: string[];
@@ -98,6 +111,58 @@ function parseTransferKey(path: string): Buffer {
 
 function deriveKey(master: Buffer, exportId: string, purpose: string): Buffer {
   return Buffer.from(hkdfSync("sha256", master, Buffer.from(exportId), Buffer.from(purpose), 32));
+}
+
+export function parsePortableTransferKey(value: string): Buffer {
+  const normalized = value.trim();
+  const key = /^[a-f0-9]{64}$/i.test(normalized)
+    ? Buffer.from(normalized, "hex")
+    : Buffer.from(normalized, "base64url");
+  if (key.length !== 32) throw new Error("Team Space recovery key must contain exactly 32 bytes");
+  return key;
+}
+
+export function wrapPortableTransferKey(
+  localKeyPath: string,
+  transferId: string,
+  portableKey: Buffer,
+): string {
+  if (portableKey.length !== 32) throw new Error("Team Space recovery key must contain exactly 32 bytes");
+  const local = parseTransferKey(localKeyPath);
+  const key = deriveKey(local, transferId, "summing-team-space-key-wrap-v1");
+  const iv = randomBytes(12);
+  const cipher = createCipheriv(CIPHER, key, iv);
+  const ciphertext = Buffer.concat([cipher.update(portableKey), cipher.final()]);
+  return JSON.stringify({
+    version: 1,
+    iv: iv.toString("base64"),
+    tag: cipher.getAuthTag().toString("base64"),
+    ciphertext: ciphertext.toString("base64"),
+  });
+}
+
+export function unwrapPortableTransferKey(
+  localKeyPath: string,
+  transferId: string,
+  wrapped: string,
+): Buffer {
+  let envelope: { version?: unknown; iv?: unknown; tag?: unknown; ciphertext?: unknown };
+  try {
+    envelope = JSON.parse(wrapped) as typeof envelope;
+  } catch {
+    throw new Error("Team Space recovery key envelope is invalid");
+  }
+  if (envelope.version !== 1) throw new Error("Team Space recovery key envelope is unsupported");
+  const local = parseTransferKey(localKeyPath);
+  const key = deriveKey(local, transferId, "summing-team-space-key-wrap-v1");
+  const decipher = createDecipheriv(CIPHER, key, Buffer.from(String(envelope.iv), "base64"));
+  decipher.setAuthTag(Buffer.from(String(envelope.tag), "base64"));
+  const clear = Buffer.concat([
+    decipher.update(Buffer.from(String(envelope.ciphertext), "base64")),
+    decipher.final(),
+  ]);
+  if (clear.length !== 32) throw new Error("Team Space recovery key envelope is invalid");
+  return clear;
 }
 
 function safeObjectKey(key: string): string {
@@ -160,9 +225,20 @@ function signManifest(manifest: TransferManifest, signingKey: Buffer): string {
 
 function verifyManifest(manifest: TransferManifest, signingKey: Buffer): void {
   if (manifest.format !== FORMAT || manifest.version !== FORMAT_VERSION) {
-    throw new Error("unsupported knowledge bundle format");
+    throw new Error("unsupported Team Space bundle format");
   }
   if (!/^[a-f0-9-]{20,80}$/i.test(manifest.exportId)) throw new Error("invalid export id");
+  if (!manifest.space?.id || !manifest.space.title || !Array.isArray(manifest.sources) ||
+    manifest.sources.length === 0 || manifest.sources.length > 10_000) {
+    throw new Error("Team Space bundle manifest is incomplete");
+  }
+  if (new Set(manifest.sources.map((source) => source.id)).size !== manifest.sources.length ||
+    manifest.sources.some((source) =>
+      !source.id || !source.provider || !Number.isSafeInteger(source.telegramChatId) ||
+      !source.externalThreadId || !source.checkpoint || typeof source.checkpoint !== "object"
+    )) {
+    throw new Error("Team Space bundle sources are invalid");
+  }
   const expected = Buffer.from(signManifest(manifest, signingKey), "hex");
   const actual = Buffer.from(String(manifest.hmac), "hex");
   if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
@@ -181,13 +257,30 @@ export class KnowledgeTransferManager {
 
   async export(input: {
     exportId: string;
-    sourceId: string;
+    spaceId: string;
     mode: KnowledgeTransferMode;
     includeEmbeddings?: boolean;
+    transferKey?: Buffer;
   }): Promise<KnowledgeExportResult> {
-    const binding = this.core.binding(input.sourceId);
-    const source = this.state.teamSource(input.sourceId);
-    if (!binding || !source) throw new Error("knowledge source is not bound to Telegram");
+    const space = this.state.teamSpace(input.spaceId);
+    if (!space) throw new Error("team space does not exist");
+    const teamSources = this.state.listTeamSources(space.id);
+    if (teamSources.length === 0) throw new Error("team space has no sources");
+    const sources: TransferManifest["sources"] = teamSources.map((source) => {
+      const binding = this.core.binding(source.id);
+      const telegramChatId = binding?.telegramChatId ?? Number(source.externalSpaceId);
+      if (source.provider === "telegram" && !Number.isSafeInteger(telegramChatId)) {
+        throw new Error(`Telegram source ${source.id} has no portable chat id`);
+      }
+      return {
+        id: source.id,
+        provider: source.provider,
+        telegramChatId,
+        externalThreadId: source.externalThreadId,
+        title: binding?.title || source.title || space.name,
+        checkpoint: this.core.checkpoint(source.id)?.cursor ?? {},
+      };
+    });
     const work = this.createWorkDirectory(input.exportId);
     try {
       const stateBackup = join(work, "state.sqlite3");
@@ -197,26 +290,22 @@ export class KnowledgeTransferManager {
       chmodSync(stateBackup, 0o600);
       chmodSync(coreBackup, 0o600);
       this.assertSpoolBudget([stateBackup, coreBackup]);
-      const checkpoint = this.core.checkpoint(input.sourceId);
       this.buildCatalog({
         catalogPath,
         stateBackup,
         coreBackup,
-        sourceId: input.sourceId,
-        spaceId: source.spaceId,
+        spaceId: space.id,
         exportId: input.exportId,
         mode: input.mode,
-        telegramChatId: binding.telegramChatId,
-        title: binding.title || source.title,
-        checkpoint: checkpoint?.cursor ?? {},
+        sources,
         includeEmbeddings: input.includeEmbeddings !== false,
       });
       rmSync(stateBackup, { force: true });
       rmSync(coreBackup, { force: true });
       this.assertWorkBudget(work);
 
-      const master = parseTransferKey(this.config.knowledgeTransferKeyPath);
-      const objectKey = deriveKey(master, input.exportId, "summing-kb-object-v1");
+      const master = input.transferKey ?? parseTransferKey(this.config.knowledgeTransferKeyPath);
+      const objectKey = deriveKey(master, input.exportId, "summing-team-space-object-v2");
       if (input.mode === "portable") {
         await this.exportPortableObjects(catalogPath, input.exportId, objectKey, work);
       } else {
@@ -238,7 +327,7 @@ export class KnowledgeTransferManager {
       this.assertWorkBudget(work);
       rmSync(catalogPath, { force: true });
       const encrypted = join(work, "catalog.sqlite.gz.enc");
-      const catalogKey = deriveKey(master, input.exportId, "summing-kb-catalog-v1");
+      const catalogKey = deriveKey(master, input.exportId, "summing-team-space-catalog-v2");
       const encryption = await encryptFile(compressed, encrypted, catalogKey);
       this.assertWorkBudget(work);
       rmSync(compressed, { force: true });
@@ -258,11 +347,8 @@ export class KnowledgeTransferManager {
         exportId: input.exportId,
         mode: input.mode,
         createdAt: new Date().toISOString(),
-        source: {
-          id: input.sourceId,
-          telegramChatId: binding.telegramChatId,
-          title: binding.title || source.title,
-        },
+        space: { id: space.id, title: space.name },
+        sources,
         catalog: {
           key: catalogObjectKey,
           sha256: digest.sha256,
@@ -274,7 +360,7 @@ export class KnowledgeTransferManager {
       };
       manifest.hmac = signManifest(
         manifest,
-        deriveKey(master, input.exportId, "summing-kb-manifest-v1"),
+        deriveKey(master, input.exportId, "summing-team-space-manifest-v2"),
       );
       const manifestPath = join(work, "manifest.json");
       writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
@@ -297,27 +383,44 @@ export class KnowledgeTransferManager {
     }
   }
 
-  async inspect(bundleKey: string): Promise<KnowledgeImportInspection> {
-    return this.withVerifiedCatalog(bundleKey, async ({ manifest, catalogPath }) => {
+  async inspect(bundleKey: string, transferKey?: Buffer): Promise<KnowledgeImportInspection> {
+    return this.withVerifiedCatalog(bundleKey, transferKey, async ({ manifest, catalogPath }) => {
       return this.inspectCatalog(bundleKey, manifest, catalogPath);
     });
   }
 
-  async import(bundleKey: string, acceptConsents: boolean): Promise<KnowledgeImportInspection & {
-    imported: { events: number; knowledge: number; consents: number; objects: number; blocks: number; chunks: number };
+  async import(
+    bundleKey: string,
+    acceptConsents: boolean,
+    transferKey?: Buffer,
+  ): Promise<KnowledgeImportInspection & {
+    imported: {
+      events: number;
+      knowledge: number;
+      synthesisRuns: number;
+      interventions: number;
+      projectLinks: number;
+      consents: number;
+      unknownAuthors: number;
+      objects: number;
+      blocks: number;
+      chunks: number;
+    };
   }> {
-    return this.withVerifiedCatalog(bundleKey, async ({ manifest, catalogPath, work }) => {
+    return this.withVerifiedCatalog(bundleKey, transferKey, async ({ manifest, catalogPath, work }) => {
       const inspection = await this.inspectCatalog(bundleKey, manifest, catalogPath);
       if (!inspection.ready) throw new Error("knowledge bundle dry-run has blocking conflicts or missing objects");
       if (inspection.grantedConsents > 0 && !acceptConsents) {
         throw new Error("imported consent records require explicit acceptance");
       }
-      const master = parseTransferKey(this.config.knowledgeTransferKeyPath);
-      const objectKey = deriveKey(master, manifest.exportId, "summing-kb-object-v1");
+      const master = transferKey ?? parseTransferKey(this.config.knowledgeTransferKeyPath);
+      const objectKey = deriveKey(master, manifest.exportId, "summing-team-space-object-v2");
       await this.importObjects(catalogPath, manifest.mode, objectKey, work);
-      const locallyRevokedUserIds = this.core.listConsents(manifest.source.id)
-        .filter((consent) => consent.status === "revoked")
-        .map((consent) => consent.telegramUserId);
+      const locallyRevoked = manifest.sources.flatMap((source) =>
+        this.core.listConsents(source.id)
+          .filter((consent) => consent.status === "revoked")
+          .map((consent) => ({ sourceId: source.id, telegramUserId: consent.telegramUserId }))
+      );
       const stateResult = this.state.importKnowledgeCatalog(catalogPath, this.administratorUserId);
       const coreResult = this.core.importKnowledgeCatalog(catalogPath, {
         acceptConsents,
@@ -326,27 +429,27 @@ export class KnowledgeTransferManager {
         embeddingModel: this.config.embeddingModel,
         embeddingDimensions: this.config.embeddingDimensions,
       });
-      const meta = this.catalogMeta(catalogPath);
-      const spaceId = String(meta.space_id ?? "");
-      if (!spaceId) throw new Error("knowledge catalog space id is missing");
-      for (const telegramUserId of locallyRevokedUserIds) {
+      const spaceId = manifest.space.id;
+      for (const revoked of locallyRevoked) {
         const affectedKnowledge = this.state.teamKnowledgeForIdentity(
           spaceId,
           "telegram",
-          String(telegramUserId),
+          String(revoked.telegramUserId),
           10_000,
         );
-        this.state.forgetTeamIdentity(spaceId, "telegram", String(telegramUserId));
+        this.state.forgetTeamIdentity(spaceId, "telegram", String(revoked.telegramUserId));
         for (const knowledge of affectedKnowledge) this.core.removeKnowledgeIndex(knowledge.id);
-        const removal = this.core.revokeAuthorContent(manifest.source.id, telegramUserId);
+        const removal = this.core.revokeAuthorContent(revoked.sourceId, revoked.telegramUserId);
         for (const object of removal.removed) await this.objectStore.delete(object.objectKey);
       }
-      this.core.recordImportedKnowledgeSource({
-        sourceId: manifest.source.id,
-        telegramChatId: manifest.source.telegramChatId,
-        title: manifest.source.title,
-        checkpoint: JSON.parse(meta.checkpoint || "{}") as Record<string, unknown>,
-      });
+      for (const source of manifest.sources) {
+        this.core.recordImportedKnowledgeSource({
+          sourceId: source.id,
+          telegramChatId: source.telegramChatId,
+          title: source.title,
+          checkpoint: source.checkpoint,
+        });
+      }
       return {
         ...inspection,
         imported: { ...stateResult, ...coreResult },
@@ -378,13 +481,10 @@ export class KnowledgeTransferManager {
     catalogPath: string;
     stateBackup: string;
     coreBackup: string;
-    sourceId: string;
     spaceId: string;
     exportId: string;
     mode: KnowledgeTransferMode;
-    telegramChatId: number;
-    title: string;
-    checkpoint: Record<string, unknown>;
+    sources: TransferManifest["sources"];
     includeEmbeddings: boolean;
   }): void {
     const db = new DatabaseSync(input.catalogPath);
@@ -402,14 +502,35 @@ export class KnowledgeTransferManager {
         version: String(FORMAT_VERSION),
         export_id: input.exportId,
         mode: input.mode,
-        source_id: input.sourceId,
         space_id: input.spaceId,
-        telegram_chat_id: String(input.telegramChatId),
-        title: input.title,
-        checkpoint: JSON.stringify(input.checkpoint),
+        source_ids: JSON.stringify(input.sources.map((source) => source.id)),
         embedding_model: this.config.embeddingModel,
         embedding_dimensions: String(this.config.embeddingDimensions),
       })) meta.run(key, value);
+
+      db.exec(`CREATE TABLE kb_source_descriptors (
+        source_id TEXT PRIMARY KEY,
+        provider TEXT NOT NULL,
+        telegram_chat_id INTEGER NOT NULL,
+        external_thread_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        checkpoint_json TEXT NOT NULL
+      )`);
+      const insertSourceDescriptor = db.prepare(`
+        INSERT INTO kb_source_descriptors
+          (source_id, provider, telegram_chat_id, external_thread_id, title, checkpoint_json)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `);
+      for (const source of input.sources) {
+        insertSourceDescriptor.run(
+          source.id,
+          source.provider,
+          source.telegramChatId,
+          source.externalThreadId,
+          source.title,
+          JSON.stringify(source.checkpoint),
+        );
+      }
 
       create(`CREATE TABLE kb_team_spaces AS
         SELECT * FROM state_snapshot.team_spaces WHERE id = ?`, input.spaceId);
@@ -438,32 +559,49 @@ export class KnowledgeTransferManager {
         SELECT links.* FROM state_snapshot.team_knowledge_supersessions links
         JOIN state_snapshot.team_knowledge knowledge ON knowledge.id = links.old_knowledge_id
         WHERE knowledge.space_id = ?`, input.spaceId);
+      create(`CREATE TABLE kb_team_synthesis_runs AS
+        SELECT runs.id AS export_synthesis_id, runs.space_id, runs.status,
+          runs.event_ids_json, runs.response_json, runs.error,
+          runs.started_at, runs.completed_at
+        FROM state_snapshot.team_synthesis_runs runs WHERE runs.space_id = ?`, input.spaceId);
+      create(`CREATE TABLE kb_team_interventions AS
+        SELECT interventions.* FROM state_snapshot.team_interventions interventions
+        WHERE interventions.space_id = ?`, input.spaceId);
+      create(`CREATE TABLE kb_team_space_projects AS
+        SELECT links.* FROM state_snapshot.team_space_projects links
+        WHERE links.space_id = ?`, input.spaceId);
 
       create(`CREATE TABLE kb_team_consents AS
-        SELECT * FROM core_snapshot.team_consents WHERE source_id = ?`, input.sourceId);
+        SELECT consents.* FROM core_snapshot.team_consents consents
+        JOIN kb_team_sources sources ON sources.id = consents.source_id`);
       create(`CREATE TABLE kb_team_event_revisions AS
-        SELECT * FROM core_snapshot.team_event_revisions WHERE source_id = ?`, input.sourceId);
+        SELECT revisions.* FROM core_snapshot.team_event_revisions revisions
+        JOIN kb_team_sources sources ON sources.id = revisions.source_id`);
       create(`CREATE TABLE kb_content_object_refs AS
-        SELECT * FROM core_snapshot.content_object_refs WHERE source_id = ?`, input.sourceId);
+        SELECT refs.* FROM core_snapshot.content_object_refs refs
+        JOIN kb_team_sources sources ON sources.id = refs.source_id`);
       create(`CREATE TABLE kb_content_objects AS
         SELECT objects.*, objects.object_key AS original_object_key,
           '' AS transfer_object_key, '' AS transfer_iv, '' AS transfer_tag,
           '' AS transfer_sha256
         FROM core_snapshot.content_objects objects
         WHERE EXISTS (SELECT 1 FROM core_snapshot.content_object_refs refs
-          WHERE refs.sha256 = objects.sha256 AND refs.source_id = ?)`, input.sourceId);
+          JOIN kb_team_sources sources ON sources.id = refs.source_id
+          WHERE refs.sha256 = objects.sha256)`);
       create(`CREATE TABLE kb_document_blocks AS
         SELECT blocks.id AS export_block_id, CAST(NULL AS INTEGER) AS target_block_id,
           blocks.object_hash, blocks.source_id, blocks.block_kind, blocks.ordinal,
           blocks.text, blocks.locator_json, blocks.structure_json, blocks.created_at
         FROM core_snapshot.document_blocks blocks
+        JOIN kb_team_sources sources ON sources.id = blocks.source_id
         WHERE EXISTS (SELECT 1 FROM kb_content_objects objects
           WHERE objects.sha256 = blocks.object_hash)`);
       create(`CREATE TABLE kb_search_chunks AS
         SELECT chunks.id AS export_chunk_id, CAST(NULL AS INTEGER) AS target_chunk_id,
           chunks.source_id, chunks.normalized_hash, chunks.text, chunks.block_ids_json,
           chunks.metadata_json, chunks.created_at
-        FROM core_snapshot.search_chunks chunks WHERE chunks.source_id = ?`, input.sourceId);
+        FROM core_snapshot.search_chunks chunks
+        JOIN kb_team_sources sources ON sources.id = chunks.source_id`);
       create(`CREATE TABLE kb_search_chunk_blocks AS
         SELECT links.* FROM core_snapshot.search_chunk_blocks links
         JOIN kb_search_chunks chunks ON chunks.export_chunk_id = links.chunk_id
@@ -474,11 +612,14 @@ export class KnowledgeTransferManager {
         WHERE ? = 1`, input.includeEmbeddings ? 1 : 0);
       create(`CREATE TABLE kb_semantic_embeddings AS
         SELECT embeddings.* FROM core_snapshot.semantic_embeddings embeddings
-        WHERE embeddings.source_id = ? AND ? = 1`,
-      input.sourceId, input.includeEmbeddings ? 1 : 0);
+        JOIN kb_team_sources sources ON sources.id = embeddings.source_id
+        WHERE ? = 1`, input.includeEmbeddings ? 1 : 0);
       create(`CREATE TABLE kb_team_knowledge_evidence_refs AS
         SELECT refs.* FROM core_snapshot.team_knowledge_evidence_refs refs
         JOIN kb_team_knowledge knowledge ON knowledge.export_knowledge_id = refs.knowledge_id`);
+      create(`CREATE TABLE kb_team_sync_unknown_authors AS
+        SELECT authors.* FROM core_snapshot.team_sync_unknown_authors authors
+        JOIN kb_team_sources sources ON sources.id = authors.source_id`);
       db.exec(`
         CREATE INDEX kb_events_identity
           ON kb_team_events(source_id, event_kind, external_event_id);
@@ -553,7 +694,11 @@ export class KnowledgeTransferManager {
       people: numberCell(db, "SELECT COUNT(*) AS count FROM kb_team_people"),
       events: numberCell(db, "SELECT COUNT(*) AS count FROM kb_team_events"),
       knowledge: numberCell(db, "SELECT COUNT(*) AS count FROM kb_team_knowledge"),
+      synthesisRuns: numberCell(db, "SELECT COUNT(*) AS count FROM kb_team_synthesis_runs"),
+      interventions: numberCell(db, "SELECT COUNT(*) AS count FROM kb_team_interventions"),
+      projectLinks: numberCell(db, "SELECT COUNT(*) AS count FROM kb_team_space_projects"),
       consents: numberCell(db, "SELECT COUNT(*) AS count FROM kb_team_consents"),
+      unknownAuthors: numberCell(db, "SELECT COUNT(*) AS count FROM kb_team_sync_unknown_authors"),
       objects: numberCell(db, "SELECT COUNT(*) AS count FROM kb_content_objects"),
       blocks: numberCell(db, "SELECT COUNT(*) AS count FROM kb_document_blocks"),
       chunks: numberCell(db, "SELECT COUNT(*) AS count FROM kb_search_chunks"),
@@ -563,6 +708,7 @@ export class KnowledgeTransferManager {
 
   private async withVerifiedCatalog<T>(
     bundleKey: string,
+    transferKey: Buffer | undefined,
     action: (context: {
       manifest: TransferManifest;
       catalogPath: string;
@@ -574,11 +720,14 @@ export class KnowledgeTransferManager {
     try {
       const manifestPath = join(work, "manifest.json");
       await this.objectStore.getFile(safeBundleKey, manifestPath);
+      if (statSync(manifestPath).size > 1_000_000) {
+        throw new Error("Team Space bundle manifest exceeds 1 MB");
+      }
       const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as TransferManifest;
-      const master = parseTransferKey(this.config.knowledgeTransferKeyPath);
+      const master = transferKey ?? parseTransferKey(this.config.knowledgeTransferKeyPath);
       verifyManifest(
         manifest,
-        deriveKey(master, manifest.exportId, "summing-kb-manifest-v1"),
+        deriveKey(master, manifest.exportId, "summing-team-space-manifest-v2"),
       );
       safeObjectKey(manifest.catalog.key);
       if (!Number.isSafeInteger(manifest.catalog.size) || manifest.catalog.size <= 0 ||
@@ -596,7 +745,7 @@ export class KnowledgeTransferManager {
       await decryptFile(
         encrypted,
         compressed,
-        deriveKey(master, manifest.exportId, "summing-kb-catalog-v1"),
+        deriveKey(master, manifest.exportId, "summing-team-space-catalog-v2"),
         manifest.catalog.iv,
         manifest.catalog.tag,
       );
@@ -613,9 +762,23 @@ export class KnowledgeTransferManager {
         const meta = this.catalogMetaFromDb(db);
         if (
           meta.format !== FORMAT || meta.version !== String(FORMAT_VERSION) ||
-          meta.export_id !== manifest.exportId || meta.source_id !== manifest.source.id ||
+          meta.export_id !== manifest.exportId || meta.space_id !== manifest.space.id ||
+          meta.source_ids !== JSON.stringify(manifest.sources.map((source) => source.id)) ||
           meta.mode !== manifest.mode
         ) throw new Error("knowledge catalog metadata does not match its manifest");
+        const descriptors = new Map((db.prepare(`
+          SELECT * FROM kb_source_descriptors
+        `).all() as Row[]).map((row) => [String(row.source_id), row]));
+        for (const source of manifest.sources) {
+          const descriptor = descriptors.get(source.id);
+          if (!descriptor || String(descriptor.provider) !== source.provider ||
+            Number(descriptor.telegram_chat_id) !== source.telegramChatId ||
+            String(descriptor.external_thread_id) !== source.externalThreadId ||
+            String(descriptor.title) !== source.title ||
+            String(descriptor.checkpoint_json) !== JSON.stringify(source.checkpoint)) {
+            throw new Error("Team Space source catalog does not match its manifest");
+          }
+        }
       } finally {
         db.close();
       }
@@ -635,6 +798,7 @@ export class KnowledgeTransferManager {
     const db = new DatabaseSync(catalogPath, { readOnly: true });
     let missingObjects = 0;
     let grantedConsents = 0;
+    let linkedProjectIds: string[] = [];
     let counts: Record<string, number>;
     try {
       counts = this.catalogCounts(db);
@@ -642,6 +806,9 @@ export class KnowledgeTransferManager {
         db,
         "SELECT COUNT(*) AS count FROM kb_team_consents WHERE status = 'granted'",
       );
+      linkedProjectIds = (db.prepare(`
+        SELECT project_id FROM kb_team_space_projects ORDER BY project_id
+      `).all() as Row[]).map((row) => String(row.project_id));
       const objectColumn = manifest.mode === "portable" ? "transfer_object_key" : "original_object_key";
       const rows = db.prepare(`SELECT ${objectColumn} AS object_key FROM kb_content_objects`).all() as Row[];
       for (const row of rows) {
@@ -655,30 +822,42 @@ export class KnowledgeTransferManager {
     if (core.consentOverrides > 0) {
       warnings.push(`${core.consentOverrides} imported grants are superseded by local revocations`);
     }
-    if (state.existingEvents > 0 || core.existingObjects > 0) {
+    if (state.existingEvents > 0 || state.existingKnowledge > 0 || core.existingObjects > 0) {
       warnings.push("existing matching records will be reused idempotently");
     }
     if (manifest.mode === "manifest") {
       warnings.push("manifest import depends on source object keys remaining accessible");
     }
+    if (linkedProjectIds.length > 0) {
+      warnings.push(
+        `${linkedProjectIds.length} linked projects must be mapped or provisioned on the target node`,
+      );
+    }
+    const primarySource = manifest.sources[0]!;
     return {
       exportId: manifest.exportId,
       mode: manifest.mode,
       bundleKey,
-      sourceId: manifest.source.id,
-      telegramChatId: manifest.source.telegramChatId,
-      title: manifest.source.title,
+      spaceId: manifest.space.id,
+      sourceId: primarySource.id,
+      telegramChatId: primarySource.telegramChatId,
+      title: manifest.space.title,
+      sources: manifest.sources,
+      linkedProjectIds,
       counts,
       grantedConsents,
       missingObjects,
       sourceConflicts: state.sourceConflicts,
       eventConflicts: state.eventConflicts,
+      knowledgeConflicts: state.knowledgeConflicts,
       objectConflicts: core.objectConflicts,
       consentOverrides: core.consentOverrides,
       existingEvents: state.existingEvents,
+      existingKnowledge: state.existingKnowledge,
       existingObjects: core.existingObjects,
       ready: missingObjects === 0 && state.sourceConflicts === 0 &&
-        state.eventConflicts === 0 && core.objectConflicts === 0,
+        state.eventConflicts === 0 && state.knowledgeConflicts === 0 &&
+        core.objectConflicts === 0,
       warnings,
     };
   }

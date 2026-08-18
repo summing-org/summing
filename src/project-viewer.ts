@@ -368,14 +368,23 @@ export class ProjectViewerServer {
           if (mode !== "manifest" && mode !== "portable") {
             throw new Error("knowledge export mode must be manifest or portable");
           }
+          const requestedSpaceId = String(body?.spaceId ?? "").trim();
+          const legacyChatId = Number(body?.chatId);
+          const spaceId = requestedSpaceId || (
+            Number.isSafeInteger(legacyChatId)
+              ? this.state.teamSpaceForProvider("telegram", String(legacyChatId))?.id ?? ""
+              : ""
+          );
+          if (!spaceId) throw new Error("Team Space is required for export");
           json(response, 202, sync.startKnowledgeExport({
-            chatId: Number(body?.chatId),
+            spaceId,
             mode,
             includeEmbeddings: body?.includeEmbeddings !== false,
           }));
         } else if (kind === "import") {
           json(response, 202, sync.startKnowledgeImport({
             bundleKey: String(body?.bundleKey ?? ""),
+            recoveryKey: String(body?.recoveryKey ?? ""),
           }));
         } else {
           throw new Error("knowledge transfer kind must be export or import");

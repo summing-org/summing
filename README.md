@@ -1,4 +1,4 @@
-# SUMMING 9.10
+# SUMMING 9.11
 
 SUMMING — один постоянно живущий агент с одним администратором и назначаемыми
 владельцами проектов. Он работает на Linux VPS, принимает команды из Telegram
@@ -376,16 +376,24 @@ S3-совместимый backend и отдельный 32-байтовый MTPr
 остаётся активным после backfill и удаляется только отдельным подтверждённым
 отзывом после отвязки всех групп.
 
-Во вкладке **База знаний** доступны versioned export/import одной Team Space.
-`manifest`-экспорт сохраняет зашифрованный canonical-каталог и ссылки на уже
-существующие объекты, не дублируя файлы. `portable` дополнительно копирует каждый
-оригинал в export-prefix с AES-256-GCM и подходит для переноса на чистый сервер.
-Импорт всегда проходит HMAC/checksum verification и dry-run, после чего требует
-явно принять перенесённые consent-записи; локальный revoke имеет приоритет.
-Коннекторы, MTProto-сессии, очереди и outbox в bundle не входят, а `search.sqlite`
-пересобирается из импортированного canonical-слоя. Для переноса между серверами
-нужно безопасно скопировать `/etc/summing/kb-transfer.key` отдельно от bundle:
-без этого ключа каталог и portable-объекты невозможно проверить или расшифровать.
+Во вкладке **База знаний** доступен versioned export/import целой Team Space.
+Формат `summing-team-space-transfer` v2 выбирается по `spaceId` и включает все
+источники пространства, участников, события и ревизии, согласия, неизвестных
+авторов, synthesis-аудит, interventions, project links, checkpoints, canonical
+документы и evidence. `manifest` сохраняет ссылки на уже существующие объекты,
+не дублируя файлы. `portable` дополнительно копирует каждый оригинал в
+export-prefix с AES-256-GCM и подходит для другой VPS или другого S3-prefix.
+
+При создании bundle Mini App один раз показывает отдельный 32-байтовый recovery
+key. В durable job хранится только его AES-GCM envelope, зашифрованный локальным
+`/etc/summing/kb-transfer.key`; поэтому серверный ключ копировать на другую VPS
+не нужно. Для import нужны S3 object key manifest и сохранённый recovery key.
+Импорт проходит HMAC/checksum verification и dry-run, после чего требует явно
+принять consent-записи; локальный revoke имеет приоритет. Связанные project IDs
+показываются как зависимости, которые нужно сопоставить или provision на целевой
+ноде. Коннекторы, MTProto-сессии, operational queues и outbox в bundle не входят,
+а `search.sqlite` пересобирается из импортированного canonical-слоя. После import
+Telegram-источники явно перепривязываются к локальному MTProto-коннектору.
 
 Полная архитектура и VPS runbook: [PROJECT_HANDBOOK_RU.md](PROJECT_HANDBOOK_RU.md).
 Конституционные принципы: [BIBLE.md](BIBLE.md).

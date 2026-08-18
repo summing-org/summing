@@ -186,13 +186,17 @@ test("owner-only Admin API exposes MTProto, consent and source sync actions", as
     const exported = await fetch(`${endpoint}/api/viewer/admin/knowledge/transfers`, {
       method: "POST",
       headers: { ...auth(1), "content-type": "application/json" },
-      body: JSON.stringify({ kind: "export", chatId: -100, mode: "portable" }),
+      body: JSON.stringify({ kind: "export", spaceId: "space-test", mode: "portable" }),
     });
     assert.equal(exported.status, 202);
     const imported = await fetch(`${endpoint}/api/viewer/admin/knowledge/transfers`, {
       method: "POST",
       headers: { ...auth(1), "content-type": "application/json" },
-      body: JSON.stringify({ kind: "import", bundleKey: "summing/exports/id/manifest.json" }),
+      body: JSON.stringify({
+        kind: "import",
+        bundleKey: "summing/exports/id/manifest.json",
+        recoveryKey: "a".repeat(64),
+      }),
     });
     assert.equal(imported.status, 202);
     assert.equal(

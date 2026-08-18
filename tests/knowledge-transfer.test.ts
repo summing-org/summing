@@ -6,7 +6,11 @@ import { join } from "node:path";
 import test from "node:test";
 import type { KnowledgeSyncConfig } from "../src/config.js";
 import { KnowledgeSyncStore } from "../src/knowledge-sync-store.js";
-import { KnowledgeTransferManager } from "../src/knowledge-transfer.js";
+import {
+  KnowledgeTransferManager,
+  unwrapPortableTransferKey,
+  wrapPortableTransferKey,
+} from "../src/knowledge-transfer.js";
 import { ContentAddressedObjects, LocalObjectStore } from "../src/object-store.js";
 import { StateStore } from "../src/state-store.js";
 
@@ -36,10 +40,38 @@ function transferConfig(root: string, prefix: string, keyPath: string): Knowledg
   };
 }
 
+test("portable recovery keys are stored only as node-local encrypted envelopes", () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-transfer-key-"));
+  const keyPath = join(root, "transfer.key");
+  const localKey = randomBytes(32);
+  const portableKey = randomBytes(32);
+  try {
+    writeFileSync(keyPath, localKey, { mode: 0o600 });
+    const transferId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    const wrapped = wrapPortableTransferKey(keyPath, transferId, portableKey);
+    assert.equal(wrapped.includes(portableKey.toString("hex")), false);
+    assert.deepEqual(unwrapPortableTransferKey(keyPath, transferId, wrapped), portableKey);
+    assert.throws(
+      () => unwrapPortableTransferKey(
+        keyPath,
+        "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        wrapped,
+      ),
+    );
+  } finally {
+    localKey.fill(0);
+    portableKey.fill(0);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("portable knowledge bundle round-trips into clean databases and reimports idempotently", async () => {
   const root = mkdtempSync(join(tmpdir(), "summing-kb-transfer-"));
-  const keyPath = join(root, "transfer.key");
-  writeFileSync(keyPath, randomBytes(32), { mode: 0o600 });
+  const sourceKeyPath = join(root, "source-transfer.key");
+  const targetKeyPath = join(root, "target-transfer.key");
+  const portableKey = randomBytes(32);
+  writeFileSync(sourceKeyPath, randomBytes(32), { mode: 0o600 });
+  writeFileSync(targetKeyPath, randomBytes(32), { mode: 0o600 });
   const objects = new LocalObjectStore(join(root, "objects"));
   const sourceState = new StateStore(join(root, "source-state.sqlite3"));
   const sourceCore = new KnowledgeSyncStore(join(root, "source-core.sqlite"));
@@ -59,6 +91,21 @@ test("portable knowledge bundle round-trips into clean databases and reimports i
       text: "The launch decision is Friday.",
       occurredAt: 100,
       observedAt: 101,
+      administratorUserId: 42,
+    })!;
+    const secondEvent = sourceState.recordTeamEvent({
+      provider: "telegram",
+      externalSpaceId: "-100555",
+      externalThreadId: "77",
+      spaceName: "Engineering",
+      sourceTitle: "Engineering / Architecture",
+      externalEventId: "202",
+      eventKind: "message",
+      senderExternalId: "43",
+      senderDisplayName: "Grace",
+      text: "The architecture topic belongs to the same Team Space.",
+      occurredAt: 102,
+      observedAt: 103,
       administratorUserId: 42,
     })!;
     const connectorId = "11111111-1111-4111-8111-111111111111";
@@ -82,6 +129,14 @@ test("portable knowledge bundle round-trips into clean databases and reimports i
       grantedAt: 90,
       historicalFrom: 0,
     });
+    sourceCore.grantConsent({
+      sourceId: secondEvent.sourceId,
+      telegramUserId: 43,
+      proof: "contract-43",
+      grantedAt: 91,
+      historicalFrom: 0,
+    });
+    sourceCore.recordUnknownAuthor(secondEvent.sourceId, 99, 102);
     sourceCore.recordRevision({
       sourceId: event.sourceId,
       telegramMessageId: 101,
@@ -90,6 +145,30 @@ test("portable knowledge bundle round-trips into clean databases and reimports i
       teamEventId: event.id,
       occurredAt: 100,
     });
+    sourceCore.recordRevision({
+      sourceId: secondEvent.sourceId,
+      telegramMessageId: 202,
+      revision: 0,
+      eventKind: "message",
+      teamEventId: secondEvent.id,
+      occurredAt: 102,
+    });
+    sourceState.recordTeamUnderstandingFailure(
+      event.spaceId,
+      [event.id, secondEvent.id],
+      "fixture failure",
+      104,
+    );
+    sourceState.recordTeamIntervention({
+      spaceId: event.spaceId,
+      sourceId: secondEvent.sourceId,
+      kind: "proactive",
+      reason: "fixture",
+      text: "Review architecture",
+      replyToExternalEventId: "202",
+      providerMessageId: "",
+    });
+    sourceState.linkTeamProject(event.spaceId, "architecture-project");
 
     const originalPath = join(root, "architecture.txt");
     writeFileSync(originalPath, "Architecture evidence", { mode: 0o600 });
@@ -130,7 +209,7 @@ test("portable knowledge bundle round-trips into clean databases and reimports i
 
     const exportId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const sourceManager = new KnowledgeTransferManager(
-      transferConfig(root, "source-prefix", keyPath),
+      transferConfig(root, "source-prefix", sourceKeyPath),
       sourceState,
       sourceCore,
       objects,
@@ -138,16 +217,23 @@ test("portable knowledge bundle round-trips into clean databases and reimports i
     );
     const exported = await sourceManager.export({
       exportId,
-      sourceId: event.sourceId,
+      spaceId: event.spaceId,
       mode: "portable",
       includeEmbeddings: true,
+      transferKey: portableKey,
     });
-    assert.equal(exported.counts.events, 1);
+    assert.equal(exported.counts.sources, 2);
+    assert.equal(exported.counts.events, 2);
+    assert.equal(exported.counts.consents, 2);
+    assert.equal(exported.counts.unknownAuthors, 1);
+    assert.equal(exported.counts.synthesisRuns, 1);
+    assert.equal(exported.counts.interventions, 1);
+    assert.equal(exported.counts.projectLinks, 1);
     assert.equal(exported.counts.objects, 1);
     assert.equal(await objects.exists(exported.bundleKey), true);
 
     const targetManager = new KnowledgeTransferManager(
-      transferConfig(root, "target-prefix", keyPath),
+      transferConfig(root, "target-prefix", targetKeyPath),
       targetState,
       targetCore,
       objects,
@@ -181,29 +267,38 @@ test("portable knowledge bundle round-trips into clean databases and reimports i
       blockIds: [dummyBlockId],
       metadata: { objectHash: dummyHash },
     });
-    const dryRun = await targetManager.inspect(exported.bundleKey);
+    await assert.rejects(targetManager.inspect(exported.bundleKey), /signature is invalid/);
+    const dryRun = await targetManager.inspect(exported.bundleKey, portableKey);
     assert.equal(dryRun.ready, true);
-    assert.equal(dryRun.grantedConsents, 1);
+    assert.equal(dryRun.sources.length, 2);
+    assert.equal(dryRun.grantedConsents, 2);
+    assert.deepEqual(dryRun.linkedProjectIds, ["architecture-project"]);
     assert.equal(dryRun.missingObjects, 0);
     assert.equal(dryRun.consentOverrides, 0);
+    assert.equal(dryRun.knowledgeConflicts, 0);
     await assert.rejects(
-      targetManager.import(exported.bundleKey, false),
+      targetManager.import(exported.bundleKey, false, portableKey),
       /explicit acceptance/,
     );
 
-    const imported = await targetManager.import(exported.bundleKey, true);
+    const imported = await targetManager.import(exported.bundleKey, true, portableKey);
     assert.deepEqual(imported.imported, {
-      events: 1,
+      events: 2,
       knowledge: 0,
-      consents: 1,
+      synthesisRuns: 1,
+      interventions: 1,
+      projectLinks: 1,
+      consents: 2,
+      unknownAuthors: 1,
       objects: 1,
       blocks: 1,
       chunks: 1,
     });
     const targetSource = targetState.teamSource(event.sourceId)!;
-    assert.equal(targetState.teamEventCount(targetSource.spaceId), 1);
+    assert.equal(targetState.teamEventCount(targetSource.spaceId), 2);
     assert.equal(targetState.teamSpace(targetSource.spaceId)?.administratorUserId, 9001);
     assert.equal(targetCore.consent(event.sourceId, 42)?.proof, "contract-42");
+    assert.equal(targetCore.consent(secondEvent.sourceId, 43)?.proof, "contract-43");
     const targetChunks = targetCore.searchChunksAfter(0);
     assert.equal(targetChunks.length, 2);
     const importedChunk = targetChunks.find((chunk) => chunk.sourceId === event.sourceId)!;
@@ -217,23 +312,27 @@ test("portable knowledge bundle round-trips into clean databases and reimports i
       )!],
       [1, 0, 0, 0],
     );
-    assert.equal(targetCore.listImportedKnowledgeSources()[0]?.telegramChatId, -100555);
+    assert.equal(targetCore.listImportedKnowledgeSources().length, 2);
+    assert.ok(targetCore.listImportedKnowledgeSources().every((source) =>
+      source.telegramChatId === -100555
+    ));
     assert.equal(
       await objects.exists(`target-prefix/sha256/${stored.sha256.slice(0, 2)}/${stored.sha256}`),
       true,
     );
 
-    await targetManager.import(exported.bundleKey, true);
-    assert.equal(targetState.teamEventCount(targetSource.spaceId), 1);
+    await targetManager.import(exported.bundleKey, true, portableKey);
+    assert.equal(targetState.teamEventCount(targetSource.spaceId), 2);
     assert.equal(targetCore.searchChunksAfter(0).length, 2);
 
     const manifestExport = await sourceManager.export({
       exportId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
-      sourceId: event.sourceId,
+      spaceId: event.spaceId,
       mode: "manifest",
       includeEmbeddings: false,
+      transferKey: portableKey,
     });
-    const manifestDryRun = await targetManager.inspect(manifestExport.bundleKey);
+    const manifestDryRun = await targetManager.inspect(manifestExport.bundleKey, portableKey);
     assert.equal(manifestDryRun.mode, "manifest");
     assert.equal(manifestDryRun.ready, true);
     assert.equal(manifestDryRun.counts.embeddings, 0);
@@ -248,17 +347,17 @@ test("portable knowledge bundle round-trips into clean databases and reimports i
       });
       revokedCore.revokeConsent(event.sourceId, 42);
       const revokedManager = new KnowledgeTransferManager(
-        transferConfig(root, "revoked-prefix", keyPath),
+        transferConfig(root, "revoked-prefix", targetKeyPath),
         revokedState,
         revokedCore,
         objects,
         9002,
       );
-      const revokedDryRun = await revokedManager.inspect(exported.bundleKey);
+      const revokedDryRun = await revokedManager.inspect(exported.bundleKey, portableKey);
       assert.equal(revokedDryRun.consentOverrides, 1);
-      await revokedManager.import(exported.bundleKey, true);
+      await revokedManager.import(exported.bundleKey, true, portableKey);
       const revokedSource = revokedState.teamSource(event.sourceId)!;
-      assert.equal(revokedState.teamEventCount(revokedSource.spaceId), 0);
+      assert.equal(revokedState.teamEventCount(revokedSource.spaceId), 1);
       assert.equal(revokedCore.consent(event.sourceId, 42)?.status, "revoked");
       assert.equal(revokedCore.contentObject(stored.sha256), null);
     } finally {
@@ -270,8 +369,12 @@ test("portable knowledge bundle round-trips into clean databases and reimports i
     const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as Record<string, unknown>;
     manifest.hmac = "00".repeat(32);
     writeFileSync(manifestPath, JSON.stringify(manifest), { mode: 0o600 });
-    await assert.rejects(targetManager.inspect(exported.bundleKey), /signature is invalid/);
+    await assert.rejects(
+      targetManager.inspect(exported.bundleKey, portableKey),
+      /signature is invalid/,
+    );
   } finally {
+    portableKey.fill(0);
     sourceState.close();
     sourceCore.close();
     targetState.close();

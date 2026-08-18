@@ -19,6 +19,10 @@ test("administrator Mini App exposes projects, bindings and global settings", ()
   assert.match(ADMIN_HTML, /id="connectorForm"/);
   assert.match(ADMIN_HTML, /id="consentFrom"/);
   assert.match(ADMIN_HTML, /id="sourceSyncForm"/);
+  assert.match(ADMIN_HTML, /Перенести Team Space/);
+  assert.match(ADMIN_HTML, /id="exportSpace"/);
+  assert.match(ADMIN_HTML, /id="exportRecoveryKey"/);
+  assert.match(ADMIN_HTML, /id="importRecoveryKey"/);
   assert.match(ADMIN_HTML, /id="onboardingSteps"/);
   assert.match(ADMIN_HTML, /Интерактивный onboarding/);
   assert.match(ADMIN_HTML, /id="systemPanel"[^>]+role="tabpanel"/);
@@ -34,6 +38,8 @@ test("administrator Mini App exposes projects, bindings and global settings", ()
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/users/);
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/deployment/);
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/sync/);
+  assert.match(ADMIN_JS, /spaceId:\$\("exportSpace"\)\.value/);
+  assert.match(ADMIN_JS, /result\.recoveryKey/);
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/onboarding/);
   assert.match(ADMIN_JS, /renderOnboarding/);
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/mtproto\/connectors/);

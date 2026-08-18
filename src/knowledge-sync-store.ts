@@ -682,7 +682,13 @@ export class KnowledgeSyncStore {
       embeddingModel: string;
       embeddingDimensions: number;
     },
-  ): { consents: number; objects: number; blocks: number; chunks: number } {
+  ): {
+    consents: number;
+    unknownAuthors: number;
+    objects: number;
+    blocks: number;
+    chunks: number;
+  } {
     this.db.prepare("ATTACH DATABASE ? AS kb_import").run(catalogPath);
     try {
       return this.transaction(() => {
@@ -712,6 +718,26 @@ export class KnowledgeSyncStore {
             sqlValue(consent.status), sqlValue(consent.scope_json), sqlValue(consent.granted_at),
             sqlValue(consent.historical_from), sqlValue(consent.proof),
             sqlValue(consent.revoked_at), sqlValue(consent.updated_at),
+          );
+        }
+
+        const unknownAuthors = this.db.prepare(`
+          SELECT * FROM kb_import.kb_team_sync_unknown_authors
+          ORDER BY source_id, telegram_user_id
+        `).all() as Row[];
+        for (const author of unknownAuthors) {
+          this.db.prepare(`
+            INSERT INTO team_sync_unknown_authors
+              (source_id, telegram_user_id, first_seen_at, last_seen_at, message_count)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(source_id, telegram_user_id) DO UPDATE SET
+              first_seen_at = MIN(team_sync_unknown_authors.first_seen_at, excluded.first_seen_at),
+              last_seen_at = MAX(team_sync_unknown_authors.last_seen_at, excluded.last_seen_at),
+              message_count = MAX(team_sync_unknown_authors.message_count, excluded.message_count)
+          `).run(
+            sqlValue(author.source_id), sqlValue(author.telegram_user_id),
+            sqlValue(author.first_seen_at), sqlValue(author.last_seen_at),
+            sqlValue(author.message_count),
           );
         }
 
@@ -920,6 +946,7 @@ export class KnowledgeSyncStore {
         }
         return {
           consents: consents.length,
+          unknownAuthors: unknownAuthors.length,
           objects: objects.length,
           blocks: blocks.length,
           chunks: chunks.length,
