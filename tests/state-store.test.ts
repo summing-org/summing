@@ -106,6 +106,45 @@ test("rebinding starts a fresh Codex context", () => {
   }
 });
 
+test("unbinding removes local routing history but preserves the discovered Telegram topic", () => {
+  const { root, path, store } = tempStore();
+  try {
+    store.recordTelegramChat({
+      chatId: -1005,
+      type: "supergroup",
+      title: "Engineering",
+      isForum: true,
+      botStatus: "administrator",
+    });
+    store.recordTelegramTopic(-1005, 23, "Backend");
+    const conversation = store.bind(-1005, 23, "one", "app");
+    store.setThread(conversation.id, "thr_old");
+    const inputId = store.enqueueInput(conversation.id, 7, "completed work", "followup");
+    const runId = store.startRun(conversation.id, "completed work", [inputId]);
+    store.finishRun(runId, "completed", "done");
+
+    const removed = store.unbind(-1005, 23);
+    assert.equal(removed?.id, conversation.id);
+    assert.equal(removed?.codexThreadId, "thr_old");
+    assert.equal(store.byTopic(-1005, 23), null);
+    assert.equal(store.telegramTopic(-1005, 23)?.name, "Backend");
+    assert.deepEqual(store.pendingAll(conversation.id), []);
+    assert.equal(store.counts().conversations, 0);
+
+    const raw = new DatabaseSync(path);
+    try {
+      const row = raw.prepare("SELECT COUNT(*) AS count FROM runs").get() as { count: number };
+      assert.equal(Number(row.count), 0);
+    } finally {
+      raw.close();
+    }
+    assert.equal(store.unbind(-1005, 23), null);
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("write threads migrate once when host capabilities change and preserve the previous id", () => {
   const { root, store } = tempStore();
   try {

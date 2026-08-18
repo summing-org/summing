@@ -62,6 +62,8 @@ test("administrator Mini App exposes projects, bindings and global settings", ()
   assert.match(ADMIN_JS, /Telegram ID:/);
   assert.match(ADMIN_JS, /Наблюдаемые пользователи топика/);
   assert.match(ADMIN_JS, /Перепривязать топик/);
+  assert.match(ADMIN_JS, /method:"DELETE"/);
+  assert.match(ADMIN_JS, /Сам Telegram-топик останется в списке/);
   assert.match(ADMIN_CSS, /@media\(max-width:520px\)/);
   assert.match(ADMIN_CSS, /--accent:#ff2e6b/);
   assert.match(ADMIN_CSS, /\.deployment-card/);
@@ -69,4 +71,5 @@ test("administrator Mini App exposes projects, bindings and global settings", ()
   assert.match(ADMIN_CSS, /\.admin-panel\.active/);
   assert.match(ADMIN_CSS, /\.owner-manager/);
   assert.match(ADMIN_CSS, /\.onboarding-step/);
+  assert.match(ADMIN_CSS, /\.unbind-button/);
 });

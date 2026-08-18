@@ -374,6 +374,54 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
       workspaceId: "repo",
       busy: false,
     });
+
+    const deniedUnbind = await fetch(`${endpoint}/api/viewer/admin/bindings`, {
+      method: "DELETE",
+      headers: { ...auth(42), "content-type": "application/json" },
+      body: JSON.stringify({ chatId: -300, topicId: 44 }),
+    });
+    assert.equal(deniedUnbind.status, 403);
+
+    state.setActive(conversation.id, "turn-unbind", null);
+    const busyUnbind = await fetch(`${endpoint}/api/viewer/admin/bindings`, {
+      method: "DELETE",
+      headers: { ...auth(1), "content-type": "application/json" },
+      body: JSON.stringify({ chatId: -300, topicId: 44 }),
+    });
+    assert.equal(busyUnbind.status, 409);
+    assert.equal(state.byTopic(-300, 44)?.projectId, "summing");
+
+    state.clearActive(conversation.id);
+    const unbound = await fetch(`${endpoint}/api/viewer/admin/bindings`, {
+      method: "DELETE",
+      headers: { ...auth(1), "content-type": "application/json" },
+      body: JSON.stringify({ chatId: -300, topicId: 44 }),
+    });
+    assert.equal(unbound.status, 200);
+    const unboundPayload = await unbound.json() as { conversation: { id: string } };
+    assert.equal(unboundPayload.conversation.id, conversation.id);
+    assert.equal(state.byTopic(-300, 44), null);
+    assert.equal(state.telegramTopic(-300, 44)?.name, "Backend");
+
+    const repeatedUnbind = await fetch(`${endpoint}/api/viewer/admin/bindings`, {
+      method: "DELETE",
+      headers: { ...auth(1), "content-type": "application/json" },
+      body: JSON.stringify({ chatId: -300, topicId: 44 }),
+    });
+    assert.equal(repeatedUnbind.status, 200);
+    assert.deepEqual(await repeatedUnbind.json(), { conversation: null });
+
+    const afterUnbind = await fetch(`${endpoint}/api/viewer/admin`, { headers: auth(1) });
+    const afterUnbindPayload = await afterUnbind.json() as {
+      counts: { projects: number; topics: number; bindings: number; users: number };
+      chats: Array<{ topics: Array<{ name: string; binding: unknown }> }>;
+    };
+    assert.deepEqual(
+      afterUnbindPayload.counts,
+      { projects: 2, topics: 1, bindings: 0, users: 2 },
+    );
+    assert.equal(afterUnbindPayload.chats[0]?.topics[0]?.name, "Backend");
+    assert.equal(afterUnbindPayload.chats[0]?.topics[0]?.binding, null);
   } finally {
     await viewer.close();
     state.close();

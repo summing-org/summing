@@ -555,6 +555,36 @@ export class ProjectViewerServer {
       });
       return;
     }
+    if (request.method === "DELETE" && url.pathname === "/api/viewer/admin/bindings") {
+      this.requireAdminAccess(telegramUser);
+      const body = await requestBody(request) as Record<string, unknown> | null;
+      const chatId = Number(body?.chatId);
+      const topicId = Number(body?.topicId);
+      if (!Number.isSafeInteger(chatId) || chatId === 0) {
+        throw new ViewerHttpError(400, "некорректный chatId");
+      }
+      if (!Number.isSafeInteger(topicId) || topicId < 0) {
+        throw new ViewerHttpError(400, "некорректный topicId");
+      }
+      const current = this.state.byTopic(chatId, topicId);
+      if (!current) {
+        json(response, 200, { conversation: null });
+        return;
+      }
+      if (
+        current.activeTurnId !== null ||
+        this.state.pendingAll(current.id).length > 0 ||
+        this.bindingBusy(current)
+      ) {
+        throw new ViewerHttpError(
+          409,
+          "в выбранном топике есть активная или ожидающая задача; сначала отмените её",
+        );
+      }
+      const conversation = this.state.unbind(chatId, topicId);
+      json(response, 200, { conversation });
+      return;
+    }
     if (request.method === "POST" && url.pathname === "/api/viewer/admin/bindings") {
       this.requireAdminAccess(telegramUser);
       const body = await requestBody(request) as Record<string, unknown> | null;

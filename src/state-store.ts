@@ -2641,6 +2641,17 @@ export class StateStore {
     return this.get(conversationId);
   }
 
+  unbind(chatId: number, topicId: number): Conversation | null {
+    return this.transaction(() => {
+      const row = this.db
+        .prepare("SELECT * FROM conversations WHERE chat_id = ? AND topic_id = ?")
+        .get(chatId, topicId) as Row | undefined;
+      if (!row) return null;
+      this.db.prepare("DELETE FROM conversations WHERE id = ?").run(row.id as SQLInputValue);
+      return this.toConversation(row);
+    });
+  }
+
   get(conversationId: string): Conversation {
     const row = this.db.prepare("SELECT * FROM conversations WHERE id = ?").get(conversationId);
     if (!row) throw new Error(`unknown conversation: ${conversationId}`);
