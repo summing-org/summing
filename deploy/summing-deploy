@@ -264,12 +264,12 @@ switch_current() {
 
 sync_project_runner_configs() {
   local release=$1
-  local config_dir=/etc/summing-runner/projects
+  local config_dir=/etc/summing-project-runner/projects
   local asset project_id target legacy_env_path candidate
   local -a assets=()
 
   runner_configs_changed=0
-  if ! id summing-runner >/dev/null 2>&1 || [ ! -d "${config_dir}" ]; then
+  if ! id summing-project-runner >/dev/null 2>&1 || [ ! -d "${config_dir}" ]; then
     return 0
   fi
 
@@ -333,7 +333,7 @@ sync_project_runner_configs() {
       continue
     fi
     if [ -z "${runner_config_backup_dir}" ]; then
-      runner_config_backup_dir=$(mktemp -d /run/summing-runner-configs.XXXXXX)
+      runner_config_backup_dir=$(mktemp -d /run/summing-project-runner-configs.XXXXXX)
       chmod 0700 "${runner_config_backup_dir}"
     fi
     if [ ! -e "${runner_config_backup_dir}/${project_id}.json" ] && \
@@ -344,7 +344,7 @@ sync_project_runner_configs() {
         : > "${runner_config_backup_dir}/${project_id}.missing"
       fi
     fi
-    chown root:summing "${candidate}"
+    chown root:summing-project-runner "${candidate}"
     chmod 0640 "${candidate}"
     mv -f -- "${candidate}" "${target}"
     runner_config_temporary=
@@ -353,7 +353,7 @@ sync_project_runner_configs() {
 }
 
 restore_project_runner_configs() {
-  local config_dir=/etc/summing-runner/projects
+  local config_dir=/etc/summing-project-runner/projects
   local backup marker project_id target
   local -a backups=() markers=()
 
@@ -369,7 +369,7 @@ restore_project_runner_configs() {
       printf 'Refusing to restore a symlinked runner config: %s\n' "${target}" >&2
       return 2
     fi
-    install -o root -g summing -m 0640 "${backup}" "${target}"
+    install -o root -g summing-project-runner -m 0640 "${backup}" "${target}"
   done
   for marker in "${markers[@]}"; do
     project_id=$(basename "${marker}" .missing)
@@ -410,22 +410,34 @@ sync_systemd_units() {
   SUMMING_SYSTEMD_RELEASE="${release}" "${hook}"
 }
 
+install_project_runner_host() {
+  local release=$1
+  local installer=${release}/deploy/install-project-runner-host
+  if [ ! -x "${installer}" ] || [ -L "${installer}" ]; then
+    printf 'SUMMING project runner installer is missing or unsafe: %s\n' "${installer}" >&2
+    return 2
+  fi
+  SUMMING_PROJECT_RUNNER_RELEASE="${release}" \
+    SUMMING_PROJECT_RUNNER_INSTALL_STATIC_CONFIGS=0 \
+    "${installer}"
+}
+
 restart_services() {
-  if systemctl is-enabled --quiet summing-runner.service 2>/dev/null; then
-    systemctl restart summing-runner.service
+  if systemctl is-enabled --quiet summing-project-runner.service 2>/dev/null; then
+    systemctl restart summing-project-runner.service
   fi
   systemctl restart summing.service
 }
 
 wait_for_health() {
   local runner_required=0
-  if systemctl is-enabled --quiet summing-runner.service 2>/dev/null; then
+  if systemctl is-enabled --quiet summing-project-runner.service 2>/dev/null; then
     runner_required=1
   fi
   for _ in $(seq 1 60); do
     if curl --fail --silent http://127.0.0.1:8765/health >/dev/null 2>&1; then
       if [ "${runner_required}" = 0 ] || \
-        curl --fail --silent --unix-socket /run/summing-runner/runner.sock \
+        curl --fail --silent --unix-socket /run/summing-project-runner/runner.sock \
           http://localhost/health >/dev/null 2>&1; then
         return 0
       fi
@@ -489,8 +501,8 @@ fail_deployment() {
     switched=0
     installed=0
   elif [ "${restore_runner_configs}" = 1 ] && \
-    systemctl is-enabled --quiet summing-runner.service 2>/dev/null; then
-    systemctl restart summing-runner.service
+    systemctl is-enabled --quiet summing-project-runner.service 2>/dev/null; then
+    systemctl restart summing-project-runner.service
     wait_for_health
   fi
   if [ "${installed}" = 1 ]; then failure_current_sha=${target_sha}; fi
@@ -606,14 +618,17 @@ target_version=$(git_as_summing -C "${repo_dir}" show \
   "${target_sha}:package.json" 2>/dev/null | jq -r '.version // empty' 2>/dev/null || true)
 if ! valid_version "${target_version}"; then target_version=; fi
 if [ "${previous_sha}" = "${target_sha}" ]; then
+  phase=runner-host
+  failure_kind=runtime
+  install_project_runner_host "${previous_target}"
   phase=sync
   failure_kind=runtime
   sync_project_runner_configs "${previous_target}"
   if [ "${runner_configs_changed}" = 1 ] && \
-    systemctl is-enabled --quiet summing-runner.service 2>/dev/null; then
+    systemctl is-enabled --quiet summing-project-runner.service 2>/dev/null; then
     write_state deploying "Обновляем конфигурацию Project runner" \
       "${previous_sha}" "${target_sha}"
-    systemctl restart summing-runner.service
+    systemctl restart summing-project-runner.service
     wait_for_health
   fi
   phase=systemd-sync
@@ -712,6 +727,9 @@ failure_kind=restart
 write_state deploying "Перезапускаем сервисы на ${target_sha:0:12}" "${previous_sha}" "${target_sha}"
 switch_current "${release_dir}"
 switched=1
+phase=runner-host
+failure_kind=runtime
+install_project_runner_host "${release_dir}"
 phase=sync
 failure_kind=runtime
 sync_project_runner_configs "${release_dir}"

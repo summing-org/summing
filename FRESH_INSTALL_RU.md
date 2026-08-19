@@ -219,7 +219,7 @@ Codex browser/device login, GitHub OAuth и остальные внешние OA
 После восстановления проверьте:
 
 ```bash
-systemctl status summing summing-runner --no-pager
+systemctl status summing summing-project-runner --no-pager
 curl --fail http://127.0.0.1:8765/health
 journalctl -u summing -n 200 --no-pager
 ```

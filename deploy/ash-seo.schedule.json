@@ -4,5 +4,5 @@
   "action": "run",
   "repository": "/var/lib/summing/data/repositories/ash-seo/ash-seo",
   "revision": "replace_me",
-  "runnerSocket": "/run/summing-runner/runner.sock"
+  "runnerSocket": "/run/summing-project-runner/runner.sock"
 }

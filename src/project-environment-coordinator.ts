@@ -166,8 +166,9 @@ export class ProjectEnvironmentMigrationCoordinator {
 export function productionEnvironmentMigrationCoordinator(
   runnerSocket: string,
 ): ProjectEnvironmentMigrationCoordinator {
-  const dataRoot = process.env.SUMMING_RUNNER_DATA || "/var/lib/summing-runner/jobs";
-  const configRoot = process.env.SUMMING_RUNNER_CONFIG || "/etc/summing-runner/projects";
+  const dataRoot = process.env.SUMMING_RUNNER_DATA || "/var/lib/summing-project-runner/jobs";
+  const configRoot = process.env.SUMMING_RUNNER_CONFIG ||
+    "/etc/summing-project-runner/projects";
   return new ProjectEnvironmentMigrationCoordinator({
     runnerSocket,
     dataRoot,

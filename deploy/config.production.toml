@@ -57,7 +57,7 @@ port = 8765
 port = 8766
 public_url = ""
 auth_max_age_sec = 900
-runner_socket = "/run/summing-runner/runner.sock"
+runner_socket = "/run/summing-project-runner/runner.sock"
 
 # Static projects belong to TELEGRAM_OWNER_ID. Managed client projects are
 # created from the administrator's private Telegram chat.

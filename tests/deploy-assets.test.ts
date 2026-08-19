@@ -18,6 +18,9 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
   const path = asset("deploy/summing-deploy.path");
   const service = asset("deploy/summing-deploy.service");
   const activation = asset("deploy/activate.sh");
+  const runnerInstallerPath = join(root, "deploy/install-project-runner-host");
+  const runnerInstaller = asset("deploy/install-project-runner-host");
+  const projectRunnerService = asset("deploy/summing-project-runner.service");
   const cloudInit = asset("deploy/cloud-init.yaml");
 
   const syntax = spawnSync("bash", ["-n", join(root, "deploy/summing-deploy")], {
@@ -30,11 +33,20 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
     encoding: "utf8",
   });
   assert.equal(systemdSyncSyntax.status, 0, systemdSyncSyntax.stderr);
+  const runnerInstallerSyntax = spawnSync("bash", ["-n", runnerInstallerPath], {
+    encoding: "utf8",
+  });
+  assert.equal(runnerInstallerSyntax.status, 0, runnerInstallerSyntax.stderr);
   assert.notEqual(statSync(cutoverPath).mode & 0o111, 0, "cutover hook must be executable");
   assert.notEqual(
     statSync(systemdSyncPath).mode & 0o111,
     0,
     "systemd sync hook must be executable",
+  );
+  assert.notEqual(
+    statSync(runnerInstallerPath).mode & 0o111,
+    0,
+    "project runner installer must be executable",
   );
   assert.match(script, /git_as_summing -C "\$\{repo_dir\}" fetch --prune/);
   assert.match(script, /SUMMING_DEPLOY_EXPECTED_REMOTE/);
@@ -64,7 +76,13 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
   assert.match(script, /assets=\("\$\{release\}"\/deploy\/\*\.runner\.json\)/);
   assert.match(script, /Managed runner config must not be a symlink/);
   assert.match(script, /\. \+ \{envPath: \$envPath\}/);
-  assert.match(script, /runner_config_backup_dir=\$\(mktemp -d \/run\/summing-runner-configs/);
+  assert.match(
+    script,
+    /runner_config_backup_dir=\$\(mktemp -d \/run\/summing-project-runner-configs/,
+  );
+  assert.match(script, /install_project_runner_host\(\)/);
+  assert.match(script, /SUMMING_PROJECT_RUNNER_RELEASE="\$\{release\}"/);
+  assert.match(script, /SUMMING_PROJECT_RUNNER_INSTALL_STATIC_CONFIGS=0/);
   assert.match(script, /restore_project_runner_configs\(\)/);
   assert.match(script, /if ! restore_project_runner_configs; then/);
   assert.match(script, /mv -f -- "\$\{candidate\}" "\$\{target\}"/);
@@ -78,6 +96,10 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
     'sync_project_runner_configs "${previous_target}"',
     unchangedRelease,
   );
+  const unchangedRunnerInstall = script.indexOf(
+    'install_project_runner_host "${previous_target}"',
+    unchangedRelease,
+  );
   const unchangedUnitSync = script.indexOf(
     'sync_systemd_units "${previous_target}"',
     unchangedSync,
@@ -86,15 +108,25 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
     'finalize_project_environment_cutover "${previous_target}"',
     unchangedRelease,
   );
-  assert.ok(unchangedRelease >= 0 && unchangedSync > unchangedRelease);
+  assert.ok(
+    unchangedRelease >= 0 && unchangedRunnerInstall > unchangedRelease &&
+      unchangedSync > unchangedRunnerInstall,
+  );
   assert.ok(unchangedUnitSync > unchangedSync && unchangedCutover > unchangedUnitSync);
   const releaseSwitch = script.indexOf('switch_current "${release_dir}"');
   const releaseSync = script.indexOf(
     'sync_project_runner_configs "${release_dir}"',
     releaseSwitch,
   );
+  const releaseRunnerInstall = script.indexOf(
+    'install_project_runner_host "${release_dir}"',
+    releaseSwitch,
+  );
   const releaseRestart = script.indexOf("restart_services", releaseSync);
-  assert.ok(releaseSwitch >= 0 && releaseSync > releaseSwitch);
+  assert.ok(
+    releaseSwitch >= 0 && releaseRunnerInstall > releaseSwitch &&
+      releaseSync > releaseRunnerInstall,
+  );
   assert.ok(releaseRestart > releaseSync, "new configs must be installed before runner restart");
   const releaseHealth = script.indexOf("wait_for_health", releaseRestart);
   const releaseUnitSync = script.indexOf(
@@ -132,22 +164,17 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
   assert.match(activation, /kb_transfer_key=\/etc\/summing\/kb-transfer\.key/);
   assert.match(activation, /KB transfer key must be a regular file containing 64 hex characters/);
   assert.match(activation, /install -d -o root -g summing -m 1770 "\$\{deploy_state_dir\}"/);
-  assert.match(activation, /runner_uid=\$\(id -u summing-runner\)/);
+  assert.match(activation, /deploy\/install-project-runner-host/);
   assert.match(activation, /summing-builder must not belong to the secret-bearing summing group/);
   assert.match(activation, /runuser -u summing-builder -- env -i/);
   assert.match(activation, /chown -R summing:summing "\$\{repo_dir\}"/);
   assert.match(activation, /Initial release build failed with exit code/);
-  assert.match(activation, /sed "s\/RUNNER_UID\/\$\{runner_uid\}\/g"/);
-  assert.match(activation, /runner_project_config=\/etc\/summing-runner\/projects\/ash-seo\.json/);
-  assert.match(activation, /Runner project config must not be a symlink/);
-  assert.match(activation, /\. \+ \{envPath: \$envPath\}/);
-  assert.match(activation, /deploy\/ash-seo\.runner\.json/);
   assert.match(activation, /\n  openssh-client\n/);
   assert.match(cloudInit, /\n  - openssh-client\n/);
   assert.doesNotMatch(activation, /systemctl restart summing-secrets\.service/);
   assert.match(
-    asset("deploy/summing-runner.service"),
-    /ReadWritePaths=.*\/var\/lib\/summing-runs(?:\s|$)/,
+    projectRunnerService,
+    /ReadWritePaths=.*\/var\/lib\/summing-project-runs(?:\s|$)/,
     "the hardened runner must be able to create persistent dry-run artifacts",
   );
   assert.match(cutover, /if \[ ! -f "\$\{verified_marker\}" \]/);
@@ -158,12 +185,27 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
   assert.match(cutover, /chown --reference="\$\{config_path\}"/);
   assert.match(cutover, /Encrypted environment changed after Validate\/Dry run verification/);
   assert.match(cutover, /del\(\.envPath\)/);
-  assert.match(cutover, /systemctl restart summing-runner\.service/);
+  assert.match(cutover, /systemctl restart summing-project-runner\.service/);
   assert.match(cutover, /systemctl disable --now summing-secrets\.service/);
   assert.match(cutover, /legacyBrokerDataPreserved: true/);
   assert.match(cutover, /project-config\.before\.json/);
   assert.match(cutover, /Caddyfile\.before/);
   assert.match(cutover, /trap rollback ERR/);
+  assert.match(runnerInstaller, /runner_user=summing-project-runner/);
+  assert.match(runnerInstaller, /usermod --append --groups "\$\{runner_user\}" summing/);
+  assert.doesNotMatch(
+    runnerInstaller,
+    /usermod --append --groups summing "\$\{runner_user\}"/,
+  );
+  assert.match(runnerInstaller, /systemctl enable summing-project-runner\.service/);
+  assert.match(runnerInstaller, /\/run\/summing-project-runner\/runner\.sock/);
+  assert.match(runnerInstaller, /range_in_use\(\)/);
+  assert.doesNotMatch(runnerInstaller, /systemctl disable --now docker\.service/);
+  assert.doesNotMatch(
+    runnerInstaller,
+    /\/etc\/systemd\/system\/summing-runner\.service/,
+    "the project runner installer must not replace an unrelated external runner unit",
+  );
 });
 
 test("Project Viewer installer supports an HTTPS domain transition", () => {
@@ -182,7 +224,7 @@ test("Project Viewer installer supports an HTTPS domain transition", () => {
 test("all production processes execute through the current release symlink", () => {
   for (const path of [
     "deploy/summing.service",
-    "deploy/summing-runner.service",
+    "deploy/summing-project-runner.service",
     "deploy/summing-ash-seo.service",
   ]) {
     assert.match(asset(path), /\/opt\/summing-current\/dist\/src\//, path);
@@ -192,15 +234,21 @@ test("all production processes execute through the current release symlink", () 
 test("runner environment deployment keeps its encryption key private and one HTTPS origin", () => {
   const installerPath = join(root, "deploy/install-project-operations.sh");
   const installer = asset("deploy/install-project-operations.sh");
-  const service = asset("deploy/summing-runner.service");
+  const hostInstaller = asset("deploy/install-project-runner-host");
+  const service = asset("deploy/summing-project-runner.service");
   const caddy = asset("deploy/Caddyfile.viewer");
   const syntax = spawnSync("bash", ["-n", installerPath], { encoding: "utf8" });
 
   assert.equal(syntax.status, 0, syntax.stderr);
-  assert.match(installer, /openssl rand -hex 32/);
-  assert.match(installer, /install -o "\$\{runner_user\}" -g "\$\{runner_user\}" -m 0400/);
-  assert.match(service, /SUMMING_RUNNER_ENV_KEY=\/etc\/summing-runner\/environment\.key/);
-  assert.match(service, /User=summing-runner/);
+  assert.match(hostInstaller, /openssl rand -hex 32/);
+  assert.match(hostInstaller, /install -o "\$\{runner_user\}" -g "\$\{runner_user\}" -m 0400/);
+  assert.match(
+    service,
+    /SUMMING_RUNNER_ENV_KEY=\/etc\/summing-project-runner\/environment\.key/,
+  );
+  assert.match(service, /User=summing-project-runner/);
+  assert.match(service, /Group=summing-project-runner/);
+  assert.doesNotMatch(service, /Group=summing\n/);
   assert.match(service, /ProtectSystem=strict/);
   assert.doesNotMatch(service, /SUMMING_SECRETS/);
   assert.doesNotMatch(caddy, /connections|8767/);
@@ -212,7 +260,10 @@ test("runner environment deployment keeps its encryption key private and one HTT
     JSON.parse(asset("deploy/ash-seo.runner.json")).configSourcePaths,
     ["config.json", "config.example.json"],
   );
-  assert.match(service, /SUMMING_RUNNER_SCHEDULES=\/etc\/summing-runner\/schedules/);
+  assert.match(
+    service,
+    /SUMMING_RUNNER_SCHEDULES=\/etc\/summing-project-runner\/schedules/,
+  );
 });
 
 test("host identity migration is guarded, recoverable, and preserves worktrees", () => {
@@ -247,6 +298,6 @@ test("host identity migration is guarded, recoverable, and preserves worktrees",
   assert.match(migration, /source_version=.*VERSION/);
   assert.match(migration, /9\.\*\)/);
   assert.match(migration, /"\$\{product_repo\}\/deploy\/activate\.sh"/);
-  assert.match(migration, /\/run\/summing-runner\/runner\.sock/);
+  assert.match(migration, /\/run\/summing-project-runner\/runner\.sock/);
   assert.doesNotMatch(migration, /rm\s+-rf/);
 });

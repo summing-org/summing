@@ -364,11 +364,13 @@ export async function activateNodeRecovery(input: Arguments): Promise<{
       }
       const environmentsPath = join(secrets, "data", "connector-core", "project-environments.json");
       if (existsSync(environmentsPath)) {
-        const environmentRoot = "/var/lib/summing-runner/jobs/environments";
+        const environmentRoot = "/var/lib/summing-project-runner/jobs/environments";
         backupDestination(environmentRoot, rollbackPath, entries);
         const environments = JSON.parse(readFileSync(environmentsPath, "utf8")) as NodeRecoveryProjectEnvironment[];
         if (!Array.isArray(environments)) throw new Error("project environment recovery catalog is invalid");
-        const environmentKey = readEnvironmentKey("/etc/summing-runner/environment.key");
+        const environmentKey = readEnvironmentKey(
+          "/etc/summing-project-runner/environment.key",
+        );
         try {
           const environmentStore = new ProjectEnvironmentStore(environmentRoot, environmentKey);
           for (const environment of environments) {
@@ -393,8 +395,18 @@ export async function activateNodeRecovery(input: Arguments): Promise<{
     ownership("/etc/summing/summing.env", "root", "summing", 0o440);
     ownership("/etc/summing/mtproto.key", "root", "summing", 0o440);
     ownership("/etc/summing/kb-transfer.key", "root", "summing", 0o440);
-    ownership("/etc/summing-runner/environment.key", "root", "summing-runner", 0o440);
-    ownership("/var/lib/summing-runner/jobs/environments", "summing-runner", "summing-runner", 0o700);
+    ownership(
+      "/etc/summing-project-runner/environment.key",
+      "summing-project-runner",
+      "summing-project-runner",
+      0o400,
+    );
+    ownership(
+      "/var/lib/summing-project-runner/jobs/environments",
+      "summing-project-runner",
+      "summing-project-runner",
+      0o700,
+    );
     writeFileSync(join(rollbackPath, "activation.json"), `${JSON.stringify({
       backupId: plan.backupId,
       activatedAt: new Date().toISOString(),

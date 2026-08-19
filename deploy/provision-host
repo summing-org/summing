@@ -98,7 +98,7 @@ for durable in \
   /var/lib/summing/data/state.sqlite3 \
   /var/lib/summing/data/core.sqlite \
   /var/lib/summing/data/runner-control.sqlite3 \
-  /var/lib/summing-runner/jobs; do
+  /var/lib/summing-project-runner/jobs; do
   if [ -e "${durable}" ] || [ -L "${durable}" ]; then
     printf 'Refusing to provision over existing SUMMING state: %s\n' "${durable}" >&2
     exit 2

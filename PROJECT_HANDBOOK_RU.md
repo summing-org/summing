@@ -1,6 +1,6 @@
 # SUMMING 9.15: архитектура, эксплуатация и разработка
 
-> Версия: **9.15.1**
+> Версия: **9.16.0**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
 > Последняя сверка с кодом: **18 августа 2026 года**.
 
@@ -937,15 +937,22 @@ Project owner по-прежнему открывает конкретный view
 snapshot и сохраняется patch в `run-artifacts`. Snapshot включает tracked и
 untracked, но соблюдает `.gitignore`.
 
-Runner работает отдельным Unix user `summing-runner` и использует собственный
+Runner работает отдельным Unix user `summing-project-runner` и использует собственный
 rootless Docker daemon. Пользователь `summing` не получает Docker socket. Через
 Unix socket принимаются только project id, одна из четырёх фиксированных
 операций и Git archive до 50 МБ. Runner не читает conversation worktree: SUMMING
 сам создаёт immutable archive выбранной ревизии и передаёт его в запросе.
-Application config выбирается из того же распакованного archive по root-managed
-списку `configSourcePaths` и монтируется в контейнер read-only. Для `ash-seo`
+Application config выбирается из того же распакованного archive по разрешённому
+списку `configSourcePaths` и монтируется в контейнер read-only. Managed Project
+регистрируется автоматически сразу после create/clone. При старте SUMMING
+повторно reconciles все записи `managed_projects`, а при временно недоступном
+runner повторяет регистрацию без потери Project. Профиль managed Project задаётся
+runner-ом, а не клиентом: фиксированные config paths, project-scoped data path,
+network policy и точный список Workspace. Root-managed JSON остаётся только для
+статических Project и имеет приоритет над динамическим профилем. Для `ash-seo`
 сначала используется `config.json`, а для старых pinned revisions допускается
-`config.example.json`; постоянная копия `/etc/summing-runner/projects/ash-seo.config.json`
+`config.example.json`; постоянная копия
+`/etc/summing-project-runner/projects/ash-seo.config.json`
 не является runtime source. Поэтому code SHA, config и env revision образуют один
 проверяемый job snapshot, а изменение Project config не требует ручной синхронизации
 дублирующего host-файла. Старый абсолютный `configPath` сохранён только как
@@ -1160,7 +1167,7 @@ Telegram-проекты находятся в SQLite и не записываю�
 | `viewer.port` | Loopback-порт Project Viewer. | 8766 |
 | `viewer.public_url` | Публичный HTTPS URL Mini App. | пусто |
 | `viewer.auth_max_age_sec` | Максимальный возраст Telegram initData. | 900 |
-| `viewer.runner_socket` | Unix socket изолированного runner. | `/run/summing-runner/runner.sock` |
+| `viewer.runner_socket` | Unix socket изолированного runner. | `/run/summing-project-runner/runner.sock` |
 | `projects.<id>.name` | Отображаемое имя. | id |
 | `projects.<id>.default_workspace` | Workspace для короткого `/bind`. | первый |
 | `projects.<id>.self_change` | Пометка собственного репозитория. | false |
@@ -1574,7 +1581,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "9.15.1",
+  "version": "9.16.0",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",
@@ -1647,7 +1654,8 @@ at-least-once recovery: prompt может выполниться повторн�
 - `projects/`;
 - `repositories/` со всеми управляемыми Git refs и незапушенными commits;
 - `SUMMING_WORKTREE_ROOT`, если нужно сохранить незакоммиченные изменения;
-- `run-artifacts/`, `/etc/summing-runner` и `/var/lib/summing-runner` при
+- `run-artifacts/`, `/etc/summing-project-runner`,
+  `/var/lib/summing-project-runner` и `/var/lib/summing-project-runs` при
   использовании Viewer/runner;
 - `repository-credentials/`, если встроенные deploy keys должны пережить
   восстановление без перевыпуска на стороне Git-сервиса;
@@ -1846,7 +1854,7 @@ deploy/
 ├── install-project-operations.sh # rootless Docker, Caddy, runner и timer
 ├── config.production.toml  # минимальный production config для SUMMING
 ├── summing.service         # основной Telegram runtime
-├── summing-runner.service  # изолированный Docker runner
+├── summing-project-runner.service # изолированный Docker runner
 └── summing-ash-seo.timer   # legacy external-Project compatibility; не agent scheduler
 ```
 

@@ -35,7 +35,10 @@ async function main(): Promise<void> {
   const resolved = await inspector.resolveRevision(revision);
   const archive = await inspector.archive(resolved);
   const client = new ProjectRunnerClient(
-    String(value.runnerSocket || process.env.SUMMING_RUNNER_SOCKET || "/run/summing-runner/runner.sock"),
+    String(
+      value.runnerSocket || process.env.SUMMING_RUNNER_SOCKET ||
+        "/run/summing-project-runner/runner.sock",
+    ),
   );
   const job = await client.submit(projectId, workspaceId, action, resolved, archive);
   process.stdout.write(`${job.id}\n`);

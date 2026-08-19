@@ -1,15 +1,15 @@
 [Unit]
 Description=Enqueue the pinned ash-seo daily job
-After=summing-runner.service
-Requires=summing-runner.service
+After=summing-project-runner.service
+Requires=summing-project-runner.service
 
 [Service]
 Type=oneshot
 User=summing
 Group=summing
 Environment=HOME=/var/lib/summing
-Environment=SUMMING_RUNNER_SOCKET=/run/summing-runner/runner.sock
-ExecStart=/usr/local/bin/node --enable-source-maps /opt/summing-current/dist/src/project-runner-cli.js /etc/summing-runner/schedules/ash-seo.json
+Environment=SUMMING_RUNNER_SOCKET=/run/summing-project-runner/runner.sock
+ExecStart=/usr/local/bin/node --enable-source-maps /opt/summing-current/dist/src/project-runner-cli.js /etc/summing-project-runner/schedules/ash-seo.json
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true

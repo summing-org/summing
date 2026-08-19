@@ -1,4 +1,4 @@
-# SUMMING 9.15
+# SUMMING 9.16
 
 SUMMING — один постоянно живущий агент с одним администратором и назначаемыми
 владельцами проектов. Он работает на Linux VPS, принимает команды из Telegram
@@ -474,9 +474,11 @@ ENABLE_ASH_SEO_TIMER=0 \
 sudo /opt/summing/deploy/install-project-operations.sh
 ```
 
-Installer создаёт отдельного `summing-runner`, rootless Docker с лимитом build
+Installer создаёт отдельного `summing-project-runner`, rootless Docker с лимитом build
 cache 8 ГБ, приватный AES-ключ для project env, HTTPS proxy, project runtime
-policy/data и совместимый legacy timer unit. Пользователь `summing` не получает
+policy/data и совместимый legacy timer unit. Имя, socket и state отделены от
+внешних runner-сервисов узла; существующий `summing-runner.service` не изменяется.
+Пользователь `summing` не получает
 Docker socket. При первом
 переходе static env и raw credentials из legacy Connections автоматически
 объединяются в encrypted store. Затем runner выполняет Validate и Dry run на

@@ -14,7 +14,7 @@ product_app_user=${product_name}
 retired_builder_user=${retired_name}-builder
 product_builder_user=${product_name}-builder
 retired_runner_user=${retired_name}-runner
-product_runner_user=${product_name}-runner
+product_runner_user=${product_name}-project-runner
 
 retired_repo=/opt/${retired_name}
 product_repo=/opt/${product_name}
@@ -27,13 +27,13 @@ product_home=/var/lib/${product_name}
 retired_builder_home=/var/lib/${retired_name}-builder
 product_builder_home=/var/lib/${product_name}-builder
 retired_runner_home=/var/lib/${retired_name}-runner
-product_runner_home=/var/lib/${product_name}-runner
+product_runner_home=/var/lib/${product_name}-project-runner
 retired_runs=/var/lib/${retired_name}-runs
-product_runs=/var/lib/${product_name}-runs
+product_runs=/var/lib/${product_name}-project-runs
 retired_config=/etc/${retired_name}
 product_config=/etc/${product_name}
 retired_runner_config=/etc/${retired_name}-runner
-product_runner_config=/etc/${product_name}-runner
+product_runner_config=/etc/${product_name}-project-runner
 retired_runtime=/run/${retired_name}
 product_runtime=/run/${product_name}
 
@@ -500,7 +500,7 @@ rename_account "${retired_app_user}" "${product_app_user}" "${product_home}"
 rename_account "${retired_builder_user}" "${product_builder_user}" "${product_builder_home}"
 if [ -n "${runner_uid}" ]; then
   rename_account "${retired_runner_user}" "${product_runner_user}" "${product_runner_home}"
-  usermod --append --groups "${product_app_user}" "${product_runner_user}"
+  usermod --append --groups "${product_runner_user}" "${product_app_user}"
 fi
 
 for subordinate_file in /etc/subuid /etc/subgid; do
@@ -514,6 +514,9 @@ done
 move_optional "${retired_config}" "${product_config}"
 move_optional "${retired_runner_config}" "${product_runner_config}"
 move_optional "${retired_runs}" "${product_runs}"
+if [ -n "${runner_uid}" ] && [ -d "${product_runner_config}" ]; then
+  chgrp -R "${product_runner_user}" "${product_runner_config}"
+fi
 move_optional "${retired_repo}" "${product_repo}"
 if [ -e "${retired_current}" ] || [ -L "${retired_current}" ]; then
   mv "${retired_current}" "${recovery_dir}/pre-9-current-link"
@@ -614,11 +617,11 @@ if [ -n "${runner_uid}" ]; then
     HOME="${product_runner_home}" \
     DOCKER_HOST="unix:///run/user/${runner_uid}/docker.sock" \
     docker image ls --format '{{.Repository}}:{{.Tag}}')
-  temporary_runner_unit=$(mktemp /run/summing-runner.service.XXXXXX)
-  sed "s/RUNNER_UID/${runner_uid}/g" \
-    "${product_repo}/deploy/summing-runner.service" > "${temporary_runner_unit}"
+  temporary_runner_unit=$(mktemp /run/summing-project-runner.service.XXXXXX)
+  sed "s/PROJECT_RUNNER_UID/${runner_uid}/g" \
+    "${product_repo}/deploy/summing-project-runner.service" > "${temporary_runner_unit}"
   install -o root -g root -m 0644 "${temporary_runner_unit}" \
-    /etc/systemd/system/summing-runner.service
+    /etc/systemd/system/summing-project-runner.service
   rm -f "${temporary_runner_unit}"
   install -o root -g root -m 0644 \
     "${product_repo}/deploy/summing-ash-seo.service" \
@@ -627,7 +630,9 @@ if [ -n "${runner_uid}" ]; then
     "${product_repo}/deploy/summing-ash-seo.timer" \
     /etc/systemd/system/summing-ash-seo.timer
   systemctl daemon-reload
-  if [ "${runner_enabled}" = 1 ]; then systemctl enable summing-runner.service; fi
+  if [ "${runner_enabled}" = 1 ]; then
+    systemctl enable summing-project-runner.service
+  fi
 fi
 
 for unit in \
@@ -659,7 +664,7 @@ if [ "${app_enabled}" = 1 ]; then
   curl --fail --silent http://127.0.0.1:8765/health >/dev/null
 fi
 if [ "${runner_enabled}" = 1 ]; then
-  curl --fail --silent --unix-socket /run/summing-runner/runner.sock \
+  curl --fail --silent --unix-socket /run/summing-project-runner/runner.sock \
     http://localhost/health >/dev/null
 fi
 

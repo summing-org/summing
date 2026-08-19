@@ -193,7 +193,7 @@ function render(input) {
     safeEnv("TELEGRAM_OWNER_ID", ownerId),
     safeEnv("SUMMING_VIEWER_URL", publicUrl),
     safeEnv("SUMMING_VIEWER_LOCAL_TOKEN", viewerLocalToken),
-    safeEnv("SUMMING_RUNNER_SOCKET", "/run/summing-runner/runner.sock"),
+    safeEnv("SUMMING_RUNNER_SOCKET", "/run/summing-project-runner/runner.sock"),
     safeEnv("SUMMING_DEPLOY_REQUEST", "/var/lib/summing/deploy/request.json"),
     safeEnv("SUMMING_DEPLOY_STATE", "/var/lib/summing/deploy/state.json"),
     safeEnv("TRANSCRIPTION_PROVIDER", provider),
@@ -272,7 +272,7 @@ port = 8765
 port = 8766
 public_url = ${tomlString(publicUrl)}
 auth_max_age_sec = 900
-runner_socket = "/run/summing-runner/runner.sock"
+runner_socket = "/run/summing-project-runner/runner.sock"
 
 [projects.summing]
 name = "SUMMING"

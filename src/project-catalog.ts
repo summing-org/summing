@@ -26,6 +26,8 @@ export interface ProjectAccess {
   managed: boolean;
 }
 
+export type ManagedProjectCreated = (project: ProjectConfig) => Promise<void> | void;
+
 export class ProjectCatalogError extends Error {}
 
 function runGit(
@@ -95,6 +97,7 @@ export class ProjectCatalog {
   constructor(
     readonly config: RuntimeConfig,
     readonly state: StateStore,
+    readonly managedProjectCreated: ManagedProjectCreated = () => {},
   ) {
     this.repositoriesRoot = resolve(config.dataDir, "repositories");
     for (const project of config.projects.values()) {
@@ -259,6 +262,13 @@ export class ProjectCatalog {
       ownerIds: [ownerId],
       managed: true,
     });
+    try {
+      await this.managedProjectCreated(project);
+    } catch (error) {
+      console.warn(
+        `project ${projectId} was created, but runner registration is pending: ${String(error)}`,
+      );
+    }
     return project;
   }
 

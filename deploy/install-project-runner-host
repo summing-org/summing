@@ -1,0 +1,303 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+umask 0027
+
+if [ "${EUID}" -ne 0 ]; then
+  printf '%s\n' 'SUMMING project runner installation must run as root.' >&2
+  exit 2
+fi
+
+release_root=${SUMMING_PROJECT_RUNNER_RELEASE:-$(readlink -f /opt/summing-current)}
+runner_user=summing-project-runner
+runner_home=/var/lib/summing-project-runner
+runner_config_root=/etc/summing-project-runner
+runner_data_root=/var/lib/summing-project-runs
+runner_socket=/run/summing-project-runner/runner.sock
+env_file=/etc/summing/summing.env
+unit_path=/etc/systemd/system/summing-project-runner.service
+install_static_configs=${SUMMING_PROJECT_RUNNER_INSTALL_STATIC_CONFIGS:-1}
+docker_source=
+temporary_key=
+temporary_unit=
+env_candidate=
+
+cleanup() {
+  local status=$?
+  trap - EXIT
+  for temporary in "${docker_source}" "${temporary_key}" "${temporary_unit}" \
+    "${env_candidate}"; do
+    if [ -n "${temporary}" ]; then rm -f -- "${temporary}"; fi
+  done
+  exit "${status}"
+}
+trap cleanup EXIT
+
+case "${install_static_configs}" in
+  0|1) ;;
+  *)
+    printf '%s\n' 'SUMMING_PROJECT_RUNNER_INSTALL_STATIC_CONFIGS must be 0 or 1.' >&2
+    exit 2
+    ;;
+esac
+
+if [ -z "${release_root}" ] || [ ! -d "${release_root}/deploy" ] || \
+  [ -L "${release_root}/deploy" ]; then
+  printf '%s\n' 'SUMMING project runner release directory is missing or unsafe.' >&2
+  exit 2
+fi
+for asset in \
+  "${release_root}/deploy/summing-project-runner.service" \
+  "${release_root}/deploy/docker-rootless-daemon.json"; do
+  if [ ! -f "${asset}" ] || [ -L "${asset}" ]; then
+    printf 'SUMMING project runner asset is missing or unsafe: %s\n' "${asset}" >&2
+    exit 2
+  fi
+done
+if ! getent group summing >/dev/null; then
+  printf '%s\n' 'The summing group is missing.' >&2
+  exit 2
+fi
+
+required_packages=(
+  ca-certificates
+  curl
+  dbus-user-session
+  fuse-overlayfs
+  gnupg
+  jq
+  openssl
+  slirp4netns
+  uidmap
+)
+missing_packages=()
+for package in "${required_packages[@]}"; do
+  if ! dpkg-query -W -f='${Status}' "${package}" 2>/dev/null | \
+    grep -q 'install ok installed'; then
+    missing_packages+=("${package}")
+  fi
+done
+if [ "${#missing_packages[@]}" -gt 0 ]; then
+  apt-get update
+  DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing_packages[@]}"
+fi
+
+if ! command -v dockerd-rootless-setuptool.sh >/dev/null 2>&1 || \
+  ! command -v docker >/dev/null 2>&1; then
+  install -m 0755 -d /etc/apt/keyrings
+  if [ ! -f /etc/apt/keyrings/docker.asc ]; then
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+      -o /etc/apt/keyrings/docker.asc
+    chmod a+r /etc/apt/keyrings/docker.asc
+  fi
+  architecture=$(dpkg --print-architecture)
+  codename=$(. /etc/os-release && printf '%s' "${VERSION_CODENAME}")
+  docker_source=$(mktemp /etc/apt/sources.list.d/docker.sources.XXXXXX)
+  printf '%s\n' \
+    'Types: deb' \
+    'URIs: https://download.docker.com/linux/ubuntu' \
+    "Suites: ${codename}" \
+    'Components: stable' \
+    "Architectures: ${architecture}" \
+    'Signed-By: /etc/apt/keyrings/docker.asc' \
+    > "${docker_source}"
+  chmod 0644 "${docker_source}"
+  mv -f "${docker_source}" /etc/apt/sources.list.d/docker.sources
+  docker_source=
+  apt-get update
+  DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    docker-ce-cli docker-ce-rootless-extras
+fi
+
+if ! getent group "${runner_user}" >/dev/null; then
+  groupadd --system "${runner_user}"
+fi
+if ! id "${runner_user}" >/dev/null 2>&1; then
+  useradd \
+    --system \
+    --create-home \
+    --gid "${runner_user}" \
+    --home-dir "${runner_home}" \
+    --shell /bin/bash \
+    "${runner_user}"
+else
+  usermod --gid "${runner_user}" --home "${runner_home}" --shell /bin/bash \
+    "${runner_user}"
+fi
+if ! id -nG summing | tr ' ' '\n' | grep -qx "${runner_user}"; then
+  usermod --append --groups "${runner_user}" summing
+fi
+subuid_entry=$(grep "^${runner_user}:" /etc/subuid || true)
+subgid_entry=$(grep "^${runner_user}:" /etc/subgid || true)
+if { [ -n "${subuid_entry}" ] && [ -z "${subgid_entry}" ]; } || \
+  { [ -z "${subuid_entry}" ] && [ -n "${subgid_entry}" ]; }; then
+  printf '%s\n' 'Project runner must have both subuid and subgid ranges, or neither.' >&2
+  exit 2
+fi
+if [ -z "${subuid_entry}" ]; then
+  subordinate_range_start=231072
+  subordinate_range_size=65536
+  range_in_use() {
+    local path=$1
+    local first=$2
+    local last=$3
+    awk -F: -v first="${first}" -v last="${last}" '
+      $2 <= last && ($2 + $3 - 1) >= first { found = 1 }
+      END { exit(found ? 0 : 1) }
+    ' "${path}"
+  }
+  while range_in_use /etc/subuid "${subordinate_range_start}" \
+      "$((subordinate_range_start + subordinate_range_size - 1))" || \
+    range_in_use /etc/subgid "${subordinate_range_start}" \
+      "$((subordinate_range_start + subordinate_range_size - 1))"; do
+    subordinate_range_start=$((subordinate_range_start + subordinate_range_size))
+    if [ "${subordinate_range_start}" -gt 2000000000 ]; then
+      printf '%s\n' 'Could not allocate a non-overlapping project runner subordinate id range.' >&2
+      exit 2
+    fi
+  done
+  subordinate_range_end=$((subordinate_range_start + subordinate_range_size - 1))
+  usermod --add-subuids \
+    "${subordinate_range_start}-${subordinate_range_end}" "${runner_user}"
+  usermod --add-subgids \
+    "${subordinate_range_start}-${subordinate_range_end}" "${runner_user}"
+fi
+
+runner_uid=$(id -u "${runner_user}")
+loginctl enable-linger "${runner_user}"
+systemctl start "user@${runner_uid}.service"
+runner_env=(
+  "HOME=${runner_home}"
+  "XDG_RUNTIME_DIR=/run/user/${runner_uid}"
+  "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${runner_uid}/bus"
+)
+if [ ! -S "/run/user/${runner_uid}/docker.sock" ]; then
+  runuser -u "${runner_user}" -- env "${runner_env[@]}" \
+    dockerd-rootless-setuptool.sh install --force
+fi
+install -d -o "${runner_user}" -g "${runner_user}" -m 0700 \
+  "${runner_home}/.config/docker"
+install -o "${runner_user}" -g "${runner_user}" -m 0600 \
+  "${release_root}/deploy/docker-rootless-daemon.json" \
+  "${runner_home}/.config/docker/daemon.json"
+runuser -u "${runner_user}" -- env "${runner_env[@]}" \
+  systemctl --user restart docker.service
+
+docker_ready=0
+for _ in $(seq 1 30); do
+  if [ -S "/run/user/${runner_uid}/docker.sock" ]; then
+    docker_ready=1
+    break
+  fi
+  sleep 1
+done
+if [ "${docker_ready}" != 1 ]; then
+  printf '%s\n' 'Rootless Docker did not create the project runner socket.' >&2
+  exit 1
+fi
+
+install -d -o root -g "${runner_user}" -m 0750 "${runner_config_root}"
+install -d -o root -g "${runner_user}" -m 0750 "${runner_config_root}/projects"
+install -d -o root -g "${runner_user}" -m 0750 "${runner_config_root}/schedules"
+install -d -o "${runner_user}" -g "${runner_user}" -m 0700 \
+  "${runner_home}/jobs"
+install -d -o "${runner_user}" -g "${runner_user}" -m 0700 \
+  "${runner_data_root}"
+if [ ! -f "${runner_config_root}/environment.key" ]; then
+  temporary_key=$(mktemp /run/summing-project-runner-key.XXXXXX)
+  openssl rand -hex 32 > "${temporary_key}"
+  install -o "${runner_user}" -g "${runner_user}" -m 0400 \
+    "${temporary_key}" "${runner_config_root}/environment.key"
+  rm -f "${temporary_key}"
+  temporary_key=
+fi
+if [ -L "${runner_config_root}/environment.key" ] || \
+  ! grep -Eq '^[0-9a-fA-F]{64}$' "${runner_config_root}/environment.key"; then
+  printf '%s\n' 'SUMMING project runner environment key is unsafe or invalid.' >&2
+  exit 2
+fi
+
+runner_assets=()
+if [ "${install_static_configs}" = 1 ]; then
+  shopt -s nullglob
+  runner_assets=("${release_root}"/deploy/*.runner.json)
+  shopt -u nullglob
+fi
+for asset in "${runner_assets[@]}"; do
+  project_id=$(basename "${asset}" .runner.json)
+  case "${project_id}" in
+    ''|[!a-z0-9]*|*[!a-z0-9-]*)
+      printf 'Invalid static project runner id: %s\n' "${project_id}" >&2
+      exit 2
+      ;;
+  esac
+  if ! jq -e '
+    type == "object" and
+    (((.configPath? | type) == "string") or
+      (((.configSourcePaths? | type) == "array") and
+        (.configSourcePaths | length) > 0)) and
+    ((.dataPath? | type) == "string")
+  ' "${asset}" >/dev/null; then
+    printf 'Invalid static project runner config: %s\n' "${asset}" >&2
+    exit 2
+  fi
+  target=${runner_config_root}/projects/${project_id}.json
+  if [ -L "${target}" ] || { [ -e "${target}" ] && [ ! -f "${target}" ]; }; then
+    printf 'Static project runner config is unsafe: %s\n' "${target}" >&2
+    exit 2
+  fi
+  if [ ! -e "${target}" ]; then
+    install -o root -g "${runner_user}" -m 0640 "${asset}" "${target}"
+  fi
+done
+
+temporary_unit=$(mktemp /run/summing-project-runner.service.XXXXXX)
+sed "s/PROJECT_RUNNER_UID/${runner_uid}/g" \
+  "${release_root}/deploy/summing-project-runner.service" > "${temporary_unit}"
+install -o root -g root -m 0644 "${temporary_unit}" "${unit_path}"
+rm -f "${temporary_unit}"
+temporary_unit=
+
+systemctl daemon-reload
+systemctl enable summing-project-runner.service
+systemctl restart summing-project-runner.service
+
+runner_healthy=0
+for _ in $(seq 1 30); do
+  if curl --fail --silent --unix-socket "${runner_socket}" \
+    http://localhost/health >/dev/null 2>&1; then
+    runner_healthy=1
+    break
+  fi
+  sleep 1
+done
+if [ "${runner_healthy}" != 1 ]; then
+  printf '%s\n' 'SUMMING project runner did not become healthy within 30 seconds.' >&2
+  exit 1
+fi
+
+if [ -f "${env_file}" ]; then
+  configured_socket=$(sed -n 's/^SUMMING_RUNNER_SOCKET=//p' "${env_file}" | tail -n 1)
+  if [ -z "${configured_socket}" ] || \
+    [ "${configured_socket}" = /run/summing-runner/runner.sock ]; then
+    env_candidate=$(mktemp /etc/summing/summing.env.XXXXXX)
+    awk -v socket="${runner_socket}" '
+      BEGIN { replaced = 0 }
+      /^SUMMING_RUNNER_SOCKET=$|^SUMMING_RUNNER_SOCKET=\/run\/summing-runner\/runner\.sock$/ {
+        if (!replaced) print "SUMMING_RUNNER_SOCKET=" socket
+        replaced = 1
+        next
+      }
+      { print }
+      END {
+        if (!replaced) print "SUMMING_RUNNER_SOCKET=" socket
+      }
+    ' "${env_file}" > "${env_candidate}"
+    chown root:summing "${env_candidate}"
+    chmod 0640 "${env_candidate}"
+    mv -f "${env_candidate}" "${env_file}"
+    env_candidate=
+  fi
+fi
+
+printf '%s\n' 'SUMMING project runner is installed and healthy.'

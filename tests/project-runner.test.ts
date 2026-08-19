@@ -267,6 +267,113 @@ exit 0
   }
 });
 
+test("runner persists a constrained managed project registration and enforces its workspaces", async () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-runner-registration-"));
+  const configRoot = join(root, "static-config");
+  const dataRoot = join(root, "data");
+  const managedDataRoot = join(root, "managed-data");
+  const socket = join(root, "runner.sock");
+  mkdirSync(configRoot);
+  let server = new ProjectRunnerServer(
+    socket,
+    dataRoot,
+    configRoot,
+    join(root, "unused-docker"),
+    Buffer.alloc(32, 11),
+    true,
+    [],
+    join(root, "migration.sock"),
+    managedDataRoot,
+  );
+  try {
+    await server.start();
+    let client = new ProjectRunnerClient(socket);
+    await assert.rejects(client.registeredProject("managed-demo"), /not configured/);
+    assert.deepEqual(
+      await client.registerProject("managed-demo", ["repo", "frontend"]),
+      {
+        projectId: "managed-demo",
+        workspaceIds: ["repo", "frontend"],
+        source: "managed",
+      },
+    );
+    const stored = JSON.parse(
+      readFileSync(join(dataRoot, "managed-projects", "managed-demo.json"), "utf8"),
+    ) as Record<string, unknown>;
+    assert.deepEqual(stored.configSourcePaths, ["config.json", "config.example.json"]);
+    assert.equal(stored.dataPath, join(managedDataRoot, "managed-demo", "data"));
+    assert.equal(stored.network, true);
+    assert.deepEqual(await client.registeredProject("managed-demo"), {
+      projectId: "managed-demo",
+      workspaceIds: ["repo", "frontend"],
+      source: "managed",
+    });
+    await server.close();
+    server = new ProjectRunnerServer(
+      socket,
+      dataRoot,
+      configRoot,
+      join(root, "unused-docker"),
+      Buffer.alloc(32, 11),
+      true,
+      [],
+      join(root, "migration.sock"),
+      managedDataRoot,
+    );
+    await server.start();
+    client = new ProjectRunnerClient(socket);
+    assert.deepEqual(await client.registeredProject("managed-demo"), {
+      projectId: "managed-demo",
+      workspaceIds: ["repo", "frontend"],
+      source: "managed",
+    });
+    assert.equal((await client.environment("managed-demo", "repo")).revision, 0);
+    await assert.rejects(
+      client.environment("managed-demo", "unknown"),
+      /workspace is not configured/,
+    );
+    await assert.rejects(
+      client.registerProject("../escape", ["repo"]),
+      /invalid runner project id/,
+    );
+
+    writeFileSync(join(configRoot, "static-demo.json"), JSON.stringify({
+      configSourcePaths: ["config.json"],
+      dataPath: join(root, "static-data"),
+      network: false,
+    }));
+    assert.deepEqual(await client.registerProject("static-demo", ["repo"]), {
+      projectId: "static-demo",
+      workspaceIds: ["repo"],
+      source: "static",
+    });
+    assert.equal(existsSync(join(dataRoot, "managed-projects", "static-demo.json")), false);
+
+    stored.dataPath = join(root, "attacker-selected-data");
+    writeFileSync(
+      join(dataRoot, "managed-projects", "managed-demo.json"),
+      JSON.stringify(stored),
+    );
+    await assert.rejects(
+      client.registeredProject("managed-demo"),
+      /internal runner error/,
+    );
+    stored.dataPath = join(managedDataRoot, "managed-demo", "data");
+    stored.envPath = join(root, "attacker-selected-env");
+    writeFileSync(
+      join(dataRoot, "managed-projects", "managed-demo.json"),
+      JSON.stringify(stored),
+    );
+    await assert.rejects(
+      client.registeredProject("managed-demo"),
+      /internal runner error/,
+    );
+  } finally {
+    await server.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("runner cancels queued jobs and force-removes a running job container", async () => {
   const root = mkdtempSync(join(tmpdir(), "summing-runner-cancel-"));
   const repository = join(root, "repo");

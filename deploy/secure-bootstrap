@@ -154,7 +154,7 @@ if [ ! -f "${install_state}" ]; then
     "${data_dir}/state.sqlite3" \
     "${data_dir}/core.sqlite" \
     "${data_dir}/runner-control.sqlite3" \
-    /var/lib/summing-runner/jobs \
+    /var/lib/summing-project-runner/jobs \
     "${env_file}"; do
     if [ -e "${durable}" ]; then
       printf 'Refusing clean install over existing durable state: %s\n' "${durable}" >&2

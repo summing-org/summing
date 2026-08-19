@@ -67,6 +67,12 @@ export interface RunnerEnvironmentMigration {
   verified: EnvironmentVerificationMarker | null;
 }
 
+export interface RunnerProjectRegistration {
+  projectId: string;
+  workspaceIds: string[];
+  source: "managed" | "static";
+}
+
 export class ProjectRunnerClientError extends Error {
   constructor(message: string, readonly status = 503) {
     super(message);
@@ -86,6 +92,7 @@ export class ProjectRunnerClient {
       const requestHandle = request(
         {
           socketPath: this.socketPath,
+          agent: false,
           method,
           path,
           headers: body
@@ -141,6 +148,29 @@ export class ProjectRunnerClient {
     } catch {
       return false;
     }
+  }
+
+  async registerProject(
+    projectId: string,
+    workspaceIds: readonly string[],
+  ): Promise<RunnerProjectRegistration> {
+    const query = new URLSearchParams({ project: projectId });
+    const body = Buffer.from(JSON.stringify({ workspaceIds }), "utf8");
+    const result = await this.call<{ project: RunnerProjectRegistration }>(
+      "PUT",
+      `/projects?${query.toString()}`,
+      body,
+    );
+    return result.project;
+  }
+
+  async registeredProject(projectId: string): Promise<RunnerProjectRegistration> {
+    const query = new URLSearchParams({ project: projectId });
+    const result = await this.call<{ project: RunnerProjectRegistration }>(
+      "GET",
+      `/projects?${query.toString()}`,
+    );
+    return result.project;
   }
 
   async submit(

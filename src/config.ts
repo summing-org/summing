@@ -119,7 +119,7 @@ export class RuntimeConfig {
     readonly viewerPublicUrl = "",
     readonly viewerAuthMaxAgeSeconds = 900,
     readonly viewerLocalToken = "",
-    readonly runnerSocket = "/run/summing-runner/runner.sock",
+    readonly runnerSocket = "/run/summing-project-runner/runner.sock",
     readonly deploymentRequestPath = "",
     readonly deploymentStatePath = "",
     readonly codexLimitsProfileEnabled = true,
@@ -409,7 +409,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig 
     ),
     String(env.SUMMING_VIEWER_LOCAL_TOKEN || "").trim(),
     expandPath(
-      env.SUMMING_RUNNER_SOCKET || viewer.runner_socket || "/run/summing-runner/runner.sock",
+      env.SUMMING_RUNNER_SOCKET || viewer.runner_socket ||
+        "/run/summing-project-runner/runner.sock",
       "viewer.runner_socket",
     ),
     env.SUMMING_DEPLOY_REQUEST

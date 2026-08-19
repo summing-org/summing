@@ -6,6 +6,8 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { ProjectConfig, RuntimeConfig, type WorkspaceConfig } from "../src/config.js";
 import { ProjectCatalog } from "../src/project-catalog.js";
+import { ManagedProjectRunnerRegistry } from "../src/managed-project-runner-registry.js";
+import type { RunnerProjectRegistration } from "../src/project-runner-client.js";
 import { StateStore } from "../src/state-store.js";
 
 function git(cwd: string, ...args: string[]): string {
@@ -179,6 +181,53 @@ test("cleans up a failed clone so the project id can be retried", async () => {
     const project = await catalog.createLocal("retryable", 42, "repo");
     assert.ok(git(project.workspace().path, "rev-parse", "HEAD"));
   } finally {
+    state.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("registers a managed project at creation and reconciles persisted projects after restart", async () => {
+  const { root, config, state } = fixture();
+  const calls: Array<{ projectId: string; workspaceIds: readonly string[] }> = [];
+  let unavailable = true;
+  const runner = {
+    async registerProject(
+      projectId: string,
+      workspaceIds: readonly string[],
+    ): Promise<RunnerProjectRegistration> {
+      calls.push({ projectId, workspaceIds: [...workspaceIds] });
+      if (unavailable) throw new Error("runner socket is unavailable");
+      return { projectId, workspaceIds: [...workspaceIds], source: "managed" };
+    },
+  };
+  let registry: ManagedProjectRunnerRegistry | null = null;
+  const catalog = new ProjectCatalog(
+    config,
+    state,
+    (project) => registry?.register(project),
+  );
+  registry = new ManagedProjectRunnerRegistry(runner, catalog, 10);
+  try {
+    await registry.start();
+    const created = await catalog.createLocal("runner-ready", 42, "repo");
+    assert.equal(created.id, "runner-ready");
+    assert.deepEqual(calls, [{ projectId: "runner-ready", workspaceIds: ["repo"] }]);
+    assert.equal(state.listManagedProjects().some((project) => project.id === "runner-ready"), true);
+
+    unavailable = false;
+    const retryDeadline = Date.now() + 1_000;
+    while (calls.length < 2 && Date.now() < retryDeadline) {
+      await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+    }
+    assert.ok(calls.length >= 2, "pending runner registration must be retried automatically");
+    assert.deepEqual(calls.at(-1), { projectId: "runner-ready", workspaceIds: ["repo"] });
+
+    const afterRestart = new ManagedProjectRunnerRegistry(runner, catalog, 60_000);
+    await afterRestart.start();
+    afterRestart.stop();
+    assert.deepEqual(calls.at(-1), { projectId: "runner-ready", workspaceIds: ["repo"] });
+  } finally {
+    registry.stop();
     state.close();
     rmSync(root, { recursive: true, force: true });
   }

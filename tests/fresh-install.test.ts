@@ -174,7 +174,10 @@ test("provisioning and secure bootstrap assets keep application secrets out of m
   );
   assert.match(asset("deploy/activate.sh"), /\/usr\/local\/sbin\/restore-node-recovery/);
   assert.match(recovery, /read -r -s recovery_key <\/dev\/tty/);
-  assert.match(recovery, /systemctl stop summing\.service summing-runner\.service/);
+  assert.match(
+    recovery,
+    /systemctl stop summing\.service summing-project-runner\.service/,
+  );
   assert.match(recovery, /dist\/src\/node-recovery-activate\.js/);
   assert.match(recovery, /services remain stopped for inspection/);
   assert.doesNotMatch(recovery, /rm\s+-rf/);

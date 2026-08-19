@@ -195,79 +195,9 @@ install -o root -g root -m 0644 \
 install -o root -g root -m 0644 \
   "${repo_dir}/deploy/summing-deploy.timer" \
   /etc/systemd/system/summing-deploy.timer
-if id summing-runner >/dev/null 2>&1 && [ -f /etc/systemd/system/summing-runner.service ]; then
-  runner_uid=$(id -u summing-runner)
-  if [ ! -f /etc/summing-runner/environment.key ]; then
-    install -d -o root -g summing -m 0750 /etc/summing-runner
-    if [ -L /var/lib/summing-runner/environment.key ]; then
-      printf '%s\n' 'Bootstrap runner environment key must not be a symlink.' >&2
-      exit 2
-    elif [ -f /var/lib/summing-runner/environment.key ]; then
-      fallback_key_mode=$(stat -c '%a' /var/lib/summing-runner/environment.key)
-      if { [ "${fallback_key_mode}" != 400 ] && [ "${fallback_key_mode}" != 600 ]; } || \
-        ! grep -Eq '^[0-9a-fA-F]{64}$' /var/lib/summing-runner/environment.key; then
-        printf '%s\n' 'Bootstrap runner environment key is invalid.' >&2
-        exit 2
-      fi
-      install -o summing-runner -g summing-runner -m 0400 \
-        /var/lib/summing-runner/environment.key \
-        /etc/summing-runner/environment.key
-      if ! cmp -s /var/lib/summing-runner/environment.key \
-        /etc/summing-runner/environment.key; then
-        printf '%s\n' 'Runner environment key copy verification failed.' >&2
-        exit 2
-      fi
-      rm -f /var/lib/summing-runner/environment.key
-    else
-      temporary_environment_key=$(mktemp /run/summing-runner-environment.XXXXXX)
-      openssl rand -hex 32 > "${temporary_environment_key}"
-      install -o summing-runner -g summing-runner -m 0400 \
-        "${temporary_environment_key}" /etc/summing-runner/environment.key
-      rm -f "${temporary_environment_key}"
-    fi
-  fi
-  temporary_runner_unit=$(mktemp /run/summing-runner.service.XXXXXX)
-  trap 'rm -f "${temporary_runner_unit}"' EXIT
-  sed "s/RUNNER_UID/${runner_uid}/g" \
-    "${repo_dir}/deploy/summing-runner.service" \
-    > "${temporary_runner_unit}"
-  install -o root -g root -m 0644 \
-    "${temporary_runner_unit}" \
-    /etc/systemd/system/summing-runner.service
-  rm -f "${temporary_runner_unit}"
-  trap - EXIT
-  install -o root -g root -m 0644 \
-    "${repo_dir}/deploy/summing-ash-seo.service" \
-    /etc/systemd/system/summing-ash-seo.service
-  install -o root -g root -m 0644 \
-    "${repo_dir}/deploy/summing-ash-seo.timer" \
-    /etc/systemd/system/summing-ash-seo.timer
-  install -d -o root -g summing -m 0750 /etc/summing-runner/projects
-  runner_project_config=/etc/summing-runner/projects/ash-seo.json
-  legacy_env_path=
-  if [ -L "${runner_project_config}" ]; then
-    printf '%s\n' 'Runner project config must not be a symlink.' >&2
-    exit 2
-  fi
-  if [ -f "${runner_project_config}" ]; then
-    legacy_env_path=$(jq -r '.envPath // empty' "${runner_project_config}")
-  fi
-  if [ -n "${legacy_env_path}" ]; then
-    compatible_runner_config=$(mktemp /run/ash-seo-runner.XXXXXX)
-    jq --arg envPath "${legacy_env_path}" '. + {envPath: $envPath}' \
-      "${repo_dir}/deploy/ash-seo.runner.json" > "${compatible_runner_config}"
-    install -o root -g summing -m 0640 \
-      "${compatible_runner_config}" "${runner_project_config}"
-    rm -f "${compatible_runner_config}"
-  else
-    install -o root -g summing -m 0640 \
-      "${repo_dir}/deploy/ash-seo.runner.json" "${runner_project_config}"
-  fi
-fi
+SUMMING_PROJECT_RUNNER_RELEASE="${repo_dir}" \
+  "${repo_dir}/deploy/install-project-runner-host"
 systemctl daemon-reload
-if systemctl is-enabled --quiet summing-runner.service 2>/dev/null; then
-  systemctl restart summing-runner.service
-fi
 systemctl enable summing
 systemctl enable summing-deploy.path summing-deploy.timer
 if ! systemctl restart summing; then
@@ -278,11 +208,13 @@ if ! systemctl restart summing; then
 fi
 
 runner_required=0
-if systemctl is-enabled --quiet summing-runner.service 2>/dev/null; then runner_required=1; fi
+if systemctl is-enabled --quiet summing-project-runner.service 2>/dev/null; then
+  runner_required=1
+fi
 for _ in $(seq 1 60); do
   if curl --fail --silent http://127.0.0.1:8765/health >/dev/null; then
     if [ "${runner_required}" = 0 ] || \
-      curl --fail --silent --unix-socket /run/summing-runner/runner.sock \
+      curl --fail --silent --unix-socket /run/summing-project-runner/runner.sock \
         http://localhost/health >/dev/null 2>&1; then
       systemctl start summing-deploy.path summing-deploy.timer
       printf '%s\n' 'SUMMING and the project runner are active.'

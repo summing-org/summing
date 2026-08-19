@@ -40,6 +40,7 @@ import type {
   RunnerArtifactDeletion,
   RunnerJob,
   RunnerJobTrigger,
+  RunnerProjectRegistration,
 } from "./project-runner-client.js";
 
 const PROJECT_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
@@ -73,6 +74,7 @@ interface RunnerProjectConfig {
   dataPath: string;
   environmentBootstrap: ReadonlyMap<string, string>;
   network: boolean;
+  workspaceIds: ReadonlySet<string> | null;
 }
 
 interface CommandResult {
@@ -270,11 +272,16 @@ export class ProjectRunnerServer {
     migrationTargets: LegacyEnvironmentMigrationTarget[] = [],
     readonly migrationBrokerSocket = process.env.SUMMING_SECRETS_RUNTIME_SOCKET ||
       "/run/summing-secrets/runtime.sock",
+    readonly managedDataRoot = resolve(dataRoot, "..", "managed-data"),
   ) {
     if (!isAbsolute(socketPath) || basename(socketPath) !== "runner.sock") {
       throw new Error("runner socket must be an absolute runner.sock path");
     }
     mkdirSync(dataRoot, { recursive: true, mode: 0o700 });
+    if (!isAbsolute(managedDataRoot)) {
+      throw new Error("managed project data root must be an absolute path");
+    }
+    mkdirSync(this.managedConfigRoot(), { recursive: true, mode: 0o700 });
     this.environments = new ProjectEnvironmentStore(resolve(dataRoot, "environments"), environmentKey);
     this.ready = initiallyReady;
     this.migrationTargets = new Map(
@@ -339,6 +346,33 @@ export class ProjectRunnerServer {
       });
       return;
     }
+    if (url.pathname === "/projects" && (request.method === "GET" || request.method === "PUT")) {
+      const projectId = url.searchParams.get("project") ?? "";
+      if (!PROJECT_ID.test(projectId)) {
+        throw new RunnerHttpError(400, "invalid runner project id");
+      }
+      if (request.method === "PUT") {
+        const body = await jsonBody(request);
+        if (Object.keys(body).some((key) => key !== "workspaceIds")) {
+          throw new RunnerHttpError(400, "runner project registration contains unsupported fields");
+        }
+        if (!Array.isArray(body.workspaceIds) || body.workspaceIds.length === 0 ||
+          body.workspaceIds.length > 100) {
+          throw new RunnerHttpError(400, "workspaceIds must contain 1-100 workspace ids");
+        }
+        const workspaceIds = body.workspaceIds.map((value) => String(value));
+        if (workspaceIds.some((workspaceId) => !WORKSPACE_ID.test(workspaceId)) ||
+          new Set(workspaceIds).size !== workspaceIds.length) {
+          throw new RunnerHttpError(400, "workspaceIds contain invalid or duplicate ids");
+        }
+        json(response, 200, {
+          project: this.registerManagedProject(projectId, workspaceIds),
+        });
+        return;
+      }
+      json(response, 200, { project: this.projectRegistration(projectId) });
+      return;
+    }
     if (request.method === "POST" && url.pathname === "/migration/import") {
       const target = this.migrationTarget(url);
       const body = await jsonBody(request);
@@ -390,7 +424,7 @@ export class ProjectRunnerServer {
       if (!PROJECT_ID.test(projectId) || !WORKSPACE_ID.test(workspaceId)) {
         throw new RunnerHttpError(400, "invalid environment scope");
       }
-      const project = this.projectConfig(projectId);
+      const project = this.projectConfig(projectId, workspaceId);
       if (request.method === "GET") {
         json(response, 200, {
           environment: this.environments.ensure(
@@ -451,26 +485,32 @@ export class ProjectRunnerServer {
         ? { ...commonMetadata, scheduleId, scheduledFor: new Date(scheduledFor).toISOString() }
         : commonMetadata;
       if (!idempotencyKey) {
-        json(response, 202, { job: await this.acceptJob(request, this.projectConfig(projectId), metadata) });
+        json(response, 202, {
+          job: await this.acceptJob(request, this.projectConfig(projectId, workspaceId), metadata),
+        });
         return;
       }
       const submissionKey = `${projectId}\0${workspaceId}\0${idempotencyKey}`;
       const existing = this.idempotentJob(projectId, workspaceId, idempotencyKey);
       if (existing) {
-        request.resume();
+        await this.discardArchive(request);
         this.assertSameSubmission(existing, metadata);
         json(response, 200, { job: existing, deduplicated: true });
         return;
       }
       const pending = this.pendingSubmissions.get(submissionKey);
       if (pending) {
-        request.resume();
+        await this.discardArchive(request);
         const job = await pending;
         this.assertSameSubmission(job, metadata);
         json(response, 200, { job, deduplicated: true });
         return;
       }
-      const submission = this.acceptJob(request, this.projectConfig(projectId), metadata);
+      const submission = this.acceptJob(
+        request,
+        this.projectConfig(projectId, workspaceId),
+        metadata,
+      );
       this.pendingSubmissions.set(submissionKey, submission);
       try {
         json(response, 202, { job: await submission });
@@ -492,7 +532,7 @@ export class ProjectRunnerServer {
       ) {
         throw new RunnerHttpError(400, "invalid runner cancellation scope");
       }
-      this.projectConfig(projectId);
+      this.projectConfig(projectId, workspaceId);
       json(response, 200, { job: await this.cancelJob(projectId, workspaceId, jobId) });
       return;
     }
@@ -502,7 +542,7 @@ export class ProjectRunnerServer {
       if (!PROJECT_ID.test(projectId) || !WORKSPACE_ID.test(workspaceId)) {
         throw new RunnerHttpError(400, "invalid project or workspace id");
       }
-      this.projectConfig(projectId);
+      this.projectConfig(projectId, workspaceId);
       json(response, 200, { jobs: this.listJobs(projectId, workspaceId) });
       return;
     }
@@ -580,6 +620,21 @@ export class ProjectRunnerServer {
       }
     } finally {
       await new Promise<void>((resolveEnd) => output.end(resolveEnd));
+    }
+    if (bytes !== announced) throw new RunnerHttpError(400, "source archive is incomplete");
+  }
+
+  private async discardArchive(request: IncomingMessage): Promise<void> {
+    const announced = Number(request.headers["content-length"] ?? 0);
+    if (!Number.isSafeInteger(announced) || announced <= 0 || announced > MAX_ARCHIVE_BYTES) {
+      throw new RunnerHttpError(413, "invalid source archive size");
+    }
+    let bytes = 0;
+    for await (const chunk of request) {
+      bytes += Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(String(chunk));
+      if (bytes > MAX_ARCHIVE_BYTES) {
+        throw new RunnerHttpError(413, "source archive is too large");
+      }
     }
     if (bytes !== announced) throw new RunnerHttpError(400, "source archive is incomplete");
   }
@@ -662,10 +717,124 @@ export class ProjectRunnerServer {
     }
   }
 
-  private projectConfig(projectId: string): RunnerProjectConfig {
-    const path = resolve(this.configRoot, `${projectId}.json`);
+  private managedConfigRoot(): string {
+    return resolve(this.dataRoot, "managed-projects");
+  }
+
+  private staticProjectConfigPath(projectId: string): string {
+    return resolve(this.configRoot, `${projectId}.json`);
+  }
+
+  private managedProjectConfigPath(projectId: string): string {
+    return resolve(this.managedConfigRoot(), `${projectId}.json`);
+  }
+
+  private registerManagedProject(
+    projectId: string,
+    workspaceIds: string[],
+  ): RunnerProjectRegistration {
+    const staticPath = this.staticProjectConfigPath(projectId);
+    if (existsSync(staticPath)) {
+      this.projectConfig(projectId);
+      return { projectId, workspaceIds, source: "static" };
+    }
+    const path = this.managedProjectConfigPath(projectId);
+    if (existsSync(path) && (!lstatSync(path).isFile() || lstatSync(path).isSymbolicLink())) {
+      throw new RunnerHttpError(500, "managed runner project config is unsafe");
+    }
+    const value = {
+      kind: "managed",
+      projectId,
+      workspaceIds,
+      configSourcePaths: ["config.json", "config.example.json"],
+      dataPath: resolve(this.managedDataRoot, projectId, "data"),
+      network: true,
+    };
+    const temporaryPath = resolve(
+      this.managedConfigRoot(),
+      `.${projectId}-${process.pid}-${randomUUID()}.tmp`,
+    );
+    try {
+      const descriptor = openSync(
+        temporaryPath,
+        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL,
+        0o600,
+      );
+      try {
+        writeFileSync(descriptor, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+        fsyncSync(descriptor);
+      } finally {
+        closeSync(descriptor);
+      }
+      renameSync(temporaryPath, path);
+      const directoryDescriptor = openSync(this.managedConfigRoot(), constants.O_RDONLY);
+      try {
+        fsyncSync(directoryDescriptor);
+      } finally {
+        closeSync(directoryDescriptor);
+      }
+    } catch (error) {
+      rmSync(temporaryPath, { force: true });
+      throw error;
+    }
+    return { projectId, workspaceIds, source: "managed" };
+  }
+
+  private projectRegistration(projectId: string): RunnerProjectRegistration {
+    const staticPath = this.staticProjectConfigPath(projectId);
+    const path = existsSync(staticPath) ? staticPath : this.managedProjectConfigPath(projectId);
     if (!existsSync(path)) throw new RunnerHttpError(404, "runner project is not configured");
+    this.projectConfig(projectId);
     const raw = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    const workspaceIds = Array.isArray(raw.workspaceIds)
+      ? raw.workspaceIds.map((value) => String(value))
+      : [];
+    return {
+      projectId,
+      workspaceIds,
+      source: path === staticPath ? "static" : "managed",
+    };
+  }
+
+  private projectConfig(projectId: string, workspaceId?: string): RunnerProjectConfig {
+    const staticPath = this.staticProjectConfigPath(projectId);
+    const managedPath = this.managedProjectConfigPath(projectId);
+    const path = existsSync(staticPath) ? staticPath : managedPath;
+    if (!existsSync(path)) throw new RunnerHttpError(404, "runner project is not configured");
+    const metadata = lstatSync(path);
+    if (!metadata.isFile() || metadata.isSymbolicLink()) {
+      throw new RunnerHttpError(500, "runner project config is unsafe");
+    }
+    const raw = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    let workspaceIds: Set<string> | null = null;
+    if (path === managedPath) {
+      const allowedKeys = new Set([
+        "kind",
+        "projectId",
+        "workspaceIds",
+        "configSourcePaths",
+        "dataPath",
+        "network",
+      ]);
+      if (raw.kind !== "managed" || raw.projectId !== projectId ||
+        Object.keys(raw).some((key) => !allowedKeys.has(key)) ||
+        !Array.isArray(raw.workspaceIds) || raw.workspaceIds.length === 0 ||
+        raw.workspaceIds.some((value) => typeof value !== "string" || !WORKSPACE_ID.test(value)) ||
+        !Array.isArray(raw.configSourcePaths) || raw.configSourcePaths.length !== 2 ||
+        raw.configSourcePaths[0] !== "config.json" ||
+        raw.configSourcePaths[1] !== "config.example.json" ||
+        raw.dataPath !== resolve(this.managedDataRoot, projectId, "data") ||
+        raw.network !== true) {
+        throw new Error("managed runner project config is invalid");
+      }
+      workspaceIds = new Set(raw.workspaceIds as string[]);
+      if (workspaceIds.size !== raw.workspaceIds.length) {
+        throw new Error("managed runner project workspaces contain duplicates");
+      }
+      if (workspaceId && !workspaceIds.has(workspaceId)) {
+        throw new RunnerHttpError(404, "runner workspace is not configured");
+      }
+    }
     const bootstrapValue = raw.environmentBootstrap;
     const environmentBootstrap = new Map<string, string>();
     if (bootstrapValue !== undefined) {
@@ -710,6 +879,7 @@ export class ProjectRunnerServer {
       dataPath: safeAbsolutePath(raw.dataPath, "dataPath"),
       environmentBootstrap,
       network: raw.network === true,
+      workspaceIds,
     };
   }
 

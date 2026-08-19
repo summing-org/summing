@@ -36,6 +36,7 @@ import {
   observeModelEgressWeeklyUsage,
 } from "./model-egress-usage.js";
 import { NodeRecoveryService } from "./node-recovery-service.js";
+import { ManagedProjectRunnerRegistry } from "./managed-project-runner-registry.js";
 import { ProjectCatalog, ProjectCatalogError } from "./project-catalog.js";
 import { GitInspector } from "./git-inspector.js";
 import { ProjectViewerServer } from "./project-viewer.js";
@@ -44,6 +45,7 @@ import {
   REPOSITORY_DYNAMIC_TOOLS,
 } from "./repository-tools.js";
 import { RunnerControlPlane } from "./runner-control.js";
+import { ProjectRunnerClient } from "./project-runner-client.js";
 import { executeRunnerTool, RUNNER_DYNAMIC_TOOLS } from "./runner-tools.js";
 import { detectSecretFile, detectSecretText, type SecretDetection } from "./secret-ingress.js";
 import {
@@ -498,6 +500,7 @@ export class SummingRuntime {
   readonly health: HealthServer;
   readonly viewer: ProjectViewerServer;
   readonly runnerControl: RunnerControlPlane;
+  readonly projectRunnerRegistry: ManagedProjectRunnerRegistry;
   readonly deploymentEvents: DeploymentEventNotifier;
   readonly knowledgeSync: KnowledgeSyncService;
   readonly nodeRecovery: NodeRecoveryService;
@@ -538,7 +541,15 @@ export class SummingRuntime {
     this.state = new StateStore(resolve(config.dataDir, "state.sqlite3"));
     this.teamModelEgressEnabledState =
       this.state.teamModelEgressEnabledOverride() ?? config.teamModelEgressEnabled;
-    this.projects = new ProjectCatalog(config, this.state);
+    const projectRunnerClient = new ProjectRunnerClient(config.runnerSocket);
+    let projectRunnerRegistry: ManagedProjectRunnerRegistry | null = null;
+    this.projects = new ProjectCatalog(
+      config,
+      this.state,
+      (project) => projectRunnerRegistry?.register(project),
+    );
+    projectRunnerRegistry = new ManagedProjectRunnerRegistry(projectRunnerClient, this.projects);
+    this.projectRunnerRegistry = projectRunnerRegistry;
     this.codex = new CodexAppServer(config.codexBinary, config.codexHome);
     this.telegram = new TelegramAPI(config.telegramToken);
     this.knowledgeSync = new KnowledgeSyncService(
@@ -656,6 +667,7 @@ export class SummingRuntime {
     try {
       mkdirSync(this.config.dataDir, { recursive: true });
       this.projects.initialize();
+      await this.projectRunnerRegistry.start();
       this.workspaces.initialize(this.projects.all().map((entry) => entry.project));
       this.purgeTeamEvidence();
       this.scheduleTeamRetention();
@@ -719,6 +731,7 @@ export class SummingRuntime {
       this.clearTeamRetentionTimer();
       this.clearTeamUnderstandingTimers();
       this.deploymentEvents.stop();
+      this.projectRunnerRegistry.stop();
       await this.runnerControl.stopAndWait();
       await this.nodeRecovery.close();
       await this.knowledgeSync.close();

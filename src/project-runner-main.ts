@@ -5,12 +5,17 @@ import { discoverLegacyEnvironmentMigrations } from "./project-environment-migra
 import { ProjectRunnerServer } from "./project-runner-server.js";
 
 async function main(): Promise<void> {
-  const socketPath = process.env.SUMMING_RUNNER_SOCKET || "/run/summing-runner/runner.sock";
-  const dataRoot = process.env.SUMMING_RUNNER_DATA || "/var/lib/summing-runner/jobs";
-  const configRoot = process.env.SUMMING_RUNNER_CONFIG || "/etc/summing-runner/projects";
+  const socketPath = process.env.SUMMING_RUNNER_SOCKET ||
+    "/run/summing-project-runner/runner.sock";
+  const dataRoot = process.env.SUMMING_RUNNER_DATA ||
+    "/var/lib/summing-project-runner/jobs";
+  const configRoot = process.env.SUMMING_RUNNER_CONFIG ||
+    "/etc/summing-project-runner/projects";
+  const managedDataRoot = process.env.SUMMING_RUNNER_MANAGED_DATA ||
+    "/var/lib/summing-project-runs";
   const scheduleRoot = process.env.SUMMING_RUNNER_SCHEDULES || resolve(configRoot, "..", "schedules");
   const configuredKeyPath = String(process.env.SUMMING_RUNNER_ENV_KEY ?? "").trim();
-  const installedKeyPath = "/etc/summing-runner/environment.key";
+  const installedKeyPath = "/etc/summing-project-runner/environment.key";
   const keyPath = configuredKeyPath || (
     existsSync(installedKeyPath)
       ? installedKeyPath
@@ -28,6 +33,7 @@ async function main(): Promise<void> {
     migrations.length === 0,
     migrations,
     process.env.SUMMING_SECRETS_RUNTIME_SOCKET || "/run/summing-secrets/runtime.sock",
+    managedDataRoot,
   );
   let resolveSignal!: () => void;
   const signal = new Promise<void>((resolveSignalPromise) => {

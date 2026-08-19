@@ -1,0 +1,37 @@
+[Unit]
+Description=SUMMING isolated project runner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=summing-project-runner
+Group=summing-project-runner
+RuntimeDirectory=summing-project-runner
+RuntimeDirectoryMode=0750
+StateDirectory=summing-project-runner
+StateDirectoryMode=0700
+Environment=HOME=/var/lib/summing-project-runner
+Environment=XDG_RUNTIME_DIR=/run/user/PROJECT_RUNNER_UID
+Environment=DOCKER_HOST=unix:///run/user/PROJECT_RUNNER_UID/docker.sock
+Environment=SUMMING_RUNNER_SOCKET=/run/summing-project-runner/runner.sock
+Environment=SUMMING_RUNNER_DATA=/var/lib/summing-project-runner/jobs
+Environment=SUMMING_RUNNER_CONFIG=/etc/summing-project-runner/projects
+Environment=SUMMING_RUNNER_SCHEDULES=/etc/summing-project-runner/schedules
+Environment=SUMMING_RUNNER_ENV_KEY=/etc/summing-project-runner/environment.key
+Environment=SUMMING_RUNNER_MANAGED_DATA=/var/lib/summing-project-runs
+ExecStartPre=/usr/bin/test -S /run/user/PROJECT_RUNNER_UID/docker.sock
+ExecStart=/usr/local/bin/node --enable-source-maps /opt/summing-current/dist/src/project-runner-main.js
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/summing-project-runner /var/lib/summing-project-runs /run/summing-project-runner
+LockPersonality=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

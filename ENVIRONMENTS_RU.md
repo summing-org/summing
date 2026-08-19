@@ -37,17 +37,17 @@ Runner хранит каждый документ одним AES-256-GCM envelop
 ciphertext с project, workspace, revision и временем обновления. Master key:
 
 ```text
-/etc/summing-runner/environment.key
+/etc/summing-project-runner/environment.key
 ```
 
-Файл принадлежит `summing-runner`, имеет mode `0400` и не входит в release или
+Файл принадлежит `summing-project-runner`, имеет mode `0400` и не входит в release или
 backup данных. Для восстановления нужны одновременно environment key и
-`/var/lib/summing-runner/jobs/environments`; потеря ключа необратима.
+`/var/lib/summing-project-runner/jobs/environments`; потеря ключа необратима.
 
 На первом compatibility-запуске старый systemd unit ещё не передаёт путь к
 ключу. В этом единственном случае runner создаёт тот же ключ как приватный
-`/var/lib/summing-runner/environment.key`. Финализатор копирует его без
-перегенерации в `/etc/summing-runner/environment.key` до установки нового unit,
+`/var/lib/summing-project-runner/environment.key`. Финализатор копирует его без
+перегенерации в `/etc/summing-project-runner/environment.key` до установки нового unit,
 проверяет совпадение и удаляет временную state-копию; зашифрованные документы
 поэтому остаются читаемыми после cutover, а ключ не попадает в data backup.
 
@@ -60,7 +60,7 @@ backup данных. Для восстановления нужны одновр
 
 1. фиксирует текущую env revision в зашифрованном job snapshot;
 2. перед стартом создаёт временный файл `0600` под
-   `/run/summing-runner/environments`;
+   `/run/summing-project-runner/environments`;
 3. передаёт его Docker через `--env-file`;
 4. удаляет plaintext в `finally`, очищает encrypted job snapshot после job;
 5. редактирует совпадающие значения в логах и известных dry-run artifacts.
@@ -103,7 +103,7 @@ root-only `deploy/project-environment-cutover`. Финализатор повт�
 project/workspace, pinned Git SHA и текущую encrypted env revision с verification
 marker. Только после этого он:
 
-1. переносит тот же bootstrap key в `/etc/summing-runner/environment.key`;
+1. переносит тот же bootstrap key в `/etc/summing-project-runner/environment.key`;
 2. заменяет legacy `envPath` на `environmentBootstrap`, устанавливает новый
    runner unit и проверяет его health;
 3. удаляет только точный Caddy block `/connections* -> 127.0.0.1:8767`;
@@ -117,7 +117,7 @@ release, Connections route и broker продолжат работать; тот
 
 Cutover не удаляет legacy unit, `/var/lib/summing-secrets`, vault или его master
 key. До изменения файлов он сохраняет прежние runner config, unit и Caddyfile в
-`/var/lib/summing-runner/jobs/migrations/connections-to-environment/<project>--<workspace>/`.
+`/var/lib/summing-project-runner/jobs/migrations/connections-to-environment/<project>--<workspace>/`.
 Ошибка внутри финализатора восстанавливает их и снова включает broker. Эти
 данные нужно сохранять до окончания rollback window; для ручного возврата
 сначала восстановите сохранённые config/unit/Caddyfile и

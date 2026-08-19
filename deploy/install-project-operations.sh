@@ -11,8 +11,8 @@ viewer_redirect_domain=${SUMMING_VIEWER_REDIRECT_DOMAIN:-}
 ash_seo_revision=${ASH_SEO_REVISION:-}
 enable_timer=${ENABLE_ASH_SEO_TIMER:-0}
 repo_dir=/opt/summing
-runner_home=/var/lib/summing-runner
-runner_user=summing-runner
+runner_user=summing-project-runner
+runner_config_root=/etc/summing-project-runner
 
 if [ -z "${viewer_domain}" ] || [ -z "${ash_seo_revision}" ]; then
   printf '%s\n' 'Set SUMMING_VIEWER_DOMAIN and ASH_SEO_REVISION.' >&2
@@ -37,77 +37,10 @@ if ! printf '%s' "${ash_seo_revision}" | grep -Eq '^[0-9a-f]{40}$'; then
   exit 2
 fi
 
-apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl gnupg openssl uidmap dbus-user-session slirp4netns fuse-overlayfs
+SUMMING_PROJECT_RUNNER_RELEASE="${repo_dir}" \
+  "${repo_dir}/deploy/install-project-runner-host"
 
-if ! dpkg-query -W -f='${Status}' docker-ce >/dev/null 2>&1; then
-  install -m 0755 -d /etc/apt/keyrings
-  curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
-  chmod a+r /etc/apt/keyrings/docker.asc
-  architecture=$(dpkg --print-architecture)
-  codename=$(. /etc/os-release && printf '%s' "${VERSION_CODENAME}")
-  printf '%s\n' \
-    'Types: deb' \
-    'URIs: https://download.docker.com/linux/ubuntu' \
-    "Suites: ${codename}" \
-    'Components: stable' \
-    "Architectures: ${architecture}" \
-    'Signed-By: /etc/apt/keyrings/docker.asc' \
-    > /etc/apt/sources.list.d/docker.sources
-  apt-get update
-  DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras
-fi
-systemctl disable --now docker.service docker.socket >/dev/null 2>&1 || true
-
-if ! id "${runner_user}" >/dev/null 2>&1; then
-  useradd --system --create-home --home-dir "${runner_home}" --shell /bin/bash "${runner_user}"
-fi
-runner_group_changed=0
-if ! id -nG "${runner_user}" | tr ' ' '\n' | grep -qx summing; then
-  usermod --append --groups summing "${runner_user}"
-  runner_group_changed=1
-fi
-if ! grep -q "^${runner_user}:" /etc/subuid; then
-  usermod --add-subuids 231072-296607 "${runner_user}"
-fi
-if ! grep -q "^${runner_user}:" /etc/subgid; then
-  usermod --add-subgids 231072-296607 "${runner_user}"
-fi
-runner_uid=$(id -u "${runner_user}")
-loginctl enable-linger "${runner_user}"
-if [ "${runner_group_changed}" = 1 ]; then
-  systemctl stop "user@${runner_uid}.service" >/dev/null 2>&1 || true
-fi
-systemctl start "user@${runner_uid}.service"
-
-runner_env=(
-  "HOME=${runner_home}"
-  "XDG_RUNTIME_DIR=/run/user/${runner_uid}"
-  "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${runner_uid}/bus"
-)
-if [ ! -S "/run/user/${runner_uid}/docker.sock" ]; then
-  runuser -u "${runner_user}" -- env "${runner_env[@]}" dockerd-rootless-setuptool.sh install --force
-fi
-install -d -o "${runner_user}" -g "${runner_user}" -m 0700 "${runner_home}/.config/docker"
-install -o "${runner_user}" -g "${runner_user}" -m 0600 \
-  "${repo_dir}/deploy/docker-rootless-daemon.json" \
-  "${runner_home}/.config/docker/daemon.json"
-runuser -u "${runner_user}" -- env "${runner_env[@]}" systemctl --user restart docker
-
-install -d -o root -g summing -m 0750 /etc/summing-runner
-install -d -o root -g summing -m 0750 /etc/summing-runner/projects
-install -d -o root -g summing -m 0750 /etc/summing-runner/schedules
-if [ ! -f /etc/summing-runner/environment.key ]; then
-  temporary_environment_key=$(mktemp /run/summing-runner-environment.XXXXXX)
-  openssl rand -hex 32 > "${temporary_environment_key}"
-  install -o "${runner_user}" -g "${runner_user}" -m 0400 \
-    "${temporary_environment_key}" /etc/summing-runner/environment.key
-  rm -f "${temporary_environment_key}"
-fi
-install -d -o "${runner_user}" -g "${runner_user}" -m 0700 "${runner_home}/jobs"
-install -d -o "${runner_user}" -g "${runner_user}" -m 0700 /var/lib/summing-runs/ash-seo/data
-runner_project_config=/etc/summing-runner/projects/ash-seo.json
+runner_project_config=${runner_config_root}/projects/ash-seo.json
 legacy_env_path=
 if [ -f "${runner_project_config}" ]; then
   legacy_env_path=$(jq -r '.envPath // empty' "${runner_project_config}")
@@ -116,29 +49,24 @@ if [ -n "${legacy_env_path}" ]; then
   compatible_runner_config=$(mktemp /run/ash-seo-runner.XXXXXX)
   jq --arg envPath "${legacy_env_path}" '. + {envPath: $envPath}' \
     "${repo_dir}/deploy/ash-seo.runner.json" > "${compatible_runner_config}"
-  install -o root -g summing -m 0640 \
+  install -o root -g "${runner_user}" -m 0640 \
     "${compatible_runner_config}" "${runner_project_config}"
   rm -f "${compatible_runner_config}"
 else
-  install -o root -g summing -m 0640 \
+  install -o root -g "${runner_user}" -m 0640 \
     "${repo_dir}/deploy/ash-seo.runner.json" "${runner_project_config}"
 fi
-if [ ! -f /etc/summing-runner/projects/ash-seo.env ]; then
+if [ ! -f "${runner_config_root}/projects/ash-seo.env" ]; then
   install -o root -g "${runner_user}" -m 0640 \
     "${repo_dir}/deploy/ash-seo.env.example" \
-    /etc/summing-runner/projects/ash-seo.env
+    "${runner_config_root}/projects/ash-seo.env"
 fi
 
 sed "s/replace_me/${ash_seo_revision}/" "${repo_dir}/deploy/ash-seo.schedule.json" \
-  > /etc/summing-runner/schedules/ash-seo.json
-chown root:summing /etc/summing-runner/schedules/ash-seo.json
-chmod 0640 /etc/summing-runner/schedules/ash-seo.json
+  > "${runner_config_root}/schedules/ash-seo.json"
+chown root:"${runner_user}" "${runner_config_root}/schedules/ash-seo.json"
+chmod 0640 "${runner_config_root}/schedules/ash-seo.json"
 
-sed "s/RUNNER_UID/${runner_uid}/g" \
-  "${repo_dir}/deploy/summing-runner.service" \
-  > /etc/systemd/system/summing-runner.service
-chown root:root /etc/systemd/system/summing-runner.service
-chmod 0644 /etc/systemd/system/summing-runner.service
 install -o root -g root -m 0644 "${repo_dir}/deploy/summing-ash-seo.service" /etc/systemd/system/summing-ash-seo.service
 install -o root -g root -m 0644 "${repo_dir}/deploy/summing-ash-seo.timer" /etc/systemd/system/summing-ash-seo.timer
 
@@ -188,7 +116,8 @@ if ! grep -q '^SUMMING_VIEWER_LOCAL_TOKEN=.' "${env_file}"; then
   fi
 fi
 if ! grep -q '^SUMMING_RUNNER_SOCKET=' "${env_file}"; then
-  printf '%s\n' 'SUMMING_RUNNER_SOCKET=/run/summing-runner/runner.sock' >> "${env_file}"
+  printf '%s\n' \
+    'SUMMING_RUNNER_SOCKET=/run/summing-project-runner/runner.sock' >> "${env_file}"
 fi
 chown root:summing "${env_file}"
 chmod 0640 "${env_file}"
@@ -196,8 +125,8 @@ chmod 0640 "${env_file}"
 ufw allow 80/tcp
 ufw allow 443/tcp
 systemctl daemon-reload
-systemctl enable summing-runner.service
-systemctl restart summing-runner.service
+systemctl enable summing-project-runner.service
+systemctl restart summing-project-runner.service
 systemctl enable caddy.service
 systemctl restart caddy.service
 if [ "${enable_timer}" = 1 ]; then
@@ -208,7 +137,7 @@ fi
 
 runner_healthy=0
 for attempt in $(seq 1 30); do
-  if curl --fail --silent --unix-socket /run/summing-runner/runner.sock \
+  if curl --fail --silent --unix-socket /run/summing-project-runner/runner.sock \
     http://localhost/health >/dev/null 2>&1; then
     runner_healthy=1
     break

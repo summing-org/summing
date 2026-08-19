@@ -8,15 +8,15 @@ fi
 
 project_id=${SUMMING_ENV_MIGRATION_PROJECT:-ash-seo}
 workspace_id=${SUMMING_ENV_MIGRATION_WORKSPACE:-repo}
-runner_user=${SUMMING_ENV_MIGRATION_RUNNER_USER:-summing-runner}
-runner_data=${SUMMING_RUNNER_DATA:-/var/lib/summing-runner/jobs}
-config_path=${SUMMING_ENV_MIGRATION_PROJECT_CONFIG:-/etc/summing-runner/projects/${project_id}.json}
-schedule_path=${SUMMING_ENV_MIGRATION_SCHEDULE:-/etc/summing-runner/schedules/${project_id}.json}
+runner_user=${SUMMING_ENV_MIGRATION_RUNNER_USER:-summing-project-runner}
+runner_data=${SUMMING_RUNNER_DATA:-/var/lib/summing-project-runner/jobs}
+config_path=${SUMMING_ENV_MIGRATION_PROJECT_CONFIG:-/etc/summing-project-runner/projects/${project_id}.json}
+schedule_path=${SUMMING_ENV_MIGRATION_SCHEDULE:-/etc/summing-project-runner/schedules/${project_id}.json}
 state_root=${SUMMING_ENV_MIGRATION_STATE:-${runner_data}/migrations/connections-to-environment/${project_id}--${workspace_id}}
 verified_marker=${state_root}/verified.json
 finalized_marker=${state_root}/finalized.json
 imported_marker=${state_root}/imported.json
-runner_unit=/etc/systemd/system/summing-runner.service
+runner_unit=/etc/systemd/system/summing-project-runner.service
 caddy_file=/etc/caddy/Caddyfile
 release_root=${SUMMING_ENV_MIGRATION_RELEASE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 environment_envelope=${runner_data}/environments/${project_id}--${workspace_id}.json
@@ -209,8 +209,8 @@ if ! private_regular_file "${environment_envelope}" || \
   exit 1
 fi
 
-installed_environment_key=/etc/summing-runner/environment.key
-bootstrap_environment_key=/var/lib/summing-runner/environment.key
+installed_environment_key=/etc/summing-project-runner/environment.key
+bootstrap_environment_key=/var/lib/summing-project-runner/environment.key
 if [ -e "${installed_environment_key}" ] || [ -L "${installed_environment_key}" ]; then
   if ! valid_environment_key "${installed_environment_key}"; then
     printf '%s\n' 'Installed runner environment key is invalid.' >&2
@@ -221,7 +221,7 @@ else
     printf '%s\n' 'Private bootstrap environment key is missing or invalid.' >&2
     exit 2
   fi
-  install -d -o root -g summing -m 0750 /etc/summing-runner
+  install -d -o root -g "${runner_user}" -m 0750 /etc/summing-project-runner
   install -o "${runner_user}" -g "${runner_user}" -m 0400 \
     "${bootstrap_environment_key}" "${installed_environment_key}"
 fi
@@ -237,7 +237,7 @@ fi
 
 install -d -o "${runner_user}" -g "${runner_user}" -m 0700 "${state_root}"
 config_before=$(mktemp /run/summing-project-config.XXXXXX)
-unit_before=$(mktemp /run/summing-runner-unit.XXXXXX)
+unit_before=$(mktemp /run/summing-project-runner-unit.XXXXXX)
 caddy_before=
 config_changed=0
 unit_changed=0
@@ -269,10 +269,10 @@ rollback() {
       install -o root -g root -m 0644 "${unit_before}" "${runner_unit}"
     fi
     if [ "${config_changed}" = 1 ]; then
-      install -o root -g summing -m 0640 "${config_before}" "${config_path}"
+      install -o root -g "${runner_user}" -m 0640 "${config_before}" "${config_path}"
     fi
     systemctl daemon-reload >/dev/null 2>&1
-    systemctl restart summing-runner.service >/dev/null 2>&1
+    systemctl restart summing-project-runner.service >/dev/null 2>&1
   fi
   rm -f "${config_before}" "${unit_before}"
   if [ -n "${caddy_before}" ]; then rm -f "${caddy_before}"; fi
@@ -287,7 +287,7 @@ jq \
   '.environmentBootstrap = ((.environmentBootstrap // {}) + {($workspace): $bootstrap}) |
    del(.envPath)' \
   "${config_path}" > "${config_next}"
-chown root:summing "${config_next}"
+chown root:"${runner_user}" "${config_next}"
 chmod 0640 "${config_next}"
 mv -f "${config_next}" "${config_path}"
 config_changed=1
@@ -297,21 +297,21 @@ if [ ! -f "${state_root}/project-config.before.json" ]; then
 fi
 
 runner_uid=$(id -u "${runner_user}")
-unit_next=$(mktemp /run/summing-runner-next.XXXXXX)
-sed "s/RUNNER_UID/${runner_uid}/g" \
-  "${release_root}/deploy/summing-runner.service" > "${unit_next}"
+unit_next=$(mktemp /run/summing-project-runner-next.XXXXXX)
+sed "s/PROJECT_RUNNER_UID/${runner_uid}/g" \
+  "${release_root}/deploy/summing-project-runner.service" > "${unit_next}"
 install -o root -g root -m 0644 "${unit_next}" "${runner_unit}"
 rm -f "${unit_next}"
 unit_changed=1
-if [ ! -f "${state_root}/summing-runner.service.before" ]; then
+if [ ! -f "${state_root}/summing-project-runner.service.before" ]; then
   install -o "${runner_user}" -g "${runner_user}" -m 0400 \
-    "${unit_before}" "${state_root}/summing-runner.service.before"
+    "${unit_before}" "${state_root}/summing-project-runner.service.before"
 fi
 systemctl daemon-reload
-systemctl restart summing-runner.service
+systemctl restart summing-project-runner.service
 runner_healthy=0
 for _ in $(seq 1 60); do
-  if curl --fail --silent --unix-socket /run/summing-runner/runner.sock \
+  if curl --fail --silent --unix-socket /run/summing-project-runner/runner.sock \
     http://localhost/health >/dev/null 2>&1; then
     runner_healthy=1
     break
