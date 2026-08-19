@@ -1691,6 +1691,23 @@ export class SummingRuntime {
     ) {
       return;
     }
+    const commandPart = text.split(/\s+/, 1)[0] ?? "";
+    const command = (commandPart.split("@", 1)[0] ?? "").toLowerCase();
+    if (command === "/topic_id") {
+      await this.reply(
+        chatId,
+        topicId,
+        messageId,
+        chatType === "supergroup" && topicId > 0
+          ? [
+              "Текущий Telegram-топик:",
+              `chat_id: ${chatId}`,
+              `topic_id: ${topicId}`,
+            ].join("\n")
+          : "Команда /topic_id работает только внутри топика Telegram-форума.",
+      );
+      return;
+    }
     if (!text && !attachmentCandidate) return;
 
     if (chatType === "supergroup" && !conversation && !text.startsWith("/")) {

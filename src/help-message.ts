@@ -30,6 +30,7 @@ export function helpMessage(isAdministrator: boolean): string {
     command("/projects", "показать доступные проекты и Workspace"),
     command("/bind <project> [workspace]", "привязать текущий topic"),
     example("/bind shop backend"),
+    command("/topic_id", "показать chat_id и topic_id текущего Telegram-топика"),
     command("/status", "показать версию SUMMING, состояние Codex, привязку и очередь"),
     command("/files", "открыть дерево файлов, diff и project runner"),
     command("/env", "открыть энвы репозитория"),

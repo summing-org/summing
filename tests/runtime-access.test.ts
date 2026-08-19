@@ -178,6 +178,26 @@ test("owners control projects while group participants get read-only Q&A", async
       lastSeenAt: 1_700_000_100,
     });
 
+    await send(999, "/topic_id@summing_bot", -300, "supergroup", 44);
+    assert.equal(
+      replies.at(-1),
+      "Текущий Telegram-топик:\nchat_id: -300\ntopic_id: 44",
+    );
+    assert.equal(replyChats.at(-1), -300);
+    assert.equal(replyOptions.at(-1)?.topicId, 44);
+
+    await send(999, "/topic_id", 999, "private");
+    assert.equal(
+      replies.at(-1),
+      "Команда /topic_id работает только внутри топика Telegram-форума.",
+    );
+
+    await send(999, "/topic_id", -300, "supergroup");
+    assert.equal(
+      replies.at(-1),
+      "Команда /topic_id работает только внутри топика Telegram-форума.",
+    );
+
     await send(1, "/topics", 1, "private");
     assert.match(replies.at(-1) ?? "", /topic_id: 44 «Backend» → не привязан/);
     await send(42, "/topics", 42, "private");
