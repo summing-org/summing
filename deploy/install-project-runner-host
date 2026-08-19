@@ -8,7 +8,8 @@ if [ "${EUID}" -ne 0 ]; then
   exit 2
 fi
 
-release_root=${SUMMING_PROJECT_RUNNER_RELEASE:-$(readlink -f /opt/summing-current)}
+release_input=${SUMMING_PROJECT_RUNNER_RELEASE:-/opt/summing-current}
+release_root=$(readlink -f -- "${release_input}" 2>/dev/null || true)
 runner_user=summing-project-runner
 runner_home=/var/lib/summing-project-runner
 runner_config_root=/etc/summing-project-runner
@@ -48,7 +49,8 @@ if [ -z "${release_root}" ] || [ ! -d "${release_root}/deploy" ] || \
 fi
 for asset in \
   "${release_root}/deploy/summing-project-runner.service" \
-  "${release_root}/deploy/docker-rootless-daemon.json"; do
+  "${release_root}/deploy/docker-rootless-daemon.json" \
+  "${release_root}/dist/src/project-runner-main.js"; do
   if [ ! -f "${asset}" ] || [ -L "${asset}" ]; then
     printf 'SUMMING project runner asset is missing or unsafe: %s\n' "${asset}" >&2
     exit 2
@@ -60,6 +62,7 @@ if ! getent group summing >/dev/null; then
 fi
 
 required_packages=(
+  acl
   ca-certificates
   curl
   dbus-user-session
@@ -126,6 +129,12 @@ else
 fi
 if ! id -nG summing | tr ' ' '\n' | grep -qx "${runner_user}"; then
   usermod --append --groups "${runner_user}" summing
+fi
+setfacl -P -R -m "g:${runner_user}:rX" "${release_root}"
+if ! runuser -u "${runner_user}" -- \
+  test -r "${release_root}/dist/src/project-runner-main.js"; then
+  printf '%s\n' 'Project runner cannot read its immutable release entry point.' >&2
+  exit 2
 fi
 subuid_entry=$(grep "^${runner_user}:" /etc/subuid || true)
 subgid_entry=$(grep "^${runner_user}:" /etc/subgid || true)

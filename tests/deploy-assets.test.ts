@@ -197,6 +197,15 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
     runnerInstaller,
     /usermod --append --groups summing "\$\{runner_user\}"/,
   );
+  assert.match(runnerInstaller, /\n  acl\n/);
+  assert.match(
+    runnerInstaller,
+    /setfacl -P -R -m "g:\$\{runner_user\}:rX" "\$\{release_root\}"/,
+  );
+  assert.match(
+    runnerInstaller,
+    /runuser -u "\$\{runner_user\}" -- \\\n  test -r "\$\{release_root\}\/dist\/src\/project-runner-main\.js"/,
+  );
   assert.match(runnerInstaller, /systemctl enable summing-project-runner\.service/);
   assert.match(runnerInstaller, /\/run\/summing-project-runner\/runner\.sock/);
   assert.match(runnerInstaller, /range_in_use\(\)/);
