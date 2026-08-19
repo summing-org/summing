@@ -25,6 +25,7 @@ import {
 } from "./knowledge-transfer.js";
 import {
   MtprotoConnectorManager,
+  mtprotoRetryDelaySeconds,
   type MtprotoAuthorizationStatus,
 } from "./mtproto-connector.js";
 import {
@@ -672,7 +673,7 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
     if (this.backfills.has(sourceId) || this.stopped) return;
     const task = this.backfill(sourceId)
       .catch((error) => {
-        const delay = Date.now() / 1_000 + 60;
+        const delay = Date.now() / 1_000 + mtprotoRetryDelaySeconds(error);
         this.store.setCollectorState(sourceId, "failed", {
           error: errorText(error),
           nextRetryAt: delay,
@@ -691,7 +692,7 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
     while (!this.stopped) {
       const current = this.store.syncStatus(sourceId);
       if (!current || current.collector.state === "paused") return;
-      const result = await this.mtproto.invoke(binding.connectorId, {
+      const result = await this.mtproto.invokeHistory(binding.connectorId, {
         _: "getChatHistory",
         chat_id: binding.telegramChatId,
         from_message_id: fromMessageId,

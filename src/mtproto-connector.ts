@@ -31,6 +31,78 @@ export interface MtprotoUpdateHandler {
   (connectorId: string, update: Record<string, unknown>): void | Promise<void>;
 }
 
+const HISTORY_REQUEST_INTERVAL_MS = 500;
+
+function positiveInteger(value: unknown): number | null {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+export function mtprotoFloodWaitSeconds(error: unknown): number | null {
+  const details = record(error);
+  const parameters = record(details.parameters);
+  for (const value of [
+    details.retry_after,
+    details.retryAfter,
+    parameters.retry_after,
+    parameters.retryAfter,
+  ]) {
+    const seconds = positiveInteger(value);
+    if (seconds !== null) return seconds;
+  }
+  const text = [details.message, details.error_message, String(error)]
+    .filter((value) => typeof value === "string")
+    .join(" ");
+  const flood = text.match(/FLOOD_(?:PREMIUM_)?WAIT[_\s:-]*(\d+)/i);
+  if (flood) return positiveInteger(flood[1]);
+  if (positiveInteger(details.code) === 429 || /\b429\b/.test(text)) {
+    const retry = text.match(/(?:retry|wait)(?:\s+after|\s*[:=_-])?\s*(\d+)\s*(?:s|sec(?:ond)?s?)?\b/i);
+    if (retry) return positiveInteger(retry[1]);
+  }
+  return null;
+}
+
+export function mtprotoRetryDelaySeconds(error: unknown): number {
+  const floodWait = mtprotoFloodWaitSeconds(error);
+  return floodWait === null ? 60 : floodWait + 3;
+}
+
+export class MtprotoHistoryScheduler {
+  private readonly tails = new Map<string, Promise<void>>();
+  private readonly lastStartedAt = new Map<string, number>();
+
+  constructor(
+    readonly intervalMs = HISTORY_REQUEST_INTERVAL_MS,
+    private readonly now: () => number = Date.now,
+    private readonly sleep: (milliseconds: number) => Promise<void> =
+      (milliseconds) => new Promise((resolveSleep) => setTimeout(resolveSleep, milliseconds)),
+  ) {}
+
+  async run<T>(connectorId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.tails.get(connectorId) ?? Promise.resolve();
+    const task = previous.catch(() => {}).then(async () => {
+      const waitMs = Math.max(
+        0,
+        (this.lastStartedAt.get(connectorId) ?? -this.intervalMs) + this.intervalMs - this.now(),
+      );
+      if (waitMs > 0) await this.sleep(waitMs);
+      this.lastStartedAt.set(connectorId, this.now());
+      return operation();
+    });
+    const tail = task.then(() => {}, () => {});
+    this.tails.set(connectorId, tail);
+    try {
+      return await task;
+    } finally {
+      if (this.tails.get(connectorId) === tail) this.tails.delete(connectorId);
+    }
+  }
+
+  forget(connectorId: string): void {
+    this.lastStartedAt.delete(connectorId);
+  }
+}
+
 interface AuthorizationChallenge {
   connectorId: string;
   phone: string;
@@ -97,6 +169,7 @@ export class MtprotoConnectorManager {
   private readonly challenges = new Map<string, AuthorizationChallenge>();
   private readonly challengeTimers = new Map<string, NodeJS.Timeout>();
   private readonly vault: MtprotoSecretVault;
+  private readonly historyScheduler = new MtprotoHistoryScheduler();
   private updateHandler: MtprotoUpdateHandler = () => {};
 
   constructor(
@@ -307,6 +380,13 @@ export class MtprotoConnectorManager {
     return record(await invoke(request));
   }
 
+  async invokeHistory(
+    connectorId: string,
+    request: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return this.historyScheduler.run(connectorId, () => this.invoke(connectorId, request));
+  }
+
   async downloadFile(connectorId: string, fileId: number): Promise<string> {
     const file = await this.invoke(connectorId, {
       _: "downloadFile",
@@ -346,6 +426,7 @@ export class MtprotoConnectorManager {
     rmSync(sessionRoot, { recursive: true, force: true });
     rmSync(filesRoot, { recursive: true, force: true });
     this.store.deleteRevokedConnector(connectorId);
+    this.historyScheduler.forget(connectorId);
     this.challenges.delete(connectorId);
     this.clearChallengeTimer(connectorId);
   }
