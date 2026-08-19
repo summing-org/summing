@@ -629,8 +629,15 @@ test("owners control projects while group participants get read-only Q&A", async
     );
     assert.equal(resumedLegacy, false);
     assert.ok(Array.isArray(writeOptions.dynamicTools));
+    assert.deepEqual(
+      (writeOptions.dynamicTools as Array<{ name: string }>).map((tool) => tool.name),
+      ["runner", "repository"],
+    );
     assert.equal(typeof writeOptions.dynamicToolHandler, "function");
-    assert.equal(runtime.state.get(bound.id).codexThreadCapability, "runner-control-v1");
+    assert.equal(
+      runtime.state.get(bound.id).codexThreadCapability,
+      "runner-repository-control-v2",
+    );
     assert.equal(runtime.state.get(bound.id).previousCodexThreadId, "thr-legacy");
 
     await send(42, "/new", -100, "supergroup", 5);

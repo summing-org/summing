@@ -407,6 +407,119 @@ test("repository controls are present in the Mini App", () => {
   assert.match(VIEWER_JS, /expectedMasterHead:repository\.masterHead/);
 });
 
+test("active owner turns use the managed host repository control plane", async () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-agent-repository-"));
+  const workspace = join(root, "workspace");
+  const remote = join(workspace, ".git", "origin.git");
+  const updater = join(root, "updater");
+  initializeRepository(workspace);
+  git(workspace, "branch", "-m", "master");
+  execFileSync("git", ["init", "--bare", "--initial-branch=master", remote]);
+  git(workspace, "remote", "add", "origin", remote);
+  git(workspace, "push", "origin", "master");
+
+  const dataDir = join(root, "data");
+  const state = new StateStore(join(dataDir, "state.sqlite3"));
+  const config = new RuntimeConfig(
+    dataDir,
+    join(root, "codex"),
+    join(root, "worktrees"),
+    "bot-token",
+    1,
+    "codex",
+    8_765,
+    2,
+    1,
+    "",
+    "medium",
+    true,
+    new Map(),
+  );
+  state.createManagedProject({
+    id: "client",
+    name: "Client",
+    primaryOwnerId: 42,
+    ownerIds: [42],
+    defaultWorkspaceId: "repo",
+    workspaces: [{ id: "repo", path: workspace }],
+    createdAt: Date.now() / 1_000,
+  });
+  const projects = new ProjectCatalog(config, state);
+  const conversation = state.bind(42, 1, "client", "repo");
+  const viewer = new ProjectViewerServer(config, state, projects);
+  const turnId = "turn-agent-repository";
+  const context = {
+    projectId: "client",
+    workspaceId: "repo",
+    repositoryPath: workspace,
+    conversationId: conversation.id,
+    actorUserId: 42,
+    turnId,
+  };
+  try {
+    await viewer.repositoryCredentials.ensure("client", "repo");
+    state.setActive(conversation.id, turnId, null);
+
+    const initial = await viewer.repositoryTool(context, "inspect") as {
+      repository: { head: string; state: string };
+      managedCredential: boolean;
+      access: unknown;
+    };
+    assert.equal(initial.repository.state, "synchronized");
+    assert.equal(initial.managedCredential, true);
+    assert.equal(initial.access, null);
+
+    const verified = await viewer.repositoryTool(context, "verify_access") as {
+      access: { read: boolean; write: boolean };
+    };
+    assert.equal(verified.access.read, true);
+    assert.equal(verified.access.write, true);
+    assert.doesNotMatch(
+      JSON.stringify(verified),
+      /identityFile|knownHostsFile|repository-credentials|BEGIN OPENSSH PRIVATE KEY/,
+    );
+
+    execFileSync("git", ["clone", "--branch", "master", remote, updater]);
+    git(updater, "config", "user.name", "Remote");
+    git(updater, "config", "user.email", "remote@example.test");
+    writeFileSync(join(updater, "REMOTE.md"), "remote\n");
+    git(updater, "add", "REMOTE.md");
+    git(updater, "commit", "-m", "remote change");
+    git(updater, "push", "origin", "master");
+
+    const behind = await viewer.repositoryTool(context, "inspect") as {
+      repository: { head: string; behind: number; canPull: boolean };
+    };
+    assert.equal(behind.repository.behind, 1);
+    assert.equal(behind.repository.canPull, true);
+    await viewer.repositoryTool(context, "pull", behind.repository.head);
+    assert.equal(git(workspace, "show", "HEAD:REMOTE.md"), "remote");
+
+    writeFileSync(join(workspace, "LOCAL.md"), "local\n");
+    git(workspace, "add", "LOCAL.md");
+    git(workspace, "commit", "-m", "local change");
+    const ahead = await viewer.repositoryTool(context, "inspect") as {
+      repository: { head: string; ahead: number; canPush: boolean };
+    };
+    assert.equal(ahead.repository.ahead, 1);
+    assert.equal(ahead.repository.canPush, true);
+    await viewer.repositoryTool(context, "push", ahead.repository.head);
+    assert.equal(git(remote, "rev-parse", "refs/heads/master"), git(workspace, "rev-parse", "HEAD"));
+
+    await assert.rejects(
+      viewer.repositoryTool({ ...context, actorUserId: 99 }, "inspect"),
+      /active authorized owner turn/,
+    );
+    await assert.rejects(
+      viewer.repositoryTool({ ...context, turnId: "another-turn" }, "inspect"),
+      /active authorized owner turn/,
+    );
+  } finally {
+    state.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("repository onboarding configures a missing origin and returns only its public deploy key", async () => {
   const root = mkdtempSync(join(tmpdir(), "summing-viewer-repository-onboarding-"));
   const workspace = join(root, "workspace");

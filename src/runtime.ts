@@ -39,6 +39,10 @@ import { NodeRecoveryService } from "./node-recovery-service.js";
 import { ProjectCatalog, ProjectCatalogError } from "./project-catalog.js";
 import { GitInspector } from "./git-inspector.js";
 import { ProjectViewerServer } from "./project-viewer.js";
+import {
+  executeRepositoryTool,
+  REPOSITORY_DYNAMIC_TOOLS,
+} from "./repository-tools.js";
 import { RunnerControlPlane } from "./runner-control.js";
 import { executeRunnerTool, RUNNER_DYNAMIC_TOOLS } from "./runner-tools.js";
 import { detectSecretFile, detectSecretText, type SecretDetection } from "./secret-ingress.js";
@@ -137,7 +141,11 @@ const UNBOUND_TURN_TIMEOUT_MILLISECONDS = 120_000;
 const TEAM_UNDERSTANDING_TURN_TIMEOUT_MILLISECONDS = 120_000;
 const MAX_TELEGRAM_REPLY_CONTEXT_LENGTH = 4_000;
 const MAX_TELEGRAM_REPLY_CHAIN_DEPTH = 8;
-const RUNNER_TOOL_CAPABILITY = "runner-control-v1";
+const HOST_TOOL_CAPABILITY = "runner-repository-control-v2";
+const WRITE_DYNAMIC_TOOLS = [
+  ...RUNNER_DYNAMIC_TOOLS,
+  ...REPOSITORY_DYNAMIC_TOOLS,
+];
 
 interface TelegramReplyContextItem {
   depth: number;
@@ -3695,7 +3703,10 @@ export class SummingRuntime {
           ? `${READ_ONLY_PARTICIPANT_INSTRUCTIONS}\n\nParticipant question:\n${runPrompt}`
           : `Before acting, read \`.summing-runtime/CONTEXT.md\`. ` +
             "For runner status, jobs, schedules, and artifacts, the runner namespace is the " +
-            "authoritative control plane; do not infer live state from files or processes.\n\n" +
+            "authoritative control plane; do not infer live state from files or processes. " +
+            "For origin status, access verification, Pull, and Push, the repository namespace is " +
+            "the authoritative control plane; never run network Git commands directly or infer " +
+            "remote state from cached refs.\n\n" +
             runPrompt,
         prepared.path,
         {
@@ -3875,17 +3886,17 @@ export class SummingRuntime {
     if (
       access === "write" &&
       conversation.codexThreadId &&
-      conversation.codexThreadCapability !== RUNNER_TOOL_CAPABILITY
+      conversation.codexThreadCapability !== HOST_TOOL_CAPABILITY
     ) {
       const archivedThreadId = this.state.archiveWriteThreadForCapability(
         conversation.id,
-        RUNNER_TOOL_CAPABILITY,
+        HOST_TOOL_CAPABILITY,
       );
       if (archivedThreadId) {
         this.loadedThreads.delete(archivedThreadId);
         this.codex.detachThreadHandler(archivedThreadId);
         console.info(
-          `archived legacy Codex thread ${archivedThreadId} before enabling runner tools`,
+          `archived legacy Codex thread ${archivedThreadId} before enabling host tools`,
         );
         conversation = this.state.get(conversation.id);
       }
@@ -3898,8 +3909,8 @@ export class SummingRuntime {
       readOnly: access === "read-only",
       ...(access === "write"
         ? {
-            dynamicTools: RUNNER_DYNAMIC_TOOLS,
-            dynamicToolHandler: (call: DynamicToolCall) => this.handleRunnerTool(call),
+            dynamicTools: WRITE_DYNAMIC_TOOLS,
+            dynamicToolHandler: (call: DynamicToolCall) => this.handleDynamicTool(call),
           }
         : {}),
     };
@@ -3917,7 +3928,7 @@ export class SummingRuntime {
             conversation.id,
             threadId,
             access,
-            access === "write" ? RUNNER_TOOL_CAPABILITY : "",
+            access === "write" ? HOST_TOOL_CAPABILITY : "",
           );
           this.loadedThreads.add(threadId);
           return threadId;
@@ -3931,13 +3942,13 @@ export class SummingRuntime {
       conversation.id,
       threadId,
       access,
-      access === "write" ? RUNNER_TOOL_CAPABILITY : "",
+      access === "write" ? HOST_TOOL_CAPABILITY : "",
     );
     this.loadedThreads.add(threadId);
     return threadId;
   }
 
-  private async handleRunnerTool(call: DynamicToolCall): Promise<DynamicToolCallResult> {
+  private async handleDynamicTool(call: DynamicToolCall): Promise<DynamicToolCallResult> {
     const active = this.activeByThread.get(call.threadId);
     if (
       !active ||
@@ -3946,16 +3957,23 @@ export class SummingRuntime {
       active.turnId !== call.turnId ||
       !this.projects.canAccess(active.actorUserId, active.conversation.projectId)
     ) {
-      throw new Error("runner tool is unavailable outside the active authorized owner turn");
+      throw new Error("host tool is unavailable outside the active authorized owner turn");
     }
-    return executeRunnerTool(this.runnerControl, {
+    const context = {
       projectId: active.conversation.projectId,
       workspaceId: active.conversation.workspaceId,
       repositoryPath: active.prepared.readableRoot,
       conversationId: active.conversation.id,
       actorUserId: active.actorUserId,
       turnId: call.turnId,
-    }, call);
+    };
+    if (call.namespace === "runner") {
+      return executeRunnerTool(this.runnerControl, context, call);
+    }
+    if (call.namespace === "repository") {
+      return executeRepositoryTool(this.viewer, context, call);
+    }
+    throw new Error(`unknown host tool namespace: ${call.namespace ?? "none"}`);
   }
 
   private async deliverSteer(active: ActiveRun, items: PendingInput[]): Promise<void> {

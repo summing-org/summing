@@ -29,6 +29,10 @@ import {
   type RepositoryVerificationRecord,
   RepositoryCredentialStore,
 } from "./repository-credentials.js";
+import type {
+  RepositoryToolContext,
+  RepositoryToolOperation,
+} from "./repository-tools.js";
 import type { Conversation, StateStore } from "./state-store.js";
 import { ViewerAuthenticator, ViewerAuthError } from "./viewer-auth.js";
 import { VIEWER_CSS, VIEWER_HTML, VIEWER_JS, VIEWER_LOGO_SVG } from "./viewer-assets.js";
@@ -181,6 +185,64 @@ export class ProjectViewerServer {
       config.deploymentRequestPath,
       config.deploymentStatePath,
     );
+  }
+
+  async repositoryTool(
+    toolContext: RepositoryToolContext,
+    operation: RepositoryToolOperation,
+    expectedHead = "",
+  ): Promise<unknown> {
+    const conversation = this.state.get(toolContext.conversationId);
+    if (
+      conversation.projectId !== toolContext.projectId ||
+      conversation.workspaceId !== toolContext.workspaceId ||
+      conversation.activeTurnId !== toolContext.turnId ||
+      !this.projects.canAccess(toolContext.actorUserId, toolContext.projectId)
+    ) {
+      throw new Error("repository tool is unavailable outside the active authorized owner turn");
+    }
+    const scope = await this.scope(toolContext.conversationId, toolContext.actorUserId);
+    const repositoryRoot = await GitInspector.worktreeRoot(toolContext.repositoryPath);
+    if (repositoryRoot !== scope.inspector.root) {
+      throw new Error("repository tool path does not match the active conversation workspace");
+    }
+    const operationKey = await scope.inspector.commonDirectory();
+    return this.withRepositoryOperation(operationKey, async () => {
+      if (operation === "inspect") {
+        const context = await this.repositoryContext(scope);
+        const repository = await context.inspector.repositoryStatus(true);
+        const experience = await this.repositoryCredentials.state(
+          scope.project.id,
+          scope.project.workspace,
+        );
+        const access = this.currentVerification(repository, context.credential, experience);
+        return {
+          operation,
+          repository,
+          managedCredential: Boolean(context.credential),
+          access: access
+            ? {
+                read: access.read,
+                write: access.write,
+                checkedAt: access.checkedAt,
+                code: access.code,
+                message: access.message,
+              }
+            : null,
+        };
+      }
+      const payload = await this.repositoryAction(
+        scope,
+        toolContext.actorUserId,
+        operation === "verify_access" ? "verify" : operation,
+        expectedHead ? { expectedHead } : {},
+      );
+      return {
+        operation,
+        repository: payload.repository,
+        ...(operation === "verify_access" ? { access: payload.preview } : {}),
+      };
+    });
   }
 
   async start(): Promise<void> {
