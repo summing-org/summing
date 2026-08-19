@@ -118,6 +118,26 @@ function asset(response: ServerResponse, contentType: string, value: string): vo
   response.end(value);
 }
 
+function artifactDownload(
+  response: ServerResponse,
+  artifact: { content: string; contentType: string; name: string },
+): void {
+  const body = Buffer.from(artifact.content, "utf8");
+  const contentType = /^(?:text\/|application\/(?:json|xml)(?:$|;))/i.test(artifact.contentType)
+    ? `${artifact.contentType}; charset=utf-8`
+    : artifact.contentType;
+  const fallbackName = artifact.name.replace(/[^A-Za-z0-9._-]/g, "_") || "artifact";
+  response.writeHead(200, {
+    ...SECURITY_HEADERS,
+    "content-type": contentType,
+    "content-disposition":
+      `attachment; filename="${fallbackName}"; filename*=UTF-8''${encodeURIComponent(artifact.name)}`,
+    "content-length": body.length,
+    "cache-control": "private, no-store",
+  });
+  response.end(body);
+}
+
 function queryValue(url: URL, name: string): string {
   return url.searchParams.get(name)?.trim() ?? "";
 }
@@ -301,6 +321,10 @@ export class ProjectViewerServer {
     }
     if (request.method === "GET" && url.pathname === "/logo.svg") {
       asset(response, "image/svg+xml; charset=utf-8", VIEWER_LOGO_SVG);
+      return;
+    }
+    if (request.method === "GET" && url.pathname.startsWith("/artifacts/")) {
+      await this.downloadArtifact(url, response);
       return;
     }
     if (!url.pathname.startsWith("/api/viewer/")) throw new ViewerHttpError(404, "not found");
@@ -852,7 +876,22 @@ export class ProjectViewerServer {
       const scope = await this.scope(conversationId, telegramUser);
       const jobId = queryValue(url, "job");
       if (!/^[0-9a-f-]{36}$/.test(jobId)) throw new ViewerHttpError(400, "invalid job id");
-      json(response, 200, { artifacts: await this.runner.artifacts(scope.project.id, jobId) });
+      const artifacts = await this.runner.artifacts(scope.project.id, jobId);
+      json(response, 200, {
+        artifacts: artifacts.map((artifact) => {
+          const grant = this.auth.createArtifactDownloadGrant({
+            conversationId: scope.conversation.id,
+            jobId,
+            name: artifact.name,
+            userId: telegramUser,
+          });
+          return {
+            ...artifact,
+            downloadExpiresAt: new Date(grant.expiresAt * 1_000).toISOString(),
+            downloadUrl: `/artifacts/${grant.token}/${encodeURIComponent(artifact.name)}`,
+          };
+        }),
+      });
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/viewer/job-artifact") {
@@ -886,6 +925,29 @@ export class ProjectViewerServer {
 
   private isAdministrator(telegramUser: number): boolean {
     return telegramUser === 0 || telegramUser === this.config.telegramOwnerId;
+  }
+
+  private async downloadArtifact(url: URL, response: ServerResponse): Promise<void> {
+    const match = /^\/artifacts\/((?:[A-Za-z0-9_-]+\.){2}[A-Za-z0-9_-]+)\/([^/]+)$/.exec(
+      url.pathname,
+    );
+    if (!match) throw new ViewerHttpError(404, "artifact download not found");
+    let requestedName: string;
+    try {
+      requestedName = decodeURIComponent(match[2] ?? "");
+    } catch {
+      throw new ViewerHttpError(404, "artifact download not found");
+    }
+    const grant = this.auth.verifyArtifactDownloadGrant(match[1] ?? "");
+    if (requestedName !== grant.name) {
+      throw new ViewerHttpError(404, "artifact download not found");
+    }
+    const scope = await this.scope(grant.conversationId, grant.userId);
+    const artifact = await this.runner.artifact(scope.project.id, grant.jobId, grant.name);
+    if (artifact.name !== grant.name) {
+      throw new ViewerHttpError(404, "artifact download not found");
+    }
+    artifactDownload(response, artifact);
   }
 
   private requireAdminAccess(telegramUser: number): void {

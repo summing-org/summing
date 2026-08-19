@@ -37,3 +37,37 @@ test("accepts the explicit SSH tunnel bearer token", () => {
   assert.equal(auth.authenticate({ authorization: "Bearer local-secret" }), 0);
   assert.throws(() => auth.authenticate({ authorization: "Bearer wrong" }), ViewerAuthError);
 });
+
+test("issues bounded tamper-evident artifact download grants", () => {
+  const now = 1_786_500_000;
+  const auth = new ViewerAuthenticator("bot-token", 300);
+  const issued = auth.createArtifactDownloadGrant({
+    conversationId: "tg-0123456789abcdefabcd",
+    jobId: "25b42bab-c0f5-4801-9a21-edaaeff2b408",
+    name: "report.html",
+    userId: 42,
+  }, now);
+
+  assert.equal(issued.expiresAt, now + 300);
+  assert.deepEqual(auth.verifyArtifactDownloadGrant(issued.token, now + 299), {
+    conversationId: "tg-0123456789abcdefabcd",
+    expiresAt: now + 300,
+    issuedAt: now,
+    jobId: "25b42bab-c0f5-4801-9a21-edaaeff2b408",
+    name: "report.html",
+    userId: 42,
+    version: 1,
+  });
+  assert.throws(
+    () => auth.verifyArtifactDownloadGrant(`${issued.token.slice(0, -1)}x`, now),
+    (error) => error instanceof ViewerAuthError && error.message.includes("invalid"),
+  );
+  assert.throws(
+    () => auth.verifyArtifactDownloadGrant(issued.token, now + 301),
+    (error) => error instanceof ViewerAuthError && error.message.includes("expired"),
+  );
+  assert.throws(
+    () => new ViewerAuthenticator("other-token", 300).verifyArtifactDownloadGrant(issued.token, now),
+    ViewerAuthError,
+  );
+});

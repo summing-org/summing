@@ -1,6 +1,22 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHmac,
+  randomBytes,
+  timingSafeEqual,
+} from "node:crypto";
 
 export class ViewerAuthError extends Error {}
+
+export interface ViewerArtifactDownloadGrant {
+  conversationId: string;
+  expiresAt: number;
+  issuedAt: number;
+  jobId: string;
+  name: string;
+  userId: number;
+  version: 1;
+}
 
 function safeEqual(left: string, right: string): boolean {
   const leftBytes = Buffer.from(left);
@@ -73,5 +89,94 @@ export class ViewerAuthenticator {
     const raw = Array.isArray(rawHeader) ? rawHeader[0] ?? "" : rawHeader ?? "";
     if (!raw) throw new ViewerAuthError("Authentication is required");
     return verifyTelegramInitData(raw, this.botToken, this.maximumAgeSeconds);
+  }
+
+  createArtifactDownloadGrant(
+    input: Pick<ViewerArtifactDownloadGrant, "conversationId" | "jobId" | "name" | "userId">,
+    nowSeconds = Math.floor(Date.now() / 1_000),
+  ): { expiresAt: number; token: string } {
+    const maximumAgeSeconds = Math.max(1, Math.min(this.maximumAgeSeconds, 900));
+    const grant: ViewerArtifactDownloadGrant = {
+      ...input,
+      expiresAt: nowSeconds + maximumAgeSeconds,
+      issuedAt: nowSeconds,
+      version: 1,
+    };
+    const nonce = randomBytes(12);
+    const cipher = createCipheriv("aes-256-gcm", this.artifactKey(), nonce);
+    cipher.setAAD(Buffer.from("summing-viewer-artifact-download-v1", "utf8"));
+    const ciphertext = Buffer.concat([
+      cipher.update(JSON.stringify(grant), "utf8"),
+      cipher.final(),
+    ]);
+    return {
+      expiresAt: grant.expiresAt,
+      token: [nonce, ciphertext, cipher.getAuthTag()]
+        .map((part) => part.toString("base64url"))
+        .join("."),
+    };
+  }
+
+  verifyArtifactDownloadGrant(
+    token: string,
+    nowSeconds = Math.floor(Date.now() / 1_000),
+  ): ViewerArtifactDownloadGrant {
+    const [nonceText = "", ciphertextText = "", tagText = "", extra] = token.split(".");
+    if (
+      extra !== undefined ||
+      !/^[A-Za-z0-9_-]{16}$/.test(nonceText) ||
+      !/^[A-Za-z0-9_-]+$/.test(ciphertextText) ||
+      !/^[A-Za-z0-9_-]{22}$/.test(tagText)
+    ) {
+      throw new ViewerAuthError("Artifact download link is invalid");
+    }
+    let value: unknown;
+    try {
+      const decipher = createDecipheriv(
+        "aes-256-gcm",
+        this.artifactKey(),
+        Buffer.from(nonceText, "base64url"),
+      );
+      decipher.setAAD(Buffer.from("summing-viewer-artifact-download-v1", "utf8"));
+      decipher.setAuthTag(Buffer.from(tagText, "base64url"));
+      const plaintext = Buffer.concat([
+        decipher.update(Buffer.from(ciphertextText, "base64url")),
+        decipher.final(),
+      ]);
+      value = JSON.parse(plaintext.toString("utf8"));
+    } catch {
+      throw new ViewerAuthError("Artifact download link is invalid");
+    }
+    const grant = value as Partial<ViewerArtifactDownloadGrant> | null;
+    const maximumAgeSeconds = Math.max(1, Math.min(this.maximumAgeSeconds, 900));
+    if (
+      !grant ||
+      grant.version !== 1 ||
+      !Number.isSafeInteger(grant.userId) ||
+      Number(grant.userId) < 0 ||
+      typeof grant.conversationId !== "string" ||
+      !/^tg-[0-9a-f]{20}$/.test(grant.conversationId) ||
+      typeof grant.jobId !== "string" ||
+      !/^[0-9a-f-]{36}$/.test(grant.jobId) ||
+      typeof grant.name !== "string" ||
+      !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(grant.name) ||
+      !Number.isSafeInteger(grant.issuedAt) ||
+      !Number.isSafeInteger(grant.expiresAt) ||
+      Number(grant.issuedAt) > nowSeconds + 30 ||
+      Number(grant.expiresAt) <= Number(grant.issuedAt) ||
+      Number(grant.expiresAt) - Number(grant.issuedAt) > maximumAgeSeconds
+    ) {
+      throw new ViewerAuthError("Artifact download link is invalid");
+    }
+    if (nowSeconds > Number(grant.expiresAt)) {
+      throw new ViewerAuthError("Artifact download link has expired");
+    }
+    return grant as ViewerArtifactDownloadGrant;
+  }
+
+  private artifactKey(): Buffer {
+    return createHmac("sha256", this.botToken)
+      .update("summing-viewer-artifact-download-v1")
+      .digest();
   }
 }

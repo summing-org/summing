@@ -39,6 +39,10 @@ test("Project Viewer bounds Telegram authorization and network waits", () => {
   assert.match(VIEWER_JS, /\/api\/viewer\/jobs\/cancel/);
   assert.match(VIEWER_JS, /cancelling:"останавливается"/);
   assert.match(VIEWER_JS, /data-download/);
+  assert.match(VIEWER_JS, /artifact\.downloadUrl/);
+  assert.match(VIEWER_JS, /target='_blank'/);
+  assert.doesNotMatch(VIEWER_JS, /function downloadArtifact/);
+  assert.equal(VIEWER_JS.match(/URL\.createObjectURL/g)?.length, 1);
   assert.match(VIEWER_JS, /renderEditorialPlan/);
   assert.match(VIEWER_JS, /\/api\/viewer\/environment/);
   assert.match(VIEWER_JS, /expectedRevision/);
