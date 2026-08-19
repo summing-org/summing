@@ -1,6 +1,6 @@
 # SUMMING 9.16: архитектура, эксплуатация и разработка
 
-> Версия: **9.16.2**
+> Версия: **9.16.3**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
 > Последняя сверка с кодом: **19 августа 2026 года**.
 
@@ -255,6 +255,10 @@ Background loop выбирает модель независимо от Project 
 output для episode, knowledge и intervention. Runtime повторно валидирует evidence ids,
 confidence, visibility, temporal validity, supersession и reply target до SQLite. Ошибка
 оставляет events pending.
+Projectless thread и turn явно передают пустой `runtimeWorkspaceRoots`; их permission
+profile не содержит `:workspace_roots`, поэтому background loop не получает даже
+read-доступ к пустому runtime CWD. Нулевой набор roots является штатным ответом App
+Server и не ослабляет обязательную проверку roots для Project threads.
 Для настоящего reply evidence batch содержит не только provider message id, но и
 `reply_target` snapshot исходного event: автора, время и текст последней доступной
 версии. Техническая ссылка Telegram forum message на корневое service-message topic
@@ -730,6 +734,13 @@ private keys, certificates и symlinks перед каждым guest run рек�
 побочными эффектами. Этот prompt управляет поведением, а именованный permission
 profile и `approvalPolicy = never` являются технической границей, которая не даёт
 записать изменения или запросить расширение прав.
+
+Ephemeral Conversation Understanding и Q&A в непривязанном topic используют тот же
+read-only профиль в projectless-режиме: `runtimeWorkspaceRoots = []`, без
+`filesystem.:workspace_roots`, project trust entries, environment и network. Им
+передаётся только текстовый prompt; пустой набор roots принимается только при явно
+выключенном workspace access, тогда как Project thread по-прежнему обязан подтвердить
+непустой root в ответе `thread/start`.
 
 `turn/start` повторяет `runtimeWorkspaceRoots` и наследует профиль thread. Поля
 legacy `sandbox`/`sandboxPolicy` вместе с именованным профилем не передаются.
@@ -1581,7 +1592,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "9.16.2",
+  "version": "9.16.3",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",

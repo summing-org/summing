@@ -818,9 +818,8 @@ test("explicit questions in unbound topics run without Project access", async ()
       disableEnvironments: true,
       ephemeral: true,
       networkAccess: false,
-      gitMetadataRoots: [],
-      readableRoots: [join(root, "data", "unbound-topic-qa")],
       readOnly: true,
+      workspaceAccess: false,
     });
     assert.match(turnPrompt, /No Project or Workspace is bound/);
     assert.match(turnPrompt, /Релиз переносим на пятницу/);

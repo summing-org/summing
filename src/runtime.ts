@@ -1222,9 +1222,8 @@ export class SummingRuntime {
         disableEnvironments: true,
         ephemeral: true,
         networkAccess: false,
-        gitMetadataRoots: [],
-        readableRoots: [cwd],
         readOnly: true,
+        workspaceAccess: false,
       });
       active = {
         threadId,
@@ -1247,9 +1246,8 @@ export class SummingRuntime {
           effort: this.config.teamUnderstandingEffort,
           networkAccess: false,
           outputSchema: TEAM_UNDERSTANDING_OUTPUT_SCHEMA as JsonRecord,
-          gitMetadataRoots: [],
-          readableRoots: [cwd],
           readOnly: true,
+          workspaceAccess: false,
         },
       );
       active.turnId = turnId;
@@ -2187,9 +2185,8 @@ export class SummingRuntime {
         disableEnvironments: true,
         ephemeral: true,
         networkAccess: false,
-        gitMetadataRoots: [],
-        readableRoots: [cwd],
         readOnly: true,
+        workspaceAccess: false,
       });
       active = {
         threadId,
@@ -2246,9 +2243,8 @@ export class SummingRuntime {
         model: this.config.model,
         effort: this.config.effort,
         networkAccess: false,
-        gitMetadataRoots: [],
-        readableRoots: [cwd],
         readOnly: true,
+        workspaceAccess: false,
       });
       active.turnId = turnId;
       this.activeUnboundByTurn.set(turnId, active);

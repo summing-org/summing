@@ -371,11 +371,39 @@ test("thread and turn requests use official v2 shapes", async (context) => {
   const readOnlyTurnParams = client.calls[4]?.[1] ?? {};
   assert.deepEqual(readOnlyTurnParams.runtimeWorkspaceRoots, ["/tmp/project"]);
 
+  await client.startThread("/tmp/no-project", "", {
+    disableEnvironments: true,
+    ephemeral: true,
+    networkAccess: false,
+    readOnly: true,
+    workspaceAccess: false,
+  });
+  const noWorkspaceThreadParams = client.calls[5]?.[1] ?? {};
+  assert.deepEqual(noWorkspaceThreadParams.runtimeWorkspaceRoots, []);
+  const noWorkspaceConfig = noWorkspaceThreadParams.config as JsonRecord;
+  const noWorkspaceProfile = (noWorkspaceConfig.permissions as JsonRecord)[
+    "summing-project-readonly"
+  ] as JsonRecord;
+  assert.equal(noWorkspaceProfile.description, "Run without workspace files, writes, or network access");
+  assert.deepEqual(noWorkspaceProfile.filesystem, {
+    ":minimal": "read",
+    [canonicalReleaseBin]: "read",
+  });
+  assert.deepEqual(noWorkspaceConfig.projects, {});
+
+  await client.startTurn(threadId, "inspect without files", "/tmp/no-project", {
+    networkAccess: false,
+    readOnly: true,
+    workspaceAccess: false,
+  });
+  const noWorkspaceTurnParams = client.calls[6]?.[1] ?? {};
+  assert.deepEqual(noWorkspaceTurnParams.runtimeWorkspaceRoots, []);
+
   await client.startThread("/tmp/empty-project", "", {
     networkAccess: false,
     readableRoots: ["/tmp/empty-project"],
   });
-  const emptyThreadParams = client.calls[5]?.[1] ?? {};
+  const emptyThreadParams = client.calls[7]?.[1] ?? {};
   const emptyConfig = emptyThreadParams.config as JsonRecord;
   const emptyProfiles = emptyConfig.permissions as JsonRecord;
   const emptyProfile = emptyProfiles["summing-project"] as JsonRecord;
@@ -415,6 +443,19 @@ test("thread and turn requests use official v2 shapes", async (context) => {
   ] as JsonRecord;
   const readOnlyFilesystem = readOnlyProfile.filesystem as JsonRecord;
   assert.equal(readOnlyFilesystem[canonicalResolverConfig], undefined);
+
+  await assert.rejects(
+    client.startThread("/tmp/invalid", "", { workspaceAccess: false }),
+    /workspace access can be disabled only for read-only threads/,
+  );
+  await assert.rejects(
+    client.startThread("/tmp/invalid", "", {
+      readOnly: true,
+      readableRoots: ["/tmp/invalid"],
+      workspaceAccess: false,
+    }),
+    /workspace-less Codex context cannot declare filesystem roots/,
+  );
 
   await client.unsubscribeThread("thread-1");
   assert.deepEqual(client.calls.at(-1), ["thread/unsubscribe", { threadId: "thread-1" }]);

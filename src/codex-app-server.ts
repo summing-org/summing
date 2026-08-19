@@ -117,12 +117,16 @@ interface WorkspacePermissionOptions {
   networkAccess?: boolean;
   readableRoots?: string[];
   readOnly?: boolean;
+  workspaceAccess?: boolean;
   dynamicTools?: DynamicToolSpec[];
   dynamicToolHandler?: DynamicToolHandler;
 }
 
 interface TurnOptions
-  extends Pick<WorkspacePermissionOptions, "gitMetadataRoots" | "readableRoots" | "readOnly"> {
+  extends Pick<
+    WorkspacePermissionOptions,
+    "gitMetadataRoots" | "readableRoots" | "readOnly" | "workspaceAccess"
+  > {
   effort?: string;
   localImagePaths?: string[];
   model?: string;
@@ -449,10 +453,11 @@ export class CodexAppServer extends EventEmitter {
     if (typeof thread.id !== "string") {
       throw new CodexProtocolError("thread/start did not return a thread id");
     }
-    if (
+    const requestedRuntimeRoots = params.runtimeWorkspaceRoots as string[];
+    if (requestedRuntimeRoots.length > 0 && (
       !Array.isArray(result.runtimeWorkspaceRoots) ||
       result.runtimeWorkspaceRoots.length === 0
-    ) {
+    )) {
       throw new CodexProtocolError(
         "thread/start did not preserve any runtime workspace roots",
       );
@@ -526,14 +531,32 @@ export class CodexAppServer extends EventEmitter {
 
   private runtimeWorkspaceRoots(
     cwd: string,
-    options: Pick<WorkspacePermissionOptions, "gitMetadataRoots" | "readableRoots" | "readOnly">,
+    options: Pick<
+      WorkspacePermissionOptions,
+      "gitMetadataRoots" | "readableRoots" | "readOnly" | "workspaceAccess"
+    >,
   ): string[] {
+    if (options.workspaceAccess === false) {
+      if (!options.readOnly) {
+        throw new CodexProtocolError("Codex workspace access can be disabled only for read-only threads");
+      }
+      if (options.readableRoots?.length || options.gitMetadataRoots?.length) {
+        throw new CodexProtocolError("workspace-less Codex context cannot declare filesystem roots");
+      }
+      return [];
+    }
     const roots = options.readableRoots?.length ? options.readableRoots : [cwd];
     const writableGitRoots = options.readOnly ? [] : (options.gitMetadataRoots ?? []);
     return [...new Set([...roots, ...writableGitRoots].map((root) => resolve(root)))];
   }
 
   private permissionConfig(cwd: string, options: WorkspacePermissionOptions): JsonRecord {
+    if (
+      options.workspaceAccess === false &&
+      (options.dynamicTools?.length || options.dynamicToolHandler)
+    ) {
+      throw new CodexProtocolError("workspace-less Codex context cannot expose dynamic tools");
+    }
     const readableRoot = resolve(options.readableRoots?.[0] ?? cwd);
     const writableSubpath = relative(readableRoot, resolve(cwd)) || ".";
     if (writableSubpath === ".." || writableSubpath.startsWith("../")) {
@@ -548,19 +571,19 @@ export class CodexAppServer extends EventEmitter {
     const runtimeTempPath = resolve(cwd, ".summing-runtime", "tmp");
     const runtimeAttachmentsPath = resolve(runtimePath, "attachments");
     const runtimeOutboxPath = resolve(runtimePath, "outbox");
-    const workspaceRoots: JsonRecord = { ".": "read" };
+    const workspaceAccess = options.workspaceAccess !== false;
     const projects: JsonRecord = {};
-    for (const root of new Set([readableRoot, resolve(cwd)])) {
-      projects[root] = { trust_level: "untrusted" };
+    if (workspaceAccess) {
+      for (const root of new Set([readableRoot, resolve(cwd)])) {
+        projects[root] = { trust_level: "untrusted" };
+      }
     }
     const permissionProfile = options.readOnly
       ? READ_ONLY_PERMISSION_PROFILE
       : PROJECT_PERMISSION_PROFILE;
     const network = !options.readOnly && (options.networkAccess ?? true);
-    const filesystem: JsonRecord = {
-      ":minimal": "read",
-      ":workspace_roots": workspaceRoots,
-    };
+    const filesystem: JsonRecord = { ":minimal": "read" };
+    if (workspaceAccess) filesystem[":workspace_roots"] = { ".": "read" };
     // Linux distributions commonly expose /etc/resolv.conf as a symlink into
     // /run. Landlock grants access to the link itself through :minimal, but it
     // also needs an explicit rule for the canonical target before libc can
@@ -588,7 +611,7 @@ export class CodexAppServer extends EventEmitter {
       filesystem[runtimeTempPath] = "write";
       filesystem[runtimeAttachmentsPath] = "read";
       filesystem[runtimeOutboxPath] = "write";
-    } else {
+    } else if (workspaceAccess) {
       filesystem[resolve(readableRoot, ".git")] = "deny";
       filesystem[runtimePath] = "deny";
       filesystem[runtimeAttachmentsPath] = "read";
@@ -632,7 +655,9 @@ export class CodexAppServer extends EventEmitter {
       permissions: {
         [permissionProfile]: {
           description: options.readOnly
-            ? "Read project files without writes or network access"
+            ? workspaceAccess
+              ? "Read project files without writes or network access"
+              : "Run without workspace files, writes, or network access"
             : "Write the active project worktree and read only its project root",
           filesystem,
           network: network

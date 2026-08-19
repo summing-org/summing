@@ -336,8 +336,12 @@ test("one background understanding loop creates an episode, memory, and optional
     assert.equal(threadOptions.every((item) => item.readOnly === true), true);
     assert.equal(threadOptions.every((item) => item.networkAccess === false), true);
     assert.equal(threadOptions.every((item) => item.ephemeral === true), true);
+    assert.equal(threadOptions.every((item) => item.workspaceAccess === false), true);
+    assert.equal(threadOptions.every((item) => !Object.hasOwn(item, "readableRoots")), true);
     assert.equal(turnOptions.every((item) => item.readOnly === true), true);
     assert.equal(turnOptions.every((item) => item.networkAccess === false), true);
+    assert.equal(turnOptions.every((item) => item.workspaceAccess === false), true);
+    assert.equal(turnOptions.every((item) => !Object.hasOwn(item, "readableRoots")), true);
     assert.equal(turnOptions.every((item) => item.model === "gpt-5.6-luna"), true);
     assert.equal(turnOptions.every((item) => item.effort === "low"), true);
     assert.equal(turnOptions.every((item) => typeof item.outputSchema === "object"), true);
