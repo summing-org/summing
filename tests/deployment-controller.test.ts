@@ -27,8 +27,18 @@ test("deployment controller atomically requests an update and reports worker sta
       finishedAt: null,
     });
 
+    const refreshed = await controller.requestRefresh();
+    assert.deepEqual(JSON.parse(readFileSync(request, "utf8")), {
+      requestedAt: refreshed.requestedAt,
+      action: "check",
+    });
+    assert.equal((await controller.status()).message, "Запрос принят; ждём проверки origin");
+
     const result = await controller.requestUpdate();
-    assert.equal(JSON.parse(readFileSync(request, "utf8")).requestedAt, result.requestedAt);
+    assert.deepEqual(JSON.parse(readFileSync(request, "utf8")), {
+      requestedAt: result.requestedAt,
+      action: "deploy",
+    });
     assert.equal((await controller.status()).status, "requested");
 
     writeFileSync(
@@ -108,5 +118,6 @@ test("deployment controller is explicitly unavailable without both paths", async
   const status = await controller.status();
   assert.equal(status.status, "disabled");
   assert.deepEqual(status.history, []);
+  await assert.rejects(controller.requestRefresh(), /not configured/);
   await assert.rejects(controller.requestUpdate(), /not configured/);
 });

@@ -49,6 +49,11 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
     "project runner installer must be executable",
   );
   assert.match(script, /git_as_summing -C "\$\{repo_dir\}" fetch --prune/);
+  assert.match(script, /manual_action=deploy/);
+  assert.match(script, /if \[ "\$\{manual_action\}" = check \]/);
+  assert.match(script, /Origin проверен: доступна новая версия/);
+  assert.match(service, /ProtectHome=read-only/);
+  assert.doesNotMatch(service, /ProtectHome=true/);
   assert.match(script, /SUMMING_DEPLOY_EXPECTED_REMOTE/);
   assert.match(script, /runuser -u summing-builder -- env -i/);
   assert.match(script, /run_builder_phase dependencies dependencies/);

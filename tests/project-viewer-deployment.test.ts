@@ -57,6 +57,7 @@ function signedInitData(token: string, userId: number): string {
 class FakeDeployment implements DeploymentControl {
   readonly available = true;
   requests = 0;
+  refreshes = 0;
 
   async status(): Promise<DeploymentStatus> {
     return {
@@ -78,6 +79,11 @@ class FakeDeployment implements DeploymentControl {
   async requestUpdate(): Promise<{ requestedAt: string }> {
     this.requests += 1;
     return { requestedAt: "2026-08-13T00:01:00Z" };
+  }
+
+  async requestRefresh(): Promise<{ requestedAt: string }> {
+    this.refreshes += 1;
+    return { requestedAt: "2026-08-13T00:00:30Z" };
   }
 }
 
@@ -174,6 +180,13 @@ test("administrator Mini App owns deployment controls without a Project scope", 
     assert.equal(requested.status, 202);
     assert.equal(deployment.requests, 1);
 
+    const refreshed = await fetch(`${endpoint}/api/viewer/admin/deployment/refresh`, {
+      method: "POST",
+      headers: auth(1),
+    });
+    assert.equal(refreshed.status, 202);
+    assert.equal(deployment.refreshes, 1);
+
     const ownerSession = await fetch(
       `${endpoint}/api/viewer/session?conversation=${ownerConversation.id}`,
       { headers: auth(42) },
@@ -197,6 +210,13 @@ test("administrator Mini App owns deployment controls without a Project scope", 
     });
     assert.equal(denied.status, 403);
     assert.equal(deployment.requests, 1);
+
+    const deniedRefresh = await fetch(`${endpoint}/api/viewer/admin/deployment/refresh`, {
+      method: "POST",
+      headers: auth(42),
+    });
+    assert.equal(deniedRefresh.status, 403);
+    assert.equal(deployment.refreshes, 1);
 
     const removedProjectEndpoint = await fetch(
       `${endpoint}/api/viewer/deployment?conversation=${adminConversation.id}`,

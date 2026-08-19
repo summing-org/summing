@@ -60,6 +60,7 @@ export interface DeploymentAttempt {
 export interface DeploymentControl {
   readonly available: boolean;
   status(): Promise<DeploymentStatus>;
+  requestRefresh(): Promise<{ requestedAt: string }>;
   requestUpdate(): Promise<{ requestedAt: string }>;
 }
 
@@ -179,6 +180,7 @@ export class DeploymentController implements DeploymentControl {
     ]);
     const state = record(rawState);
     const request = record(rawRequest);
+    const requestAction = request?.action === "check" ? "check" : "deploy";
     const rawStatus = text(state?.status, 32);
     const requestedAt = timestamp(request?.requestedAt);
     const startedAt = timestamp(state?.startedAt);
@@ -201,7 +203,9 @@ export class DeploymentController implements DeploymentControl {
       status: pendingRequest ? "requested" : STATUSES.has(rawStatus) ? rawStatus : "idle",
       phase: pendingRequest ? "request" : text(state?.phase, 64) || null,
       message: pendingRequest
-        ? "Запрос принят; ждём запуска обновления"
+        ? requestAction === "check"
+          ? "Запрос принят; ждём проверки origin"
+          : "Запрос принят; ждём запуска обновления"
         : text(state?.message) || "Проверка обновлений ещё не запускалась",
       currentSha: sha(state?.currentSha),
       remoteSha: sha(state?.remoteSha),
@@ -217,6 +221,14 @@ export class DeploymentController implements DeploymentControl {
   }
 
   async requestUpdate(): Promise<{ requestedAt: string }> {
+    return await this.request("deploy");
+  }
+
+  async requestRefresh(): Promise<{ requestedAt: string }> {
+    return await this.request("check");
+  }
+
+  private async request(action: "check" | "deploy"): Promise<{ requestedAt: string }> {
     if (!this.available) {
       throw new DeploymentControllerError("automatic deployment is not configured");
     }
@@ -224,14 +236,16 @@ export class DeploymentController implements DeploymentControl {
     const temporary = `${this.requestPath}.${process.pid}.${randomUUID()}.tmp`;
     try {
       await mkdir(dirname(this.requestPath), { recursive: true, mode: 0o700 });
-      await writeFile(temporary, `${JSON.stringify({ requestedAt })}\n`, {
+      await writeFile(temporary, `${JSON.stringify({ requestedAt, action })}\n`, {
         encoding: "utf8",
         mode: 0o600,
       });
       await rename(temporary, this.requestPath);
     } catch (error) {
       await rm(temporary, { force: true }).catch(() => undefined);
-      throw new DeploymentControllerError(`cannot request deployment: ${String(error)}`);
+      throw new DeploymentControllerError(
+        `cannot request ${action === "check" ? "origin refresh" : "deployment"}: ${String(error)}`,
+      );
     }
     return { requestedAt };
   }

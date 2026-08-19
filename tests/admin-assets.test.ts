@@ -30,6 +30,8 @@ test("administrator Mini App exposes projects, bindings and global settings", ()
   assert.match(ADMIN_HTML, /id="modelEgressToggle"/);
   assert.match(ADMIN_HTML, /id="modelEgressWeeklyPercent"/);
   assert.match(ADMIN_HTML, /Обновиться сейчас/);
+  assert.match(ADMIN_HTML, /id="refreshDeployment"/);
+  assert.match(ADMIN_HTML, />Обновить<\/button>/);
   assert.match(ADMIN_HTML, /Каждые 30 минут сервер проверяет/);
   assert.match(ADMIN_HTML, /id="deploymentPhase"/);
   assert.match(ADMIN_HTML, /id="deploymentFailedTests"/);
@@ -46,6 +48,7 @@ test("administrator Mini App exposes projects, bindings and global settings", ()
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/bindings/);
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/users/);
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/deployment/);
+  assert.match(ADMIN_JS, /\/api\/viewer\/admin\/deployment\/refresh/);
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/model-egress/);
   assert.match(ADMIN_JS, /observed_weekly_percent/);
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/sync/);
@@ -73,6 +76,7 @@ test("administrator Mini App exposes projects, bindings and global settings", ()
   assert.match(ADMIN_CSS, /@media\(max-width:520px\)/);
   assert.match(ADMIN_CSS, /--accent:#ff2e6b/);
   assert.match(ADMIN_CSS, /\.deployment-card/);
+  assert.match(ADMIN_CSS, /\.deployment-origin-refresh/);
   assert.match(ADMIN_CSS, /\.model-egress-card/);
   assert.match(ADMIN_CSS, /\.switch input:checked/);
   assert.match(ADMIN_CSS, /\.admin-tabs/);

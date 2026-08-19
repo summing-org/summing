@@ -11,4 +11,4 @@ ExecStart=/opt/summing-current/deploy/summing-deploy
 TimeoutStartSec=45min
 UMask=0027
 PrivateTmp=true
-ProtectHome=true
+ProtectHome=read-only

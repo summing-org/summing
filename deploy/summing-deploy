@@ -104,6 +104,7 @@ prior_remote_sha=
 prior_finished_at=
 manual_requested_at=
 manual_retry=0
+manual_action=deploy
 
 valid_sha() {
   printf '%s' "${1:-}" | grep -Eq '^[0-9a-f]{40}$'
@@ -590,6 +591,9 @@ fi
 if [ -n "${manual_requested_at}" ] && \
   { [ -z "${prior_finished_at}" ] || [[ "${manual_requested_at}" > "${prior_finished_at}" ]]; }; then
   manual_retry=1
+  manual_action=$(jq -r \
+    'if .action == "check" then "check" else "deploy" end' \
+    "${state_dir}/request.json" 2>/dev/null || printf '%s' deploy)
 fi
 phase=source-verification
 failure_kind=source
@@ -617,6 +621,16 @@ fi
 target_version=$(git_as_summing -C "${repo_dir}" show \
   "${target_sha}:package.json" 2>/dev/null | jq -r '.version // empty' 2>/dev/null || true)
 if ! valid_version "${target_version}"; then target_version=; fi
+if [ "${manual_action}" = check ]; then
+  phase=complete
+  if [ "${previous_sha}" = "${target_sha}" ]; then
+    origin_message="Origin проверен: установлена актуальная версия"
+  else
+    origin_message="Origin проверен: доступна новая версия"
+  fi
+  write_state idle "${origin_message}" "${previous_sha}" "${target_sha}" "$(now)"
+  exit 0
+fi
 if [ "${previous_sha}" = "${target_sha}" ]; then
   phase=runner-host
   failure_kind=runtime

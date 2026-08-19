@@ -549,6 +549,15 @@ export class ProjectViewerServer {
       });
       return;
     }
+    if (request.method === "POST" && url.pathname === "/api/viewer/admin/deployment/refresh") {
+      this.requireAdministrator(telegramUser);
+      const requestResult = await this.deployment.requestRefresh();
+      json(response, 202, {
+        request: requestResult,
+        deployment: await this.deployment.status(),
+      });
+      return;
+    }
     if (request.method === "GET" && url.pathname === "/api/viewer/admin/users") {
       this.requireAdminAccess(telegramUser);
       const rawChatId = url.searchParams.get("chatId") ?? "";
