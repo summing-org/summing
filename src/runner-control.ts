@@ -6,6 +6,7 @@ import { GitInspector } from "./git-inspector.js";
 import { ProjectCatalog } from "./project-catalog.js";
 import {
   ProjectRunnerClient,
+  type RunnerApproval,
   type RunnerAction,
   type RunnerArtifact,
   type RunnerArtifactDeletion,
@@ -732,6 +733,25 @@ export class RunnerControlStore {
     }));
   }
 
+  jobWatch(jobId: string): RunnerJobWatch | null {
+    const row = this.db.prepare(
+      "SELECT * FROM runner_job_watches WHERE job_id = ?",
+    ).get(jobId) as Row | undefined;
+    if (!row) return null;
+    return {
+      jobId: String(row.job_id),
+      projectId: String(row.project_id),
+      workspaceId: String(row.workspace_id),
+      conversationId: String(row.conversation_id),
+      actorUserId: Number(row.actor_user_id),
+      action: String(row.action) as RunnerAction,
+      lastStatus: String(row.last_status) as RunnerJob["status"],
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+      notifiedAt: row.notified_at === null ? null : String(row.notified_at),
+    };
+  }
+
   updateJobWatch(job: RunnerJob, nowMilliseconds: number): void {
     this.db.prepare(`
       UPDATE runner_job_watches SET last_status = ?, updated_at = ? WHERE job_id = ?
@@ -933,6 +953,36 @@ export class RunnerControlPlane {
         })),
       capabilities: ["build", "validate", "dry-run", "run"],
     };
+  }
+
+  async notifyApprovalFeedback(approval: RunnerApproval): Promise<boolean> {
+    const watch = this.store.jobWatch(approval.jobId);
+    if (
+      !watch ||
+      watch.projectId !== approval.projectId ||
+      watch.workspaceId !== approval.workspaceId ||
+      watch.action !== "dry-run" ||
+      approval.status !== "changes_requested" ||
+      !approval.feedbackText ||
+      approval.feedbackBy === null
+    ) return false;
+    const preview = Array.from(approval.feedbackText);
+    const feedback = preview.length > 3_000
+      ? `${preview.slice(0, 2_999).join("")}…`
+      : approval.feedbackText;
+    await this.notify(
+      approval.projectId,
+      [
+        `Заказчик ${approval.feedbackBy} запросил правки к плану ${approval.planId}.`,
+        `Digest: ${approval.digest}`,
+        "",
+        feedback,
+        "",
+        "Правки сохранены как changes_requested; следующий dry-run получит их read-only.",
+      ].join("\n"),
+      watch.conversationId,
+    );
+    return true;
   }
 
   async startJob(

@@ -45,7 +45,12 @@ import {
   REPOSITORY_DYNAMIC_TOOLS,
 } from "./repository-tools.js";
 import { RunnerControlPlane } from "./runner-control.js";
-import { ProjectRunnerClient, ProjectRunnerClientError, type RunnerJob } from "./project-runner-client.js";
+import {
+  ProjectRunnerClient,
+  ProjectRunnerClientError,
+  type RunnerApproval,
+  type RunnerJob,
+} from "./project-runner-client.js";
 import { executeRunnerTool, RUNNER_DYNAMIC_TOOLS } from "./runner-tools.js";
 import { detectSecretFile, detectSecretText, type SecretDetection } from "./secret-ingress.js";
 import {
@@ -1483,6 +1488,11 @@ export class SummingRuntime {
       throw new Error("runner approval notification scope no longer matches the project conversation");
     }
     let approval = await this.viewer.runner.approval(job.projectId, job.workspaceId, job.id);
+    const targetChatId = approval.chatId ?? conversation.chatId;
+    const targetTopicId = approval.topicId ?? conversation.topicId;
+    const authorizedUserIds = approval.authorizedUserIds.length > 0
+      ? approval.authorizedUserIds
+      : [authorizedUserId];
     let messageId = approval.messageId;
     if (messageId === null) {
       const report = await this.viewer.runner.artifact(
@@ -1491,33 +1501,32 @@ export class SummingRuntime {
         approval.reportArtifact,
       );
       messageId = await this.telegram.sendDocument(
-        conversation.chatId,
+        targetChatId,
         new TextEncoder().encode(report.content),
         `dry-run-${approval.planId}.html`,
         report.contentType,
-        { topicId: conversation.topicId, caption: approval.message },
+        { topicId: targetTopicId, caption: approval.message },
       );
       approval = await this.viewer.runner.bindApproval(approval.callbackToken, {
-        chatId: conversation.chatId,
-        topicId: conversation.topicId,
+        chatId: targetChatId,
+        topicId: targetTopicId,
         messageId,
-        authorizedUserId,
+        authorizedUserIds,
       });
     }
     if (
-      approval.chatId !== conversation.chatId ||
-      approval.topicId !== conversation.topicId ||
+      approval.chatId !== targetChatId ||
+      approval.topicId !== targetTopicId ||
       approval.messageId !== messageId ||
-      approval.authorizedUserId !== authorizedUserId
+      approval.authorizedUserIds.length === 0 ||
+      !approval.authorizedUserIds.every((userId) => authorizedUserIds.includes(userId))
     ) {
       throw new Error("runner approval request is bound outside the trusted conversation scope");
     }
     if (approval.status !== "pending") {
-      const statusText = approval.status === "approved"
-        ? `✅ План ${approval.planId} одобрен.`
-        : `❌ План ${approval.planId} отклонён.`;
+      const statusText = this.runnerApprovalStatusText(approval);
       await this.telegram.editMessageCaption(
-        conversation.chatId,
+        targetChatId,
         messageId,
         `${approval.message}\n\n${statusText}`,
         { inline_keyboard: [] },
@@ -1525,28 +1534,46 @@ export class SummingRuntime {
       return true;
     }
     await this.telegram.editMessageCaption(
-      conversation.chatId,
+      targetChatId,
       messageId,
       approval.message,
       {
-        inline_keyboard: [[
-          {
-            text: "✅ Одобрить",
-            callback_data: `sma:${approval.callbackToken}:approved`,
-          },
-          {
+        inline_keyboard: [
+          [
+            {
+              text: "✅ Одобрить",
+              callback_data: `sma:${approval.callbackToken}:approved`,
+            },
+            {
+              text: "✍️ Нужны правки",
+              callback_data: `sma:${approval.callbackToken}:feedback`,
+            },
+          ],
+          [{
             text: "❌ Отклонить",
             callback_data: `sma:${approval.callbackToken}:rejected`,
-          },
-        ]],
+          }],
+        ],
       },
     );
     return true;
   }
 
+  private runnerApprovalStatusText(approval: RunnerApproval): string {
+    if (approval.status === "approved") return `✅ План ${approval.planId} одобрен.`;
+    if (approval.status === "rejected") return `❌ План ${approval.planId} отклонён.`;
+    if (approval.status === "changes_requested") {
+      return `✍️ Для плана ${approval.planId} зафиксированы правки.`;
+    }
+    if (approval.status === "awaiting_feedback") {
+      return `✍️ Опишите правки ответом на сообщение бота ниже.`;
+    }
+    return `План ${approval.planId} ожидает решения.`;
+  }
+
   private async handleRunnerApprovalCallback(callback: TelegramObject): Promise<void> {
     const data = String(callback.data ?? "");
-    const match = /^sma:([A-Za-z0-9_-]{20,48}):(approved|rejected)$/.exec(data);
+    const match = /^sma:([A-Za-z0-9_-]{20,48}):(approved|rejected|feedback)$/.exec(data);
     if (!match) return;
     const callbackQueryId = String(callback.id ?? "");
     const message = record(callback.message);
@@ -1569,6 +1596,43 @@ export class SummingRuntime {
       return;
     }
     try {
+      if (match[2] === "feedback") {
+        let approval = await this.viewer.runner.requestApprovalFeedback(match[1]!, {
+          chatId,
+          topicId,
+          messageId,
+          userId,
+        });
+        if (approval.feedbackPromptMessageId === null) {
+          const promptMessageId = await this.telegram.sendMessage(
+            chatId,
+            `Опишите одним сообщением, что нужно изменить в плане ${approval.planId}.`,
+            {
+              topicId,
+              replyTo: messageId,
+              replyMarkup: {
+                force_reply: true,
+                input_field_placeholder: "Напишите редакционные правки",
+              },
+            },
+          );
+          approval = await this.viewer.runner.bindApprovalFeedbackPrompt(match[1]!, {
+            chatId,
+            topicId,
+            messageId,
+            userId,
+            promptMessageId,
+          });
+        }
+        await this.telegram.answerCallbackQuery(callbackQueryId, "Жду описание правок");
+        await this.telegram.editMessageCaption(
+          chatId,
+          messageId,
+          `${approval.message}\n\n${this.runnerApprovalStatusText(approval)}`,
+          { inline_keyboard: [] },
+        );
+        return;
+      }
       const decision = match[2] as "approved" | "rejected";
       const approval = await this.viewer.runner.decideApproval(match[1]!, decision, {
         chatId,
@@ -1576,9 +1640,6 @@ export class SummingRuntime {
         messageId,
         userId,
       });
-      const statusText = decision === "approved"
-        ? `✅ План ${approval.planId} одобрен.`
-        : `❌ План ${approval.planId} отклонён.`;
       await this.telegram.answerCallbackQuery(
         callbackQueryId,
         decision === "approved" ? "План одобрен" : "План отклонён",
@@ -1586,7 +1647,7 @@ export class SummingRuntime {
       await this.telegram.editMessageCaption(
         chatId,
         messageId,
-        `${approval.message}\n\n${statusText}`,
+        `${approval.message}\n\n${this.runnerApprovalStatusText(approval)}`,
         { inline_keyboard: [] },
       );
     } catch (error) {
@@ -1595,6 +1656,68 @@ export class SummingRuntime {
         : "Не удалось зафиксировать решение";
       await this.telegram.answerCallbackQuery(callbackQueryId, message, true);
     }
+  }
+
+  private async handleRunnerApprovalFeedback(
+    message: TelegramObject,
+    text: string,
+  ): Promise<boolean> {
+    const reply = telegramExplicitReply(message);
+    const replyToMessageId = Number(reply?.message_id ?? 0);
+    if (
+      !reply ||
+      !replyToMessageId ||
+      !text ||
+      !this.isRunnerApprovalFeedbackReply(reply)
+    ) return false;
+    const [chatId, topicId, userId] = this.messageLocation(message);
+    const messageId = Number(message.message_id ?? 0);
+    try {
+      const approval = await this.viewer.runner.recordApprovalFeedback({
+        chatId,
+        topicId,
+        replyToMessageId,
+        messageId,
+        userId,
+        text,
+      });
+      if (!approval) return false;
+      if (approval.messageId !== null) {
+        await this.telegram.editMessageCaption(
+          chatId,
+          approval.messageId,
+          `${approval.message}\n\n${this.runnerApprovalStatusText(approval)}`,
+          { inline_keyboard: [] },
+        );
+      }
+      const forwarded = await this.runnerControl.notifyApprovalFeedback(approval);
+      await this.telegram.sendMessage(
+        chatId,
+        `Правки к плану ${approval.planId} сохранены` +
+          `${forwarded ? " и переданы в Project" : ""}. ` +
+          "Следующий dry-run применит их к новой редакции.",
+        { topicId, replyTo: messageId },
+      );
+      return true;
+    } catch (error) {
+      if (error instanceof ProjectRunnerClientError && [400, 403, 409].includes(error.status)) {
+        await this.telegram.sendMessage(chatId, error.message, { topicId, replyTo: messageId });
+        return true;
+      }
+      throw error;
+    }
+  }
+
+  private isRunnerApprovalFeedbackReply(reply: TelegramObject): boolean {
+    const sender = record(reply.from);
+    if (sender?.is_bot !== true) return false;
+    const prompt = String(reply.text ?? "").trim();
+    if (/^Опишите одним сообщением, что нужно изменить в плане [A-Za-z0-9._-]{1,120}\.$/.test(prompt)) {
+      return true;
+    }
+    const document = record(reply.document);
+    const fileName = String(document?.file_name ?? "").trim();
+    return /^dry-run-[A-Za-z0-9._-]{1,120}\.html$/.test(fileName);
   }
 
   private messageLocation(message: TelegramObject): [number, number, number] {
@@ -1820,6 +1943,7 @@ export class SummingRuntime {
       : null;
     if (teamEvent) this.scheduleTeamUnderstanding(teamEvent.sourceId);
     if (!senderId || sender.is_bot === true) return;
+    if (text && await this.handleRunnerApprovalFeedback(message, text)) return;
     if (
       text.startsWith("/memory") &&
       await this.handleTeamMemoryCommand(chatId, topicId, messageId, senderId, text)

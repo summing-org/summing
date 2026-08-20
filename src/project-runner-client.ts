@@ -46,6 +46,11 @@ export interface RunnerJob {
 }
 
 export type RunnerApprovalDecision = "approved" | "rejected";
+export type RunnerApprovalStatus =
+  | "pending"
+  | "awaiting_feedback"
+  | "changes_requested"
+  | RunnerApprovalDecision;
 
 export interface RunnerApproval {
   projectId: string;
@@ -56,13 +61,21 @@ export interface RunnerApproval {
   reportArtifact: "report.html";
   message: string;
   callbackToken: string;
-  status: "pending" | RunnerApprovalDecision;
+  status: RunnerApprovalStatus;
   chatId: number | null;
   topicId: number | null;
   messageId: number | null;
   authorizedUserId: number | null;
+  authorizedUserIds: number[];
   decidedBy: number | null;
   decidedAt: string | null;
+  feedbackRequestedBy: number | null;
+  feedbackRequestedAt: string | null;
+  feedbackPromptMessageId: number | null;
+  feedbackMessageId: number | null;
+  feedbackText: string | null;
+  feedbackBy: number | null;
+  feedbackAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -271,7 +284,7 @@ export class ProjectRunnerClient {
 
   async bindApproval(
     callbackToken: string,
-    input: { chatId: number; topicId: number; messageId: number; authorizedUserId: number },
+    input: { chatId: number; topicId: number; messageId: number; authorizedUserIds: number[] },
   ): Promise<RunnerApproval> {
     const body = Buffer.from(JSON.stringify({ callbackToken, ...input }), "utf8");
     const result = await this.call<{ approval: RunnerApproval }>(
@@ -291,6 +304,55 @@ export class ProjectRunnerClient {
     const result = await this.call<{ approval: RunnerApproval }>(
       "POST",
       "/approval/decision",
+      body,
+    );
+    return result.approval;
+  }
+
+  async requestApprovalFeedback(
+    callbackToken: string,
+    input: { chatId: number; topicId: number; messageId: number; userId: number },
+  ): Promise<RunnerApproval> {
+    const body = Buffer.from(JSON.stringify({ callbackToken, ...input }), "utf8");
+    const result = await this.call<{ approval: RunnerApproval }>(
+      "POST",
+      "/approval/feedback/request",
+      body,
+    );
+    return result.approval;
+  }
+
+  async bindApprovalFeedbackPrompt(
+    callbackToken: string,
+    input: {
+      chatId: number;
+      topicId: number;
+      messageId: number;
+      userId: number;
+      promptMessageId: number;
+    },
+  ): Promise<RunnerApproval> {
+    const body = Buffer.from(JSON.stringify({ callbackToken, ...input }), "utf8");
+    const result = await this.call<{ approval: RunnerApproval }>(
+      "POST",
+      "/approval/feedback/prompt",
+      body,
+    );
+    return result.approval;
+  }
+
+  async recordApprovalFeedback(input: {
+    chatId: number;
+    topicId: number;
+    replyToMessageId: number;
+    messageId: number;
+    userId: number;
+    text: string;
+  }): Promise<RunnerApproval | null> {
+    const body = Buffer.from(JSON.stringify(input), "utf8");
+    const result = await this.call<{ approval: RunnerApproval | null }>(
+      "POST",
+      "/approval/feedback",
       body,
     );
     return result.approval;

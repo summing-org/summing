@@ -21,8 +21,21 @@ const DIGEST = /^[a-f0-9]{64}$/;
 const CALLBACK_TOKEN = /^[A-Za-z0-9_-]{20,48}$/;
 const MAXIMUM_REQUEST_BYTES = 64_000;
 const MAXIMUM_CAPTION_CHARACTERS = 900;
+const MAXIMUM_FEEDBACK_CHARACTERS = 4_000;
+const MAXIMUM_AUTHORIZED_USERS = 20;
 
 export type RunnerApprovalDecision = "approved" | "rejected";
+export type RunnerApprovalStatus =
+  | "pending"
+  | "awaiting_feedback"
+  | "changes_requested"
+  | RunnerApprovalDecision;
+
+export interface RunnerApprovalDelivery {
+  chatId: number;
+  topicId: number;
+  authorizedUserIds: number[];
+}
 
 export interface RunnerApprovalRequestDocument {
   schemaVersion: 1;
@@ -42,13 +55,21 @@ export interface RunnerApprovalView {
   reportArtifact: "report.html";
   message: string;
   callbackToken: string;
-  status: "pending" | RunnerApprovalDecision;
+  status: RunnerApprovalStatus;
   chatId: number | null;
   topicId: number | null;
   messageId: number | null;
   authorizedUserId: number | null;
+  authorizedUserIds: number[];
   decidedBy: number | null;
   decidedAt: string | null;
+  feedbackRequestedBy: number | null;
+  feedbackRequestedAt: string | null;
+  feedbackPromptMessageId: number | null;
+  feedbackMessageId: number | null;
+  feedbackText: string | null;
+  feedbackBy: number | null;
+  feedbackAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -74,11 +95,15 @@ interface ApprovalState {
 export interface RunnerApprovalEvent {
   planId: string;
   digest: string;
-  status: RunnerApprovalDecision;
+  status: RunnerApprovalDecision | "changes_requested";
   approvedBy: number | null;
   approvedAt: string | null;
   rejectedBy: number | null;
   rejectedAt: string | null;
+  changesRequestedBy: number | null;
+  changesRequestedAt: string | null;
+  feedbackMessageId: number | null;
+  feedback: string | null;
   approvalMessageId: number;
 }
 
@@ -110,6 +135,22 @@ function telegramTopicId(value: unknown): number {
     throw new RunnerApprovalError(400, "topicId must be a non-negative safe integer");
   }
   return number;
+}
+
+function telegramUserIds(value: unknown, field = "authorizedUserIds"): number[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAXIMUM_AUTHORIZED_USERS) {
+    throw new RunnerApprovalError(400, `${field} must contain 1-${MAXIMUM_AUTHORIZED_USERS} users`);
+  }
+  const users = value.map((item) => positiveInteger(item, field));
+  const unique = [...new Set(users)].sort((left, right) => left - right);
+  if (unique.length !== users.length) {
+    throw new RunnerApprovalError(400, `${field} must not contain duplicates`);
+  }
+  return unique;
+}
+
+function sameUsers(left: number[], right: number[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 function jsonObject(path: string): Record<string, unknown> {
@@ -187,6 +228,7 @@ export class RunnerApprovalStore {
     jobId: string;
     projectDataPath: string;
     artifactDirectory: string;
+    delivery?: RunnerApprovalDelivery | null;
   }): RunnerApprovalView | null {
     const requestPath = resolve(input.artifactDirectory, "approval-request.json");
     if (!existsSync(requestPath)) return null;
@@ -250,6 +292,14 @@ export class RunnerApprovalStore {
       throw new RunnerApprovalError(409, "approval request state is not pending");
     }
 
+    const delivery = input.delivery
+      ? {
+          chatId: telegramChatId(input.delivery.chatId),
+          topicId: telegramTopicId(input.delivery.topicId),
+          authorizedUserIds: telegramUserIds(input.delivery.authorizedUserIds),
+        }
+      : null;
+
     const createdAt = this.now().toISOString();
     const record: RunnerApprovalRecord = {
       schemaVersion: 1,
@@ -263,12 +313,20 @@ export class RunnerApprovalStore {
       message,
       callbackToken: randomBytes(18).toString("base64url"),
       status: "pending",
-      chatId: null,
-      topicId: null,
+      chatId: delivery?.chatId ?? null,
+      topicId: delivery?.topicId ?? null,
       messageId: null,
-      authorizedUserId: null,
+      authorizedUserId: delivery?.authorizedUserIds[0] ?? null,
+      authorizedUserIds: delivery?.authorizedUserIds ?? [],
       decidedBy: null,
       decidedAt: null,
+      feedbackRequestedBy: null,
+      feedbackRequestedAt: null,
+      feedbackPromptMessageId: null,
+      feedbackMessageId: null,
+      feedbackText: null,
+      feedbackBy: null,
+      feedbackAt: null,
       createdAt,
       updatedAt: createdAt,
     };
@@ -295,19 +353,26 @@ export class RunnerApprovalStore {
 
   bind(
     callbackToken: string,
-    input: { chatId: unknown; topicId: unknown; messageId: unknown; authorizedUserId: unknown },
+    input: { chatId: unknown; topicId: unknown; messageId: unknown; authorizedUserIds: unknown },
   ): RunnerApprovalView {
     const record = this.record(callbackToken);
     const chatId = telegramChatId(input.chatId);
     const topicId = telegramTopicId(input.topicId);
     const messageId = positiveInteger(input.messageId, "messageId");
-    const authorizedUserId = positiveInteger(input.authorizedUserId, "authorizedUserId");
+    const authorizedUserIds = telegramUserIds(input.authorizedUserIds);
+    if (
+      (record.chatId !== null && record.chatId !== chatId) ||
+      (record.topicId !== null && record.topicId !== topicId) ||
+      (record.authorizedUserIds.length > 0 && !sameUsers(record.authorizedUserIds, authorizedUserIds))
+    ) {
+      throw new RunnerApprovalError(403, "approval delivery does not match the configured project route");
+    }
     if (record.messageId !== null) {
       if (
         record.chatId === chatId &&
         record.topicId === topicId &&
         record.messageId === messageId &&
-        record.authorizedUserId === authorizedUserId
+        sameUsers(record.authorizedUserIds, authorizedUserIds)
       ) return publicView(record);
       throw new RunnerApprovalError(409, "approval request is already bound to another message");
     }
@@ -325,7 +390,8 @@ export class RunnerApprovalStore {
       chatId,
       topicId,
       messageId,
-      authorizedUserId,
+      authorizedUserId: authorizedUserIds[0]!,
+      authorizedUserIds,
       updatedAt,
     };
     atomicJson(this.path(callbackToken), bound);
@@ -352,7 +418,7 @@ export class RunnerApprovalStore {
     ) {
       throw new RunnerApprovalError(403, "approval callback is not attached to the bound report message");
     }
-    if (record.authorizedUserId !== userId) {
+    if (!record.authorizedUserIds.includes(userId)) {
       throw new RunnerApprovalError(403, "Telegram user is not authorized to decide this plan");
     }
     if (record.status !== "pending") {
@@ -380,6 +446,129 @@ export class RunnerApprovalStore {
     return publicView(decided);
   }
 
+  requestFeedback(
+    callbackToken: string,
+    input: { chatId: unknown; topicId: unknown; messageId: unknown; userId: unknown },
+  ): RunnerApprovalView {
+    const record = this.record(callbackToken);
+    const userId = this.assertCallbackScope(record, input);
+    if (record.status === "awaiting_feedback") {
+      if (record.feedbackRequestedBy === userId) return publicView(record);
+      throw new RunnerApprovalError(409, "another authorized user is already preparing feedback");
+    }
+    if (record.status !== "pending") {
+      throw new RunnerApprovalError(409, `approval request is already ${record.status}`);
+    }
+    const state = this.readState(record.statePath, record.planId, record.digest);
+    if (state.status !== "pending") {
+      throw new RunnerApprovalError(409, `project approval state is already ${state.status}`);
+    }
+    const requestedAt = this.now().toISOString();
+    const awaiting: RunnerApprovalRecord = {
+      ...record,
+      status: "awaiting_feedback",
+      feedbackRequestedBy: userId,
+      feedbackRequestedAt: requestedAt,
+      updatedAt: requestedAt,
+    };
+    atomicJson(this.path(callbackToken), awaiting);
+    return publicView(awaiting);
+  }
+
+  bindFeedbackPrompt(
+    callbackToken: string,
+    input: {
+      chatId: unknown;
+      topicId: unknown;
+      messageId: unknown;
+      userId: unknown;
+      promptMessageId: unknown;
+    },
+  ): RunnerApprovalView {
+    const record = this.record(callbackToken);
+    const userId = this.assertCallbackScope(record, input);
+    const promptMessageId = positiveInteger(input.promptMessageId, "promptMessageId");
+    if (record.status !== "awaiting_feedback" || record.feedbackRequestedBy !== userId) {
+      throw new RunnerApprovalError(409, "approval request is not waiting for this user's feedback");
+    }
+    if (record.feedbackPromptMessageId !== null) {
+      if (record.feedbackPromptMessageId === promptMessageId) return publicView(record);
+      throw new RunnerApprovalError(409, "approval feedback prompt is already bound");
+    }
+    const updated: RunnerApprovalRecord = {
+      ...record,
+      feedbackPromptMessageId: promptMessageId,
+      updatedAt: this.now().toISOString(),
+    };
+    atomicJson(this.path(callbackToken), updated);
+    return publicView(updated);
+  }
+
+  recordFeedback(input: {
+    chatId: unknown;
+    topicId: unknown;
+    replyToMessageId: unknown;
+    messageId: unknown;
+    userId: unknown;
+    text: unknown;
+  }): RunnerApprovalView | null {
+    const chatId = telegramChatId(input.chatId);
+    const topicId = telegramTopicId(input.topicId);
+    const replyToMessageId = positiveInteger(input.replyToMessageId, "replyToMessageId");
+    const messageId = positiveInteger(input.messageId, "messageId");
+    const userId = positiveInteger(input.userId, "userId");
+    for (const entry of readdirSync(this.root)) {
+      if (!entry.endsWith(".json")) continue;
+      let record: RunnerApprovalRecord;
+      try {
+        record = this.readRecord(resolve(this.root, entry));
+      } catch {
+        continue;
+      }
+      if (
+        record.chatId !== chatId ||
+        record.topicId !== topicId ||
+        (record.messageId !== replyToMessageId &&
+          record.feedbackPromptMessageId !== replyToMessageId)
+      ) continue;
+      if (!record.authorizedUserIds.includes(userId)) {
+        throw new RunnerApprovalError(403, "Telegram user is not authorized to request changes");
+      }
+      const text = String(input.text ?? "").trim();
+      if (!text || Array.from(text).length > MAXIMUM_FEEDBACK_CHARACTERS) {
+        throw new RunnerApprovalError(400, "approval feedback must contain 1-4000 characters");
+      }
+      if (record.status === "changes_requested") {
+        if (record.feedbackMessageId === messageId && record.feedbackBy === userId) {
+          this.writeEvent(record);
+          return publicView(record);
+        }
+        throw new RunnerApprovalError(409, "changes were already requested for this plan");
+      }
+      if (record.status !== "pending" && record.status !== "awaiting_feedback") {
+        throw new RunnerApprovalError(409, `approval request is already ${record.status}`);
+      }
+      const state = this.readState(record.statePath, record.planId, record.digest);
+      if (state.status !== "pending") {
+        throw new RunnerApprovalError(409, `project approval state is already ${state.status}`);
+      }
+      const feedbackAt = this.now().toISOString();
+      const changed: RunnerApprovalRecord = {
+        ...record,
+        status: "changes_requested",
+        feedbackMessageId: messageId,
+        feedbackText: text,
+        feedbackBy: userId,
+        feedbackAt,
+        updatedAt: feedbackAt,
+      };
+      this.writeEvent(changed);
+      atomicJson(this.path(record.callbackToken), changed);
+      return publicView(changed);
+    }
+    return null;
+  }
+
   eventPath(projectId: string, workspaceId: string): string | null {
     if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(projectId) ||
       !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(workspaceId)) {
@@ -402,17 +591,59 @@ export class RunnerApprovalStore {
     return this.readRecord(path);
   }
 
+  private assertCallbackScope(
+    record: RunnerApprovalRecord,
+    input: { chatId: unknown; topicId: unknown; messageId: unknown; userId: unknown },
+  ): number {
+    const chatId = telegramChatId(input.chatId);
+    const topicId = telegramTopicId(input.topicId);
+    const messageId = positiveInteger(input.messageId, "messageId");
+    const userId = positiveInteger(input.userId, "userId");
+    if (record.chatId !== chatId || record.topicId !== topicId || record.messageId !== messageId) {
+      throw new RunnerApprovalError(403, "approval callback is not attached to the bound report message");
+    }
+    if (!record.authorizedUserIds.includes(userId)) {
+      throw new RunnerApprovalError(403, "Telegram user is not authorized to decide this plan");
+    }
+    return userId;
+  }
+
   private readRecord(path: string): RunnerApprovalRecord {
     const raw = jsonObject(path);
+    const statuses = new Set<RunnerApprovalStatus>([
+      "pending",
+      "awaiting_feedback",
+      "changes_requested",
+      "approved",
+      "rejected",
+    ]);
     if (
       raw.schemaVersion !== 1 ||
       !PLAN_ID.test(String(raw.planId ?? "")) ||
       !DIGEST.test(String(raw.digest ?? "")) ||
-      !CALLBACK_TOKEN.test(String(raw.callbackToken ?? ""))
+      !CALLBACK_TOKEN.test(String(raw.callbackToken ?? "")) ||
+      !statuses.has(String(raw.status ?? "") as RunnerApprovalStatus)
     ) {
       throw new RunnerApprovalError(409, "stored approval event is malformed");
     }
-    return raw as unknown as RunnerApprovalRecord;
+    const legacyUserId = Number(raw.authorizedUserId ?? 0);
+    const authorizedUserIds = Array.isArray(raw.authorizedUserIds) && raw.authorizedUserIds.length > 0
+      ? telegramUserIds(raw.authorizedUserIds)
+      : Number.isSafeInteger(legacyUserId) && legacyUserId > 0
+        ? [legacyUserId]
+        : [];
+    return {
+      ...(raw as unknown as RunnerApprovalRecord),
+      authorizedUserId: authorizedUserIds[0] ?? null,
+      authorizedUserIds,
+      feedbackRequestedBy: Number(raw.feedbackRequestedBy ?? 0) || null,
+      feedbackRequestedAt: typeof raw.feedbackRequestedAt === "string" ? raw.feedbackRequestedAt : null,
+      feedbackPromptMessageId: Number(raw.feedbackPromptMessageId ?? 0) || null,
+      feedbackMessageId: Number(raw.feedbackMessageId ?? 0) || null,
+      feedbackText: typeof raw.feedbackText === "string" ? raw.feedbackText : null,
+      feedbackBy: Number(raw.feedbackBy ?? 0) || null,
+      feedbackAt: typeof raw.feedbackAt === "string" ? raw.feedbackAt : null,
+    };
   }
 
   private readState(path: string, planId: string, digest: string): ApprovalState {
@@ -429,9 +660,26 @@ export class RunnerApprovalStore {
   }
 
   private writeEvent(record: RunnerApprovalRecord): void {
-    if (record.status !== "approved" && record.status !== "rejected") return;
-    if (record.decidedBy === null || record.decidedAt === null || record.messageId === null) {
+    if (
+      record.status !== "approved" &&
+      record.status !== "rejected" &&
+      record.status !== "changes_requested"
+    ) return;
+    if (record.messageId === null) {
       throw new RunnerApprovalError(409, "decided approval event is incomplete");
+    }
+    if (
+      (record.status === "approved" || record.status === "rejected") &&
+      (record.decidedBy === null || record.decidedAt === null)
+    ) {
+      throw new RunnerApprovalError(409, "decided approval event is incomplete");
+    }
+    if (
+      record.status === "changes_requested" &&
+      (record.feedbackBy === null || record.feedbackAt === null ||
+        record.feedbackMessageId === null || record.feedbackText === null)
+    ) {
+      throw new RunnerApprovalError(409, "approval feedback event is incomplete");
     }
     const event: RunnerApprovalEvent = {
       planId: record.planId,
@@ -441,6 +689,10 @@ export class RunnerApprovalStore {
       approvedAt: record.status === "approved" ? record.decidedAt : null,
       rejectedBy: record.status === "rejected" ? record.decidedBy : null,
       rejectedAt: record.status === "rejected" ? record.decidedAt : null,
+      changesRequestedBy: record.status === "changes_requested" ? record.feedbackBy : null,
+      changesRequestedAt: record.status === "changes_requested" ? record.feedbackAt : null,
+      feedbackMessageId: record.status === "changes_requested" ? record.feedbackMessageId : null,
+      feedback: record.status === "changes_requested" ? record.feedbackText : null,
       approvalMessageId: record.messageId,
     };
     atomicJson(

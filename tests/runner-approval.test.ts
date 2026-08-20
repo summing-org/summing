@@ -72,7 +72,7 @@ test("runner approval bridge binds a plan to one Telegram message and persists a
       chatId: -10042,
       topicId: 17,
       messageId: 245,
-      authorizedUserId: 123456789,
+      authorizedUserIds: [123456789],
     });
     assert.equal(bound.messageId, 245);
     assert.equal(
@@ -148,6 +148,113 @@ test("runner approval bridge binds a plan to one Telegram message and persists a
       }),
       /already approved/,
     );
+  } finally {
+    rmSync(item.root, { recursive: true, force: true });
+  }
+});
+
+test("runner approval bridge records authorized free-text changes for one report", () => {
+  const item = fixture();
+  const store = new RunnerApprovalStore(
+    item.dataRoot,
+    () => new Date("2026-08-20T07:35:04.000Z"),
+  );
+  try {
+    const captured = store.capture({
+      projectId: "demo",
+      workspaceId: "repo",
+      jobId: "job-1",
+      projectDataPath: item.projectData,
+      artifactDirectory: item.artifactDirectory,
+      delivery: {
+        chatId: -1001674344837,
+        topicId: 67800,
+        authorizedUserIds: [50971701, 7460594016],
+      },
+    });
+    assert.ok(captured);
+    assert.equal(captured.chatId, -1001674344837);
+    assert.deepEqual(captured.authorizedUserIds, [50971701, 7460594016]);
+    assert.throws(
+      () => store.bind(captured.callbackToken, {
+        chatId: -10042,
+        topicId: 67800,
+        messageId: 78032,
+        authorizedUserIds: [50971701, 7460594016],
+      }),
+      /configured project route/,
+    );
+    store.bind(captured.callbackToken, {
+      chatId: -1001674344837,
+      topicId: 67800,
+      messageId: 78032,
+      authorizedUserIds: [50971701, 7460594016],
+    });
+    assert.throws(
+      () => store.requestFeedback(captured.callbackToken, {
+        chatId: -1001674344837,
+        topicId: 67800,
+        messageId: 78032,
+        userId: 99,
+      }),
+      /not authorized/,
+    );
+    const awaiting = store.requestFeedback(captured.callbackToken, {
+      chatId: -1001674344837,
+      topicId: 67800,
+      messageId: 78032,
+      userId: 7460594016,
+    });
+    assert.equal(awaiting.status, "awaiting_feedback");
+    store.bindFeedbackPrompt(captured.callbackToken, {
+      chatId: -1001674344837,
+      topicId: 67800,
+      messageId: 78032,
+      userId: 7460594016,
+      promptMessageId: 78060,
+    });
+    assert.throws(
+      () => store.recordFeedback({
+        chatId: -1001674344837,
+        topicId: 67800,
+        replyToMessageId: 78060,
+        messageId: 78061,
+        userId: 99,
+        text: "Перегенерировать план.",
+      }),
+      /not authorized/,
+    );
+    const changed = store.recordFeedback({
+      chatId: -1001674344837,
+      topicId: 67800,
+      replyToMessageId: 78060,
+      messageId: 78061,
+      userId: 7460594016,
+      text: "Нужен лёгкий контент без отраслевой аналитики.",
+    });
+    assert.ok(changed);
+    assert.equal(changed.status, "changes_requested");
+    assert.equal(changed.feedbackMessageId, 78061);
+    assert.equal(
+      (JSON.parse(readFileSync(item.statePath, "utf8")) as { status: string }).status,
+      "pending",
+    );
+    const eventPath = store.eventPath("demo", "repo");
+    assert.ok(eventPath);
+    assert.deepEqual(JSON.parse(readFileSync(eventPath, "utf8")), {
+      planId: "plan-1",
+      digest: "a".repeat(64),
+      status: "changes_requested",
+      approvedBy: null,
+      approvedAt: null,
+      rejectedBy: null,
+      rejectedAt: null,
+      changesRequestedBy: 7460594016,
+      changesRequestedAt: "2026-08-20T07:35:04.000Z",
+      feedbackMessageId: 78061,
+      feedback: "Нужен лёгкий контент без отраслевой аналитики.",
+      approvalMessageId: 78032,
+    });
   } finally {
     rmSync(item.root, { recursive: true, force: true });
   }

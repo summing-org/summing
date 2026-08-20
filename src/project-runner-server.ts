@@ -42,7 +42,11 @@ import type {
   RunnerJobTrigger,
   RunnerProjectRegistration,
 } from "./project-runner-client.js";
-import { RunnerApprovalError, RunnerApprovalStore } from "./runner-approval.js";
+import {
+  RunnerApprovalError,
+  RunnerApprovalStore,
+  type RunnerApprovalDelivery,
+} from "./runner-approval.js";
 
 const PROJECT_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const WORKSPACE_ID = PROJECT_ID;
@@ -591,7 +595,7 @@ export class ProjectRunnerServer {
         "chatId",
         "topicId",
         "messageId",
-        "authorizedUserId",
+        "authorizedUserIds",
       ]);
       if (Object.keys(body).some((key) => !allowedKeys.has(key))) {
         throw new RunnerHttpError(400, "approval message binding contains unsupported fields");
@@ -601,7 +605,7 @@ export class ProjectRunnerServer {
           chatId: body.chatId,
           topicId: body.topicId,
           messageId: body.messageId,
-          authorizedUserId: body.authorizedUserId,
+          authorizedUserIds: body.authorizedUserIds,
         }),
       });
       return;
@@ -631,6 +635,71 @@ export class ProjectRunnerServer {
             userId: body.userId,
           },
         ),
+      });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/approval/feedback/request") {
+      const body = await jsonBody(request);
+      const allowedKeys = new Set(["callbackToken", "chatId", "topicId", "messageId", "userId"]);
+      if (Object.keys(body).some((key) => !allowedKeys.has(key))) {
+        throw new RunnerHttpError(400, "approval feedback request contains unsupported fields");
+      }
+      json(response, 200, {
+        approval: this.approvals.requestFeedback(String(body.callbackToken ?? ""), {
+          chatId: body.chatId,
+          topicId: body.topicId,
+          messageId: body.messageId,
+          userId: body.userId,
+        }),
+      });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/approval/feedback/prompt") {
+      const body = await jsonBody(request);
+      const allowedKeys = new Set([
+        "callbackToken",
+        "chatId",
+        "topicId",
+        "messageId",
+        "userId",
+        "promptMessageId",
+      ]);
+      if (Object.keys(body).some((key) => !allowedKeys.has(key))) {
+        throw new RunnerHttpError(400, "approval feedback prompt contains unsupported fields");
+      }
+      json(response, 200, {
+        approval: this.approvals.bindFeedbackPrompt(String(body.callbackToken ?? ""), {
+          chatId: body.chatId,
+          topicId: body.topicId,
+          messageId: body.messageId,
+          userId: body.userId,
+          promptMessageId: body.promptMessageId,
+        }),
+      });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/approval/feedback") {
+      const body = await jsonBody(request);
+      const allowedKeys = new Set([
+        "chatId",
+        "topicId",
+        "replyToMessageId",
+        "messageId",
+        "userId",
+        "text",
+      ]);
+      if (Object.keys(body).some((key) => !allowedKeys.has(key))) {
+        throw new RunnerHttpError(400, "approval feedback contains unsupported fields");
+      }
+      json(response, 200, {
+        approval: this.approvals.recordFeedback({
+          chatId: body.chatId,
+          topicId: body.topicId,
+          replyToMessageId: body.replyToMessageId,
+          messageId: body.messageId,
+          userId: body.userId,
+          text: body.text,
+        }),
       });
       return;
     }
@@ -1308,6 +1377,7 @@ export class ProjectRunnerServer {
             jobId: job.id,
             projectDataPath: project.dataPath,
             artifactDirectory,
+            delivery: this.approvalDelivery(job),
           });
           if (approval) job.approvalRequired = true;
         }
@@ -1340,6 +1410,33 @@ export class ProjectRunnerServer {
 
   private image(job: RunnerJob): string {
     return `summing/${job.projectId}-${job.workspaceId}:${job.revision}`;
+  }
+
+  private approvalDelivery(job: RunnerJob): RunnerApprovalDelivery | null {
+    const snapshotPath = resolve(this.jobDirectory(job.projectId, job.id), "environment.json");
+    if (!existsSync(snapshotPath)) return null;
+    const environment = this.environments.readJobSnapshot(
+      job.projectId,
+      job.workspaceId,
+      job.id,
+      snapshotPath,
+    ).values;
+    const reportChatId = environment.get("REPORT_CHAT_ID")?.trim() ?? "";
+    const reportTopicId = environment.get("REPORT_THREAD_ID")?.trim() ?? "";
+    const approvalChatId = environment.get("APPROVAL_CHAT_ID")?.trim() ?? "";
+    const approvalTopicId = environment.get("APPROVAL_THREAD_ID")?.trim() ?? "";
+    const chatId = reportChatId || approvalChatId;
+    const topicId = reportChatId ? reportTopicId : approvalTopicId;
+    const users = environment.get("APPROVER_USER_IDS")?.trim() ?? "";
+    if (!chatId && !topicId && !users) return null;
+    if (!chatId || !topicId || !users) {
+      throw new RunnerApprovalError(
+        409,
+        "approval delivery requires chat, topic and APPROVER_USER_IDS in one environment snapshot",
+      );
+    }
+    const authorizedUserIds = users.split(",").map((value) => Number(value.trim()));
+    return { chatId: Number(chatId), topicId: Number(topicId), authorizedUserIds };
   }
 
   private async ensureImage(
@@ -1429,6 +1526,8 @@ export class ProjectRunnerServer {
           "--env", "SUMMING_APPROVAL_BRIDGE=true",
           "--env", "SUMMING_PROJECT_DATA_PATH=/app/data",
         );
+      }
+      if (job.action === "dry-run" || job.action === "run") {
         const approvalEventPath = this.approvals.eventPath(job.projectId, job.workspaceId);
         if (approvalEventPath) {
           args.push(

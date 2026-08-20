@@ -168,7 +168,14 @@ exit 0
     const saved = await client.saveEnvironment(
       "demo",
       "repo",
-      "LOG_LEVEL=info\nAPI_TOKEN=rotated-runtime-secret-987654321\n",
+      [
+        "LOG_LEVEL=info",
+        "API_TOKEN=rotated-runtime-secret-987654321",
+        "REPORT_CHAT_ID=-1001674344837",
+        "REPORT_THREAD_ID=67800",
+        "APPROVER_USER_IDS=50971701,7460594016",
+        "",
+      ].join("\n"),
       1,
     );
     assert.equal(saved.revision, 2);
@@ -218,17 +225,29 @@ exit 0
     const approval = await client.approval("demo", "repo", dryRun.id);
     assert.equal(approval.planId, dryRun.id);
     assert.equal(approval.status, "pending");
+    assert.equal(approval.chatId, -1001674344837);
+    assert.equal(approval.topicId, 67800);
+    assert.deepEqual(approval.authorizedUserIds, [50971701, 7460594016]);
+    await assert.rejects(
+      client.bindApproval(approval.callbackToken, {
+        chatId: -10042,
+        topicId: 17,
+        messageId: 245,
+        authorizedUserIds: [42],
+      }),
+      /configured project route/,
+    );
     await client.bindApproval(approval.callbackToken, {
-      chatId: -10042,
-      topicId: 17,
+      chatId: -1001674344837,
+      topicId: 67800,
       messageId: 245,
-      authorizedUserId: 42,
+      authorizedUserIds: [50971701, 7460594016],
     });
     const decided = await client.decideApproval(approval.callbackToken, "approved", {
-      chatId: -10042,
-      topicId: 17,
+      chatId: -1001674344837,
+      topicId: 67800,
       messageId: 245,
-      userId: 42,
+      userId: 7460594016,
     });
     assert.equal(decided.status, "approved");
     assert.equal(
@@ -241,7 +260,7 @@ exit 0
       JSON.parse(
         readFileSync(join(dataRoot, "approval-events", "delivery", "demo--repo.json"), "utf8"),
       ).approvedBy,
-      42,
+      7460594016,
     );
     await assert.rejects(
       client.deleteArtifact("demo", "another-workspace", dryRun.id, "manifest.json"),

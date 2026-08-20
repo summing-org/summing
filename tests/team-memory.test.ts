@@ -144,6 +144,7 @@ test("validates one episode shared by memory and intervention", () => {
   assert.equal(parsed?.knowledge[1]?.visibilityRef, "source-1");
   assert.equal(parsed?.intervention.replyToEventId, 7);
   assert.equal(TEAM_UNDERSTANDING_OUTPUT_SCHEMA.additionalProperties, false);
+  assert.equal(JSON.stringify(TEAM_UNDERSTANDING_OUTPUT_SCHEMA).includes("uniqueItems"), false);
 
   assert.equal(
     parseTeamUnderstandingResponse(JSON.stringify({

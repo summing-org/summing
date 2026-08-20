@@ -46,7 +46,6 @@ export const TEAM_UNDERSTANDING_OUTPUT_SCHEMA: Record<string, unknown> = {
         event_ids: {
           type: "array",
           minItems: 1,
-          uniqueItems: true,
           items: { type: "integer" },
         },
         participants: {
@@ -66,7 +65,6 @@ export const TEAM_UNDERSTANDING_OUTPUT_SCHEMA: Record<string, unknown> = {
               evidence_event_ids: {
                 type: "array",
                 minItems: 1,
-                uniqueItems: true,
                 items: { type: "integer" },
               },
             },
@@ -108,12 +106,10 @@ export const TEAM_UNDERSTANDING_OUTPUT_SCHEMA: Record<string, unknown> = {
           evidence_event_ids: {
             type: "array",
             minItems: 1,
-            uniqueItems: true,
             items: { type: "integer" },
           },
           supersedes_knowledge_ids: {
             type: "array",
-            uniqueItems: true,
             items: { type: "integer" },
           },
           valid_from: nullableNumberSchema,

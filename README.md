@@ -108,9 +108,12 @@ Team Space: создаётся при подключении командног�
   произвольные MCP/marketplaces, local models и автономная Evolution отсутствуют.
 - project dry-run может передать `approval-request.json` постоянному approval
   bridge. SUMMING отправляет HTML-отчёт своим Telegram-ботом с кнопками
-  **Одобрить / Отклонить**, проверяет callback по Project/Workspace,
-  conversation, сообщению и numeric user ID, а затем сохраняет отдельное
-  immutable approval event. Первый последующий live-run только переносит это
+  **Одобрить / Нужны правки / Отклонить** в настроенный project-топик, проверяет
+  callback по Project/Workspace, `chat_id`, `message_thread_id`, сообщению и
+  allowlist numeric user ID, а затем сохраняет отдельное immutable approval
+  event. Свободный комментарий принимается только как reply к связанному отчёту
+  или ForceReply-запросу и сохраняется как `changes_requested`; следующий
+  dry-run получает его read-only. Для одобрения первый live-run только переносит
   событие в project state; публикация разрешается лишь вторым live-run.
 
 ## Требования

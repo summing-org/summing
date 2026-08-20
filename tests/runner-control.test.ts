@@ -7,6 +7,7 @@ import test from "node:test";
 import type { ProjectCatalog } from "../src/project-catalog.js";
 import type {
   ProjectRunnerClient,
+  RunnerApproval,
   RunnerJob,
   RunnerSubmissionMetadata,
 } from "../src/project-runner-client.js";
@@ -337,6 +338,37 @@ test("a completed manual dry-run routes its approval request to the originating 
       authorizedUserId: 42,
     }]);
     assert.deepEqual(genericNotifications, []);
+    const forwarded = await control.notifyApprovalFeedback({
+      projectId: "demo",
+      workspaceId: "repo",
+      jobId: job.id,
+      planId: "plan-1",
+      digest: "a".repeat(64),
+      reportArtifact: "report.html",
+      message: "План готов.",
+      callbackToken: "a".repeat(24),
+      status: "changes_requested",
+      chatId: -10042,
+      topicId: 17,
+      messageId: 245,
+      authorizedUserId: 7460594016,
+      authorizedUserIds: [7460594016],
+      decidedBy: null,
+      decidedAt: null,
+      feedbackRequestedBy: 7460594016,
+      feedbackRequestedAt: "2026-08-20T07:34:00.000Z",
+      feedbackPromptMessageId: 246,
+      feedbackMessageId: 247,
+      feedbackText: "Сделать контент легче и убрать отраслевую аналитику.",
+      feedbackBy: 7460594016,
+      feedbackAt: "2026-08-20T07:35:04.000Z",
+      createdAt: "2026-08-20T07:20:00.000Z",
+      updatedAt: "2026-08-20T07:35:04.000Z",
+    } satisfies RunnerApproval);
+    assert.equal(forwarded, true);
+    assert.equal(genericNotifications.length, 1);
+    assert.match(genericNotifications[0]!, /заказчик 7460594016/i);
+    assert.match(genericNotifications[0]!, /changes_requested/);
   } finally {
     control.close();
     rmSync(root, { recursive: true, force: true });

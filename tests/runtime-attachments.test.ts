@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { ProjectConfig, RuntimeConfig, type WorkspaceConfig } from "../src/config.js";
+import type { RunnerApproval } from "../src/project-runner-client.js";
 import { SummingRuntime } from "../src/runtime.js";
 import type { TelegramObject } from "../src/telegram-api.js";
 
@@ -232,6 +233,109 @@ test("a direct reply reuses the stored voice transcript without downloading audi
     assert.doesNotMatch(replyInput.text, /Чужой Source/);
     assert.equal(downloadCalls, 1);
     assert.equal(transcriptionCalls, 1);
+  } finally {
+    runtime.state.close();
+    await runtime.telegram.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a reply to the approval prompt is recorded without intercepting ordinary bot replies", async () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-runtime-approval-feedback-"));
+  const repository = join(root, "repository");
+  mkdirSync(repository);
+  const workspace: WorkspaceConfig = { id: "repo", path: repository };
+  const project = new ProjectConfig(
+    "demo",
+    "Demo",
+    "repo",
+    new Map([["repo", workspace]]),
+  );
+  const runtime = new SummingRuntime(new RuntimeConfig(
+    join(root, "data"),
+    join(root, "codex"),
+    join(root, "worktrees"),
+    "telegram-token",
+    1,
+    "codex",
+    8765,
+    2,
+    1,
+    "",
+    "medium",
+    true,
+    new Map([["demo", project]]),
+  ));
+  const approval: RunnerApproval = {
+    projectId: "demo",
+    workspaceId: "repo",
+    jobId: "job-1",
+    planId: "plan-1",
+    digest: "a".repeat(64),
+    reportArtifact: "report.html",
+    message: "План plan-1 готов к согласованию.",
+    callbackToken: "a".repeat(24),
+    status: "changes_requested",
+    chatId: -100,
+    topicId: 5,
+    messageId: 78032,
+    authorizedUserId: 7460594016,
+    authorizedUserIds: [7460594016],
+    decidedBy: null,
+    decidedAt: null,
+    feedbackRequestedBy: 7460594016,
+    feedbackRequestedAt: "2026-08-20T07:34:00.000Z",
+    feedbackPromptMessageId: 78060,
+    feedbackMessageId: 78061,
+    feedbackText: "Нужен лёгкий контент.",
+    feedbackBy: 7460594016,
+    feedbackAt: "2026-08-20T07:35:04.000Z",
+    createdAt: "2026-08-20T06:22:00.000Z",
+    updatedAt: "2026-08-20T07:35:04.000Z",
+  };
+  let recorded: Record<string, unknown> | null = null;
+  let editedMessageId = 0;
+  const replies: string[] = [];
+  runtime.viewer.runner.recordApprovalFeedback = async (input) => {
+    recorded = input;
+    return approval;
+  };
+  runtime.runnerControl.notifyApprovalFeedback = async () => true;
+  runtime.telegram.editMessageCaption = async (_chatId, messageId) => {
+    editedMessageId = messageId;
+  };
+  runtime.telegram.sendMessage = async (_chatId, text) => {
+    replies.push(text);
+    return 78062;
+  };
+  const handleMessage = (
+    runtime as unknown as { handleMessage(message: TelegramObject): Promise<void> }
+  ).handleMessage.bind(runtime);
+
+  try {
+    await handleMessage({
+      message_id: 78061,
+      message_thread_id: 5,
+      text: "Нужен лёгкий контент.",
+      from: { id: 7460594016, first_name: "Customer" },
+      chat: { id: -100, type: "supergroup", title: "Customer topic" },
+      reply_to_message: {
+        message_id: 78060,
+        from: { id: 123, is_bot: true, username: "hash0_bot" },
+        text: "Опишите одним сообщением, что нужно изменить в плане plan-1.",
+      },
+    });
+
+    assert.deepEqual(recorded, {
+      chatId: -100,
+      topicId: 5,
+      replyToMessageId: 78060,
+      messageId: 78061,
+      userId: 7460594016,
+      text: "Нужен лёгкий контент.",
+    });
+    assert.equal(editedMessageId, 78032);
+    assert.match(replies[0] ?? "", /сохранены и переданы в Project/);
   } finally {
     runtime.state.close();
     await runtime.telegram.close();
