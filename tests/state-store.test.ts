@@ -90,6 +90,49 @@ test("binding, input queues, and Telegram offset", () => {
   }
 });
 
+test("external read-only bindings expose their durable topic history to the Project", () => {
+  const { root, store } = tempStore();
+  try {
+    const conversation = store.bind(
+      -100500,
+      9,
+      "ash-telegrams",
+      "repo",
+      "external-readonly",
+    );
+    assert.equal(conversation.bindingMode, "external-readonly");
+    const event = store.recordTeamEvent({
+      provider: "telegram",
+      externalSpaceId: "-100500",
+      externalThreadId: "9",
+      spaceName: "Customer group",
+      sourceTitle: "Customer topic",
+      externalEventId: "78061",
+      eventKind: "message",
+      senderExternalId: "123456789",
+      senderDisplayName: "Customer",
+      text: "Нужен лёгкий контент без отраслевой аналитики.",
+      replyToExternalEventId: "78032",
+      occurredAt: 1_776_000_000,
+      administratorUserId: 1,
+    });
+    assert.ok(event);
+    assert.equal(store.externalProjectSources("ash-telegrams")[0]?.id, event.sourceId);
+    assert.deepEqual(
+      store.externalProjectEvents({ projectId: "ash-telegrams", query: "аналитики" })
+        .map((item) => [item.externalEventId, item.replyToExternalEventId, item.text]),
+      [["78061", "78032", "Нужен лёгкий контент без отраслевой аналитики."]],
+    );
+
+    const rebound = store.bind(-100500, 9, "ash-telegrams", "repo");
+    assert.equal(rebound.bindingMode, "project");
+    assert.deepEqual(store.externalProjectSources("ash-telegrams"), []);
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("persists the model-egress switch and rolls usage into the active weekly window", () => {
   const { root, path, store } = tempStore();
   try {

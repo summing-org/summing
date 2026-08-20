@@ -75,6 +75,10 @@ export function helpMessage(isAdministrator: boolean): string {
         "/bind_topic <chat_id> <topic_id> <project> [workspace]",
         "привязать топик из личного чата",
       ),
+      command(
+        "/bind_external_topic <chat_id> <topic_id> <project> [workspace]",
+        "привязать постоянный внешний read-only портал проекта",
+      ),
       example("/bind_topic -1001234567890 42 summing repo"),
       command("/project_create <project> <primary_owner_id> <repo>", "создать локальный Git-проект"),
       example("/project_create shop 123456789 backend"),

@@ -128,44 +128,6 @@ test("editMessage forwards Telegram HTML parse mode", async () => {
   }
 });
 
-test("approval callback helpers edit the report caption and answer Telegram", async () => {
-  const api = new TelegramAPI("token");
-  const calls: Array<{ method: string; payload: Record<string, unknown> }> = [];
-  api.call = async (method, payload) => {
-    calls.push({ method, payload });
-    return true;
-  };
-  try {
-    await api.editMessageCaption(-10042, 19, "План готов", {
-      inline_keyboard: [[{ text: "✅ Одобрить", callback_data: "sma:token:approved" }]],
-    });
-    await api.answerCallbackQuery("callback-1", "План одобрен");
-    assert.deepEqual(calls, [
-      {
-        method: "editMessageCaption",
-        payload: {
-          chat_id: -10042,
-          message_id: 19,
-          caption: "План готов",
-          reply_markup: {
-            inline_keyboard: [[{ text: "✅ Одобрить", callback_data: "sma:token:approved" }]],
-          },
-        },
-      },
-      {
-        method: "answerCallbackQuery",
-        payload: {
-          callback_query_id: "callback-1",
-          text: "План одобрен",
-          show_alert: false,
-        },
-      },
-    ]);
-  } finally {
-    await api.close();
-  }
-});
-
 test("sendChatAction targets the active Telegram topic", async () => {
   const api = new TelegramAPI("token");
   let payload: Record<string, unknown> = {};

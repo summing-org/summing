@@ -252,39 +252,6 @@ export class TelegramAPI {
     }
   }
 
-  async editMessageCaption(
-    chatId: number,
-    messageId: number,
-    caption: string,
-    replyMarkup?: TelegramObject,
-  ): Promise<void> {
-    const payload: TelegramObject = {
-      chat_id: chatId,
-      message_id: messageId,
-      caption: caption.slice(0, 1_024) || "…",
-    };
-    if (replyMarkup) payload.reply_markup = replyMarkup;
-    try {
-      await this.call("editMessageCaption", payload);
-    } catch (error) {
-      if (!(error instanceof TelegramError) || !error.message.toLowerCase().includes("message is not modified")) {
-        throw error;
-      }
-    }
-  }
-
-  async answerCallbackQuery(
-    callbackQueryId: string,
-    text: string,
-    showAlert = false,
-  ): Promise<void> {
-    if (!callbackQueryId) throw new TelegramError("callback query id is required");
-    await this.call("answerCallbackQuery", {
-      callback_query_id: callbackQueryId,
-      text: text.slice(0, 200),
-      show_alert: showAlert,
-    });
-  }
 }
 
 export function splitMessage(text: string, limit = 3_900): string[] {

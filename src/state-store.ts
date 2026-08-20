@@ -10,6 +10,7 @@ export interface Conversation {
   topicId: number;
   projectId: string;
   workspaceId: string;
+  bindingMode: ConversationBindingMode;
   codexThreadId: string | null;
   codexThreadCapability: string;
   previousCodexThreadId: string | null;
@@ -19,6 +20,7 @@ export interface Conversation {
   worktreePath: string | null;
 }
 
+export type ConversationBindingMode = "project" | "external-readonly";
 export type RunAccess = "write" | "read-only";
 export type ResponseMode = "direct" | "ambient";
 
@@ -651,6 +653,8 @@ export class StateStore {
           topic_id INTEGER NOT NULL,
           project_id TEXT NOT NULL,
           workspace_id TEXT NOT NULL,
+          binding_mode TEXT NOT NULL DEFAULT 'project'
+            CHECK(binding_mode IN ('project', 'external-readonly')),
           codex_thread_id TEXT,
           codex_thread_capability TEXT NOT NULL DEFAULT '',
           previous_codex_thread_id TEXT,
@@ -980,6 +984,12 @@ export class StateStore {
       }
       if (!conversationColumns.some((column) => column.name === "previous_codex_thread_id")) {
         this.db.exec("ALTER TABLE conversations ADD COLUMN previous_codex_thread_id TEXT");
+      }
+      if (!conversationColumns.some((column) => column.name === "binding_mode")) {
+        this.db.exec(
+          "ALTER TABLE conversations ADD COLUMN binding_mode TEXT NOT NULL DEFAULT 'project' " +
+            "CHECK(binding_mode IN ('project', 'external-readonly'))",
+        );
       }
       const pendingColumns = this.db.prepare("PRAGMA table_info(pending_inputs)").all() as Row[];
       if (!pendingColumns.some((column) => column.name === "access_mode")) {
@@ -2276,6 +2286,61 @@ export class StateStore {
     });
   }
 
+  externalProjectSources(projectId: string): TeamSource[] {
+    return (this.db.prepare(`
+      SELECT DISTINCT source.*
+      FROM conversations conversation
+      JOIN team_sources source
+        ON source.provider = 'telegram'
+       AND source.external_space_id = CAST(conversation.chat_id AS TEXT)
+       AND source.external_thread_id = CAST(conversation.topic_id AS TEXT)
+      WHERE conversation.project_id = ?
+        AND conversation.binding_mode = 'external-readonly'
+      ORDER BY source.updated_at DESC, source.id
+    `).all(projectId) as Row[]).map((row) => this.toTeamSource(row));
+  }
+
+  externalProjectEvents(input: {
+    projectId: string;
+    sourceId?: string;
+    query?: string;
+    beforeEventId?: number;
+    limit?: number;
+  }): TeamEvent[] {
+    const limit = Math.max(1, Math.min(50, Math.trunc(input.limit ?? 20)));
+    const query = String(input.query ?? "").trim().toLowerCase();
+    const sourceId = String(input.sourceId ?? "").trim();
+    const beforeEventId = Number.isSafeInteger(input.beforeEventId) && Number(input.beforeEventId) > 0
+      ? Number(input.beforeEventId)
+      : Number.MAX_SAFE_INTEGER;
+    const rows = this.db.prepare(`
+      SELECT DISTINCT event.*
+      FROM conversations conversation
+      JOIN team_sources source
+        ON source.provider = 'telegram'
+       AND source.external_space_id = CAST(conversation.chat_id AS TEXT)
+       AND source.external_thread_id = CAST(conversation.topic_id AS TEXT)
+      JOIN team_events event ON event.source_id = source.id
+      WHERE conversation.project_id = ?
+        AND conversation.binding_mode = 'external-readonly'
+        AND event.synthesis_state <> 'redacted'
+        AND event.id < ?
+        AND (? = '' OR source.id = ?)
+        AND (? = '' OR instr(lower(event.text), ?) > 0)
+      ORDER BY event.occurred_at DESC, event.id DESC
+      LIMIT ?
+    `).all(
+      input.projectId,
+      beforeEventId,
+      sourceId,
+      sourceId,
+      query,
+      query,
+      limit,
+    ) as Row[];
+    return rows.map((row) => this.toTeamEvent(row));
+  }
+
   markTeamSpaceAnnounced(spaceId: string, announcedAt = Date.now() / 1_000): void {
     this.transaction(() => {
       this.db.prepare(`
@@ -2602,23 +2667,34 @@ export class StateStore {
     return `tg-${digest}`;
   }
 
-  bind(chatId: number, topicId: number, projectId: string, workspaceId: string): Conversation {
+  bind(
+    chatId: number,
+    topicId: number,
+    projectId: string,
+    workspaceId: string,
+    bindingMode: ConversationBindingMode = "project",
+  ): Conversation {
     const now = Date.now() / 1000;
     const conversationId = StateStore.conversationId(chatId, topicId);
     this.transaction(() => {
       const old = this.db
-        .prepare("SELECT project_id, workspace_id FROM conversations WHERE id = ?")
+        .prepare("SELECT project_id, workspace_id, binding_mode FROM conversations WHERE id = ?")
         .get(conversationId) as Row | undefined;
       const changed = Boolean(
-        old && (old.project_id !== projectId || old.workspace_id !== workspaceId),
+        old && (
+          old.project_id !== projectId ||
+          old.workspace_id !== workspaceId ||
+          String(old.binding_mode ?? "project") !== bindingMode
+        ),
       );
       this.db.prepare(`
         INSERT INTO conversations
-          (id, chat_id, topic_id, project_id, workspace_id, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+          (id, chat_id, topic_id, project_id, workspace_id, binding_mode, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           project_id = excluded.project_id,
           workspace_id = excluded.workspace_id,
+          binding_mode = excluded.binding_mode,
           codex_thread_id = CASE WHEN ? THEN NULL ELSE codex_thread_id END,
           codex_thread_capability = CASE WHEN ? THEN '' ELSE codex_thread_capability END,
           previous_codex_thread_id = CASE WHEN ? THEN NULL ELSE previous_codex_thread_id END,
@@ -2633,6 +2709,7 @@ export class StateStore {
         topicId,
         projectId,
         workspaceId,
+        bindingMode,
         now,
         now,
         changed ? 1 : 0,
@@ -2686,6 +2763,7 @@ export class StateStore {
       topicId: Number(row.topic_id),
       projectId: String(row.project_id),
       workspaceId: String(row.workspace_id),
+      bindingMode: String(row.binding_mode ?? "project") as ConversationBindingMode,
       codexThreadId: row.codex_thread_id === null ? null : String(row.codex_thread_id),
       codexThreadCapability: String(row.codex_thread_capability ?? ""),
       previousCodexThreadId:

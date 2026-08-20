@@ -41,41 +41,20 @@ export interface RunnerJob {
   exitCode?: number;
   error?: string;
   artifactCount?: number;
-  approvalRequired?: boolean;
+  reportAvailable?: boolean;
   environmentRevision?: number;
 }
 
-export type RunnerApprovalDecision = "approved" | "rejected";
-export type RunnerApprovalStatus =
-  | "pending"
-  | "awaiting_feedback"
-  | "changes_requested"
-  | RunnerApprovalDecision;
-
-export interface RunnerApproval {
+export interface RunnerReport {
   projectId: string;
   workspaceId: string;
   jobId: string;
-  planId: string;
-  digest: string;
+  reportId: string;
   reportArtifact: "report.html";
   message: string;
-  callbackToken: string;
-  status: RunnerApprovalStatus;
-  chatId: number | null;
-  topicId: number | null;
+  chatId: number;
+  topicId: number;
   messageId: number | null;
-  authorizedUserId: number | null;
-  authorizedUserIds: number[];
-  decidedBy: number | null;
-  decidedAt: string | null;
-  feedbackRequestedBy: number | null;
-  feedbackRequestedAt: string | null;
-  feedbackPromptMessageId: number | null;
-  feedbackMessageId: number | null;
-  feedbackText: string | null;
-  feedbackBy: number | null;
-  feedbackAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -273,90 +252,28 @@ export class ProjectRunnerClient {
     return result.artifact;
   }
 
-  async approval(projectId: string, workspaceId: string, jobId: string): Promise<RunnerApproval> {
+  async report(projectId: string, workspaceId: string, jobId: string): Promise<RunnerReport> {
     const query = new URLSearchParams({ project: projectId, workspace: workspaceId, job: jobId });
-    const result = await this.call<{ approval: RunnerApproval }>(
+    const result = await this.call<{ report: RunnerReport }>(
       "GET",
-      `/approval?${query.toString()}`,
+      `/report?${query.toString()}`,
     );
-    return result.approval;
+    return result.report;
   }
 
-  async bindApproval(
-    callbackToken: string,
-    input: { chatId: number; topicId: number; messageId: number; authorizedUserIds: number[] },
-  ): Promise<RunnerApproval> {
-    const body = Buffer.from(JSON.stringify({ callbackToken, ...input }), "utf8");
-    const result = await this.call<{ approval: RunnerApproval }>(
-      "POST",
-      "/approval/message",
-      body,
-    );
-    return result.approval;
-  }
-
-  async decideApproval(
-    callbackToken: string,
-    decision: RunnerApprovalDecision,
-    input: { chatId: number; topicId: number; messageId: number; userId: number },
-  ): Promise<RunnerApproval> {
-    const body = Buffer.from(JSON.stringify({ callbackToken, decision, ...input }), "utf8");
-    const result = await this.call<{ approval: RunnerApproval }>(
-      "POST",
-      "/approval/decision",
-      body,
-    );
-    return result.approval;
-  }
-
-  async requestApprovalFeedback(
-    callbackToken: string,
-    input: { chatId: number; topicId: number; messageId: number; userId: number },
-  ): Promise<RunnerApproval> {
-    const body = Buffer.from(JSON.stringify({ callbackToken, ...input }), "utf8");
-    const result = await this.call<{ approval: RunnerApproval }>(
-      "POST",
-      "/approval/feedback/request",
-      body,
-    );
-    return result.approval;
-  }
-
-  async bindApprovalFeedbackPrompt(
-    callbackToken: string,
-    input: {
-      chatId: number;
-      topicId: number;
-      messageId: number;
-      userId: number;
-      promptMessageId: number;
-    },
-  ): Promise<RunnerApproval> {
-    const body = Buffer.from(JSON.stringify({ callbackToken, ...input }), "utf8");
-    const result = await this.call<{ approval: RunnerApproval }>(
-      "POST",
-      "/approval/feedback/prompt",
-      body,
-    );
-    return result.approval;
-  }
-
-  async recordApprovalFeedback(input: {
+  async bindReportMessage(input: {
+    projectId: string;
+    workspaceId: string;
+    jobId: string;
     chatId: number;
     topicId: number;
-    replyToMessageId: number;
     messageId: number;
-    userId: number;
-    text: string;
-  }): Promise<RunnerApproval | null> {
+  }): Promise<RunnerReport> {
     const body = Buffer.from(JSON.stringify(input), "utf8");
-    const result = await this.call<{ approval: RunnerApproval | null }>(
-      "POST",
-      "/approval/feedback",
-      body,
-    );
-    return result.approval;
+    const result = await this.call<{ report: RunnerReport }>("POST", "/report/message", body);
+    return result.report;
   }
+
 
   async deleteArtifact(
     projectId: string,

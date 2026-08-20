@@ -6,7 +6,6 @@ import { GitInspector } from "./git-inspector.js";
 import { ProjectCatalog } from "./project-catalog.js";
 import {
   ProjectRunnerClient,
-  type RunnerApproval,
   type RunnerAction,
   type RunnerArtifact,
   type RunnerArtifactDeletion,
@@ -854,7 +853,7 @@ export class RunnerControlPlane {
     ) => Promise<void> = async () => {},
     readonly now: () => number = Date.now,
     readonly intervalMilliseconds = 15_000,
-    readonly notifyApproval: (
+    readonly notifyReport: (
       job: RunnerJob,
       conversationId: string,
       authorizedUserId: number,
@@ -953,36 +952,6 @@ export class RunnerControlPlane {
         })),
       capabilities: ["build", "validate", "dry-run", "run"],
     };
-  }
-
-  async notifyApprovalFeedback(approval: RunnerApproval): Promise<boolean> {
-    const watch = this.store.jobWatch(approval.jobId);
-    if (
-      !watch ||
-      watch.projectId !== approval.projectId ||
-      watch.workspaceId !== approval.workspaceId ||
-      watch.action !== "dry-run" ||
-      approval.status !== "changes_requested" ||
-      !approval.feedbackText ||
-      approval.feedbackBy === null
-    ) return false;
-    const preview = Array.from(approval.feedbackText);
-    const feedback = preview.length > 3_000
-      ? `${preview.slice(0, 2_999).join("")}…`
-      : approval.feedbackText;
-    await this.notify(
-      approval.projectId,
-      [
-        `Заказчик ${approval.feedbackBy} запросил правки к плану ${approval.planId}.`,
-        `Digest: ${approval.digest}`,
-        "",
-        feedback,
-        "",
-        "Правки сохранены как changes_requested; следующий dry-run получит их read-only.",
-      ].join("\n"),
-      watch.conversationId,
-    );
-    return true;
   }
 
   async startJob(
@@ -1435,9 +1404,9 @@ export class RunnerControlPlane {
           if (
             job.status === "completed" &&
             job.action === "dry-run" &&
-            job.approvalRequired &&
+            job.reportAvailable &&
             watch.actorUserId > 0 &&
-            await this.notifyApproval(job, watch.conversationId, watch.actorUserId)
+            await this.notifyReport(job, watch.conversationId, watch.actorUserId)
           ) {
             this.store.markJobWatchNotified(job.id, this.now());
             continue;

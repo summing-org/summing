@@ -43,10 +43,10 @@ import type {
   RunnerProjectRegistration,
 } from "./project-runner-client.js";
 import {
-  RunnerApprovalError,
-  RunnerApprovalStore,
-  type RunnerApprovalDelivery,
-} from "./runner-approval.js";
+  RunnerReportError,
+  RunnerReportStore,
+  type RunnerReportDelivery,
+} from "./runner-report.js";
 
 const PROJECT_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const WORKSPACE_ID = PROJECT_ID;
@@ -68,7 +68,7 @@ const ARTIFACTS = new Map([
   ["editorial-plan.json", "application/json"],
   ["errors.json", "application/json"],
   ["report.html", "text/html"],
-  ["approval-request.json", "application/json"],
+  ["report-request.json", "application/json"],
 ]);
 
 type RunnerProjectConfigSource =
@@ -261,7 +261,7 @@ export class ProjectRunnerServer {
   private processing = false;
   private activeJob: { job: RunnerJob; controller: AbortController } | null = null;
   private readonly environments: ProjectEnvironmentStore;
-  private readonly approvals: RunnerApprovalStore;
+  private readonly reports: RunnerReportStore;
   private readonly runtimeEnvironmentRoot: string;
   private ready: boolean;
   private readonly migrationTargets: ReadonlyMap<string, LegacyEnvironmentMigrationTarget>;
@@ -290,7 +290,7 @@ export class ProjectRunnerServer {
     }
     mkdirSync(this.managedConfigRoot(), { recursive: true, mode: 0o700 });
     this.environments = new ProjectEnvironmentStore(resolve(dataRoot, "environments"), environmentKey);
-    this.approvals = new RunnerApprovalStore(dataRoot);
+    this.reports = new RunnerReportStore(dataRoot);
     this.ready = initiallyReady;
     this.migrationTargets = new Map(
       migrationTargets.map((target) => [this.migrationKey(target.projectId, target.workspaceId), target]),
@@ -571,134 +571,44 @@ export class ProjectRunnerServer {
       json(response, 200, { artifacts: this.listArtifacts(jobId, project) });
       return;
     }
-    if (request.method === "GET" && url.pathname === "/approval") {
+    if (request.method === "GET" && url.pathname === "/report") {
       const projectId = url.searchParams.get("project") ?? "";
       const workspaceId = url.searchParams.get("workspace") ?? "";
       const jobId = url.searchParams.get("job") ?? "";
       if (!PROJECT_ID.test(projectId) || !WORKSPACE_ID.test(workspaceId) || !JOB_ID.test(jobId)) {
-        throw new RunnerHttpError(400, "invalid approval scope");
+        throw new RunnerHttpError(400, "invalid report scope");
       }
       this.projectConfig(projectId, workspaceId);
       const job = this.storedJob(projectId, jobId);
       if (job.workspaceId !== workspaceId || job.action !== "dry-run") {
-        throw new RunnerHttpError(404, "approval request was not found for this job");
+        throw new RunnerHttpError(404, "report request was not found for this job");
       }
-      const approval = this.approvals.byJob(projectId, workspaceId, jobId);
-      if (!approval) throw new RunnerHttpError(404, "approval request was not found for this job");
-      json(response, 200, { approval });
+      const report = this.reports.byJob(projectId, workspaceId, jobId);
+      if (!report) throw new RunnerHttpError(404, "report request was not found for this job");
+      json(response, 200, { report });
       return;
     }
-    if (request.method === "POST" && url.pathname === "/approval/message") {
+    if (request.method === "POST" && url.pathname === "/report/message") {
       const body = await jsonBody(request);
       const allowedKeys = new Set([
-        "callbackToken",
+        "projectId",
+        "workspaceId",
+        "jobId",
         "chatId",
         "topicId",
         "messageId",
-        "authorizedUserIds",
       ]);
       if (Object.keys(body).some((key) => !allowedKeys.has(key))) {
-        throw new RunnerHttpError(400, "approval message binding contains unsupported fields");
+        throw new RunnerHttpError(400, "report message binding contains unsupported fields");
       }
       json(response, 200, {
-        approval: this.approvals.bind(String(body.callbackToken ?? ""), {
-          chatId: body.chatId,
-          topicId: body.topicId,
-          messageId: body.messageId,
-          authorizedUserIds: body.authorizedUserIds,
-        }),
-      });
-      return;
-    }
-    if (request.method === "POST" && url.pathname === "/approval/decision") {
-      const body = await jsonBody(request);
-      const allowedKeys = new Set([
-        "callbackToken",
-        "decision",
-        "chatId",
-        "topicId",
-        "messageId",
-        "userId",
-      ]);
-      if (Object.keys(body).some((key) => !allowedKeys.has(key))) {
-        throw new RunnerHttpError(400, "approval decision contains unsupported fields");
-      }
-      const decision = String(body.decision ?? "") as "approved" | "rejected";
-      json(response, 200, {
-        approval: this.approvals.decide(
-          String(body.callbackToken ?? ""),
-          decision,
-          {
-            chatId: body.chatId,
-            topicId: body.topicId,
-            messageId: body.messageId,
-            userId: body.userId,
-          },
-        ),
-      });
-      return;
-    }
-    if (request.method === "POST" && url.pathname === "/approval/feedback/request") {
-      const body = await jsonBody(request);
-      const allowedKeys = new Set(["callbackToken", "chatId", "topicId", "messageId", "userId"]);
-      if (Object.keys(body).some((key) => !allowedKeys.has(key))) {
-        throw new RunnerHttpError(400, "approval feedback request contains unsupported fields");
-      }
-      json(response, 200, {
-        approval: this.approvals.requestFeedback(String(body.callbackToken ?? ""), {
-          chatId: body.chatId,
-          topicId: body.topicId,
-          messageId: body.messageId,
-          userId: body.userId,
-        }),
-      });
-      return;
-    }
-    if (request.method === "POST" && url.pathname === "/approval/feedback/prompt") {
-      const body = await jsonBody(request);
-      const allowedKeys = new Set([
-        "callbackToken",
-        "chatId",
-        "topicId",
-        "messageId",
-        "userId",
-        "promptMessageId",
-      ]);
-      if (Object.keys(body).some((key) => !allowedKeys.has(key))) {
-        throw new RunnerHttpError(400, "approval feedback prompt contains unsupported fields");
-      }
-      json(response, 200, {
-        approval: this.approvals.bindFeedbackPrompt(String(body.callbackToken ?? ""), {
-          chatId: body.chatId,
-          topicId: body.topicId,
-          messageId: body.messageId,
-          userId: body.userId,
-          promptMessageId: body.promptMessageId,
-        }),
-      });
-      return;
-    }
-    if (request.method === "POST" && url.pathname === "/approval/feedback") {
-      const body = await jsonBody(request);
-      const allowedKeys = new Set([
-        "chatId",
-        "topicId",
-        "replyToMessageId",
-        "messageId",
-        "userId",
-        "text",
-      ]);
-      if (Object.keys(body).some((key) => !allowedKeys.has(key))) {
-        throw new RunnerHttpError(400, "approval feedback contains unsupported fields");
-      }
-      json(response, 200, {
-        approval: this.approvals.recordFeedback({
-          chatId: body.chatId,
-          topicId: body.topicId,
-          replyToMessageId: body.replyToMessageId,
-          messageId: body.messageId,
-          userId: body.userId,
-          text: body.text,
+        report: this.reports.bindMessage({
+          projectId: String(body.projectId ?? ""),
+          workspaceId: String(body.workspaceId ?? ""),
+          jobId: String(body.jobId ?? ""),
+          chatId: Number(body.chatId),
+          topicId: Number(body.topicId),
+          messageId: Number(body.messageId),
         }),
       });
       return;
@@ -1371,15 +1281,14 @@ export class ProjectRunnerServer {
         const project = this.projectConfig(job.projectId, job.workspaceId);
         const artifactDirectory = this.safeArtifactDirectory(project, job.id);
         if (artifactDirectory) {
-          const approval = this.approvals.capture({
+          const report = this.reports.capture({
             projectId: job.projectId,
             workspaceId: job.workspaceId,
             jobId: job.id,
-            projectDataPath: project.dataPath,
             artifactDirectory,
-            delivery: this.approvalDelivery(job),
+            delivery: this.reportDelivery(job),
           });
-          if (approval) job.approvalRequired = true;
+          if (report) job.reportAvailable = true;
         }
       }
       job.status = "completed";
@@ -1412,7 +1321,7 @@ export class ProjectRunnerServer {
     return `summing/${job.projectId}-${job.workspaceId}:${job.revision}`;
   }
 
-  private approvalDelivery(job: RunnerJob): RunnerApprovalDelivery | null {
+  private reportDelivery(job: RunnerJob): RunnerReportDelivery | null {
     const snapshotPath = resolve(this.jobDirectory(job.projectId, job.id), "environment.json");
     if (!existsSync(snapshotPath)) return null;
     const environment = this.environments.readJobSnapshot(
@@ -1423,20 +1332,22 @@ export class ProjectRunnerServer {
     ).values;
     const reportChatId = environment.get("REPORT_CHAT_ID")?.trim() ?? "";
     const reportTopicId = environment.get("REPORT_THREAD_ID")?.trim() ?? "";
-    const approvalChatId = environment.get("APPROVAL_CHAT_ID")?.trim() ?? "";
-    const approvalTopicId = environment.get("APPROVAL_THREAD_ID")?.trim() ?? "";
-    const chatId = reportChatId || approvalChatId;
-    const topicId = reportChatId ? reportTopicId : approvalTopicId;
-    const users = environment.get("APPROVER_USER_IDS")?.trim() ?? "";
-    if (!chatId && !topicId && !users) return null;
-    if (!chatId || !topicId || !users) {
-      throw new RunnerApprovalError(
+    if (!reportChatId && !reportTopicId) return null;
+    if (!reportChatId || !reportTopicId) {
+      throw new RunnerReportError(
         409,
-        "approval delivery requires chat, topic and APPROVER_USER_IDS in one environment snapshot",
+        "report delivery requires REPORT_CHAT_ID and REPORT_THREAD_ID in one environment snapshot",
       );
     }
-    const authorizedUserIds = users.split(",").map((value) => Number(value.trim()));
-    return { chatId: Number(chatId), topicId: Number(topicId), authorizedUserIds };
+    const chatId = Number(reportChatId);
+    const topicId = Number(reportTopicId);
+    if (!Number.isSafeInteger(chatId) || chatId === 0) {
+      throw new RunnerReportError(409, "REPORT_CHAT_ID must be a non-zero safe integer");
+    }
+    if (!Number.isSafeInteger(topicId) || topicId < 0) {
+      throw new RunnerReportError(409, "REPORT_THREAD_ID must be a non-negative safe integer");
+    }
+    return { chatId, topicId };
   }
 
   private async ensureImage(
@@ -1513,7 +1424,7 @@ export class ProjectRunnerServer {
         args.push(
           "--env", "DRY_RUN=true",
           "--env", "PUBLISH_IMMEDIATELY=true",
-          "--env", "SUMMING_APPROVAL_BRIDGE=true",
+          "--env", "SUMMING_REPORT_BRIDGE=true",
           "--env", "SUMMING_PROJECT_DATA_PATH=/app/data",
           "--env", `SUMMING_JOB_ID=${job.id}`,
           "--env", `SUMMING_REVISION=${job.revision}`,
@@ -1523,18 +1434,8 @@ export class ProjectRunnerServer {
       if (job.action === "run") {
         args.push(
           "--env", "DRY_RUN=false",
-          "--env", "SUMMING_APPROVAL_BRIDGE=true",
           "--env", "SUMMING_PROJECT_DATA_PATH=/app/data",
         );
-      }
-      if (job.action === "dry-run" || job.action === "run") {
-        const approvalEventPath = this.approvals.eventPath(job.projectId, job.workspaceId);
-        if (approvalEventPath) {
-          args.push(
-            "--env", "SUMMING_APPROVAL_EVENT_PATH=/run/summing-approval-event.json",
-            "--volume", `${approvalEventPath}:/run/summing-approval-event.json:ro`,
-          );
-        }
       }
       args.push(this.image(job));
       if (job.action === "validate") args.push("node", "dist/src/main.js", "--validate");
@@ -1731,7 +1632,7 @@ export class ProjectRunnerServer {
       json(response, error.status, { error: error.message });
       return;
     }
-    if (error instanceof RunnerApprovalError) {
+    if (error instanceof RunnerReportError) {
       json(response, error.status, { error: error.message });
       return;
     }

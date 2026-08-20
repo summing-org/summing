@@ -106,15 +106,18 @@ Team Space: создаётся при подключении командног�
   удаление/очистка артефактов используют отдельное подтверждение в следующем
   сообщении. Автоматические commit/merge/push, force push, Claudexor, swarm,
   произвольные MCP/marketplaces, local models и автономная Evolution отсутствуют.
-- project dry-run может передать `approval-request.json` постоянному approval
-  bridge. SUMMING отправляет HTML-отчёт своим Telegram-ботом с кнопками
-  **Одобрить / Нужны правки / Отклонить** в настроенный project-топик, проверяет
-  callback по Project/Workspace, `chat_id`, `message_thread_id`, сообщению и
-  allowlist numeric user ID, а затем сохраняет отдельное immutable approval
-  event. Свободный комментарий принимается только как reply к связанному отчёту
-  или ForceReply-запросу и сохраняется как `changes_requested`; следующий
-  dry-run получает его read-only. Для одобрения первый live-run только переносит
-  событие в project state; публикация разрешается лишь вторым live-run.
+- администратор может пометить Telegram-топик как постоянный внешний read-only
+  портал Project через Mini App или `/bind_external_topic`. Все сообщения и
+  reply-связи сохраняются в обычной истории Team Space; отдельные feedback-сессии,
+  кнопки approve/reject и управляющие текстовые команды не создаются. Бот отвечает
+  только на прямое упоминание или reply, читает Project и историю портала без права
+  что-либо менять. Внутренний Project-агент получает read-only поиск с пагинацией
+  по всей доступной истории внешних порталов. Комментарий заказчика — контекст,
+  а не команда на изменение, запуск или публикацию;
+- project dry-run может передать `report-request.json` постоянному report bridge.
+  SUMMING проверяет, что `REPORT_CHAT_ID` / `REPORT_THREAD_ID` уже привязаны к тому
+  же Project/Workspace как внешний read-only портал, и отправляет HTML-отчёт своим
+  Telegram-ботом без кнопок и callback state machine.
 
 ## Требования
 

@@ -7,7 +7,6 @@ import test from "node:test";
 import type { ProjectCatalog } from "../src/project-catalog.js";
 import type {
   ProjectRunnerClient,
-  RunnerApproval,
   RunnerJob,
   RunnerSubmissionMetadata,
 } from "../src/project-runner-client.js";
@@ -286,8 +285,8 @@ test("manual tool calls deduplicate jobs, expose an overview, and notify their c
   }
 });
 
-test("a completed manual dry-run routes its approval request to the originating actor and conversation", async () => {
-  const root = mkdtempSync(join(tmpdir(), "summing-runner-approval-watch-"));
+test("a completed manual dry-run routes its report to the originating actor and conversation", async () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-runner-report-watch-"));
   const job: RunnerJob = {
     id: "b4a0bb44-d858-40ba-93b9-5e8f0c105c85",
     projectId: "demo",
@@ -295,12 +294,12 @@ test("a completed manual dry-run routes its approval request to the originating 
     action: "dry-run",
     revision: "a".repeat(40),
     status: "completed",
-    approvalRequired: true,
+    reportAvailable: true,
     createdAt: "2026-08-20T04:00:00.000Z",
     completedAt: "2026-08-20T04:01:00.000Z",
   };
   const genericNotifications: string[] = [];
-  const approvalNotifications: Array<{
+  const reportNotifications: Array<{
     jobId: string;
     conversationId: string;
     authorizedUserId: number;
@@ -318,57 +317,26 @@ test("a completed manual dry-run routes its approval request to the originating 
     },
     () => Date.parse("2026-08-20T04:01:15.000Z"),
     15_000,
-    async (approvalJob, conversationId, authorizedUserId) => {
-      approvalNotifications.push({ jobId: approvalJob.id, conversationId, authorizedUserId });
+    async (reportJob, conversationId, authorizedUserId) => {
+      reportNotifications.push({ jobId: reportJob.id, conversationId, authorizedUserId });
       return true;
     },
   );
   try {
-    const { approvalRequired: _approvalRequired, ...queuedJob } = job;
+    const { reportAvailable: _reportAvailable, ...queuedJob } = job;
     control.store.watchJob(
-      context("turn-approval"),
+      context("turn-report"),
       { ...queuedJob, status: "queued" },
       Date.parse("2026-08-20T04:00:00.000Z"),
     );
     await control.tick();
     await control.tick();
-    assert.deepEqual(approvalNotifications, [{
+    assert.deepEqual(reportNotifications, [{
       jobId: job.id,
       conversationId: "conversation-1",
       authorizedUserId: 42,
     }]);
     assert.deepEqual(genericNotifications, []);
-    const forwarded = await control.notifyApprovalFeedback({
-      projectId: "demo",
-      workspaceId: "repo",
-      jobId: job.id,
-      planId: "plan-1",
-      digest: "a".repeat(64),
-      reportArtifact: "report.html",
-      message: "План готов.",
-      callbackToken: "a".repeat(24),
-      status: "changes_requested",
-      chatId: -10042,
-      topicId: 17,
-      messageId: 245,
-      authorizedUserId: 7460594016,
-      authorizedUserIds: [7460594016],
-      decidedBy: null,
-      decidedAt: null,
-      feedbackRequestedBy: 7460594016,
-      feedbackRequestedAt: "2026-08-20T07:34:00.000Z",
-      feedbackPromptMessageId: 246,
-      feedbackMessageId: 247,
-      feedbackText: "Сделать контент легче и убрать отраслевую аналитику.",
-      feedbackBy: 7460594016,
-      feedbackAt: "2026-08-20T07:35:04.000Z",
-      createdAt: "2026-08-20T07:20:00.000Z",
-      updatedAt: "2026-08-20T07:35:04.000Z",
-    } satisfies RunnerApproval);
-    assert.equal(forwarded, true);
-    assert.equal(genericNotifications.length, 1);
-    assert.match(genericNotifications[0]!, /заказчик 7460594016/i);
-    assert.match(genericNotifications[0]!, /changes_requested/);
   } finally {
     control.close();
     rmSync(root, { recursive: true, force: true });

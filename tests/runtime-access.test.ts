@@ -268,6 +268,24 @@ test("owners control projects while group participants get read-only Q&A", async
       },
     });
 
+    await send(1, "/bind_external_topic -300 44 alpha repo", 1, "private");
+    const externalPortal = runtime.state.byTopic(-300, 44)!;
+    assert.equal(externalPortal.bindingMode, "external-readonly");
+    assert.match(replies.at(-1) ?? "", /Внешний read-only портал проекта привязан/);
+    startedConversation = "";
+    await send(42, "Обсудим детали отчёта", -300, "supergroup", 44);
+    assert.equal(startedConversation, "");
+    await send(42, "@summing_bot что означает второй пункт?", -300, "supergroup", 44);
+    assert.equal(startedConversation, externalPortal.id);
+    assert.deepEqual(
+      runtime.state.pendingAll(externalPortal.id).map((item) => [item.access, item.responseMode]),
+      [["read-only", "direct"]],
+    );
+    await send(1, "/cancel", -300, "supergroup", 44);
+    assert.match(replies.at(-1) ?? "", /Во внешнем портале команды отключены/);
+    runtime.state.consume(runtime.state.pendingAll(externalPortal.id).map((item) => item.id));
+    startedConversation = "";
+
     const bound = runtime.state.byTopic(-100, 5)!;
     await send(
       42,
@@ -651,12 +669,12 @@ test("owners control projects while group participants get read-only Q&A", async
     assert.ok(Array.isArray(writeOptions.dynamicTools));
     assert.deepEqual(
       (writeOptions.dynamicTools as Array<{ name: string }>).map((tool) => tool.name),
-      ["runner", "repository"],
+      ["runner", "repository", "project_context"],
     );
     assert.equal(typeof writeOptions.dynamicToolHandler, "function");
     assert.equal(
       runtime.state.get(bound.id).codexThreadCapability,
-      "runner-repository-control-v2",
+      "runner-repository-project-context-v3",
     );
     assert.equal(runtime.state.get(bound.id).previousCodexThreadId, "thr-legacy");
 

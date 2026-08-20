@@ -724,8 +724,16 @@ export class ProjectViewerServer {
       }
       const project = this.projects.project(body?.projectId as string);
       const workspace = project.workspace(String(body?.workspaceId ?? ""));
+      const bindingMode = String(body?.bindingMode ?? "project");
+      if (!new Set(["project", "external-readonly"]).has(bindingMode)) {
+        throw new ViewerHttpError(400, "некорректный bindingMode");
+      }
       const current = this.state.byTopic(chatId, topicId);
-      if (current?.projectId === project.id && current.workspaceId === workspace.id) {
+      if (
+        current?.projectId === project.id &&
+        current.workspaceId === workspace.id &&
+        current.bindingMode === bindingMode
+      ) {
         json(response, 200, { conversation: current });
         return;
       }
@@ -740,7 +748,13 @@ export class ProjectViewerServer {
           "в выбранном топике есть активная или ожидающая задача; сначала отмените её",
         );
       }
-      const conversation = this.state.bind(chatId, topicId, project.id, workspace.id);
+      const conversation = this.state.bind(
+        chatId,
+        topicId,
+        project.id,
+        workspace.id,
+        bindingMode as "project" | "external-readonly",
+      );
       this.afterTopicBound(chatId, topicId);
       json(response, 200, { conversation });
       return;
@@ -1118,6 +1132,7 @@ export class ProjectViewerServer {
                 conversationId: conversation.id,
                 projectId: conversation.projectId,
                 workspaceId: conversation.workspaceId,
+                bindingMode: conversation.bindingMode,
                 busy:
                   conversation.activeTurnId !== null ||
                   this.state.pendingAll(conversation.id).length > 0 ||
