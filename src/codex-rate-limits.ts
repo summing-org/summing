@@ -116,7 +116,7 @@ export function codexLimitsProfileText(
     return summingProfileDescription("Codex: нет данных");
   }
   return summingProfileDescription(
-    `Codex: ${weekly.remainingPercent}% · до ${resetText(weekly.resetsAt, timeZone)}`,
+    `${weekly.remainingPercent}% до ${resetText(weekly.resetsAt, timeZone)}`,
   );
 }
 
