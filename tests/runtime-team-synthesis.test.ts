@@ -258,10 +258,59 @@ test("one background understanding loop creates an episode, memory, and optional
     assert.equal(runtime.state.pendingTeamEventCountForSource(otherSource.sourceId), 1);
     assert.equal(runtime.state.teamKnowledge(first.spaceId).some((item) => item.kind === "episode"), true);
     assert.equal(runtime.state.teamKnowledge(first.spaceId).some((item) => item.kind === "risk"), true);
+    assert.equal(runtime.state.teamSpace(first.spaceId)?.phase, "orienting");
+    assert.equal(runtime.state.teamSpace(first.spaceId)?.orientedAt, null);
+    assert.equal(runtime.state.teamSpace(first.spaceId)?.modelEgressAnnouncedAt !== null, true);
+    assert.equal(sent.length, 1);
+    assert.match(sent[0]?.text ?? "", /Администратор включил фоновое осмысление/);
+    assert.doesNotMatch(sent[0]?.text ?? "", /Что мне важно уточнить/);
+
+    runtime.state.bind(-100500, 9, "summing", "repo");
+    const bindingEvent = runtime.state.recordTeamEvent({
+      provider: "telegram",
+      externalSpaceId: "-100500",
+      externalThreadId: "9",
+      spaceName: "Engineering",
+      sourceTitle: "Release",
+      externalEventId: "103",
+      eventKind: "message",
+      senderExternalId: "42",
+      senderDisplayName: "Маша",
+      text: "Топик теперь связан с проектом.",
+      occurredAt: 1_700_000_020,
+      administratorUserId: 1,
+    })!;
+    response = JSON.stringify({
+      episode: {
+        source_id: bindingEvent.sourceId,
+        subject: "Привязка топика",
+        synopsis: "Маша сообщила, что топик связан с проектом.",
+        confidence: 0.98,
+        event_ids: [bindingEvent.id],
+        participants: [{
+          person_id: bindingEvent.personId,
+          role: "speaker",
+          intent: "Сообщить о привязке",
+          confidence: 0.95,
+          evidence_event_ids: [bindingEvent.id],
+        }],
+      },
+      summary: "Топик связан с проектом; команда готовит релиз.",
+      knowledge: [],
+      orientation_ready: true,
+      orientation_message: "Я понял, что сейчас центр обсуждения — пятничный релиз и миграция.",
+      clarification_questions: ["Кто принимает финальное решение о готовности миграции?"],
+      intervention: {
+        action: "silent",
+        reply_to_event_id: null,
+        message: "",
+        reason: "Сначала нужна ориентация в уже привязанном топике.",
+      },
+    });
+    await understandTeamConversation(first.sourceId);
+
     assert.equal(runtime.state.teamSpace(first.spaceId)?.phase, "active");
     assert.equal(runtime.state.teamSpace(first.spaceId)?.orientedAt !== null, true);
-    assert.equal(runtime.state.teamSpace(first.spaceId)?.modelEgressAnnouncedAt !== null, true);
-    assert.match(sent[0]?.text ?? "", /Администратор включил фоновое осмысление/);
     assert.deepEqual(sent[1]?.options, { topicId: 9, parseMode: "HTML" });
     assert.match(sent[1]?.text ?? "", /Что мне важно уточнить/);
 
@@ -271,13 +320,13 @@ test("one background understanding loop creates an episode, memory, and optional
       externalThreadId: "9",
       spaceName: "Engineering",
       sourceTitle: "Release",
-      externalEventId: "103",
+      externalEventId: "104",
       eventKind: "message",
       senderExternalId: "88",
       senderDisplayName: "Олег",
       text: "Кто-нибудь проверил rollback?",
       replyToExternalEventId: "102",
-      occurredAt: 1_700_000_020,
+      occurredAt: 1_700_000_030,
       administratorUserId: 1,
     })!;
     response = JSON.stringify({
@@ -312,7 +361,7 @@ test("one background understanding loop creates an episode, memory, and optional
         visibility_ref: third.sourceId,
         evidence_event_ids: [third.id],
         supersedes_knowledge_ids: [],
-        valid_from: 1_700_000_020,
+        valid_from: 1_700_000_030,
         valid_to: null,
       }],
       orientation_ready: false,
@@ -331,8 +380,63 @@ test("one background understanding loop creates an episode, memory, and optional
       sent[2]?.text,
       "<b>Это пока открытый вопрос.</b> Кто владеет проверкой rollback?",
     );
-    assert.deepEqual(sent[2]?.options, { topicId: 9, replyTo: 103, parseMode: "HTML" });
-    assert.deepEqual(threadModels, ["gpt-5.6-luna", "gpt-5.6-luna"]);
+    assert.deepEqual(sent[2]?.options, { topicId: 9, replyTo: 104, parseMode: "HTML" });
+
+    response = JSON.stringify({
+      episode: {
+        source_id: otherSource.sourceId,
+        subject: "Непривязанный топик",
+        synopsis: "Лена написала сообщение в непривязанном топике.",
+        confidence: 0.98,
+        event_ids: [otherSource.id],
+        participants: [{
+          person_id: otherSource.personId,
+          role: "speaker",
+          intent: "Поделиться сообщением",
+          confidence: 0.8,
+          evidence_event_ids: [otherSource.id],
+        }],
+      },
+      summary: "Память учитывает сообщения из непривязанного топика без права отвечать там.",
+      knowledge: [{
+        kind: "fact",
+        subject: "Непривязанный топик",
+        statement: "Лена оставила сообщение в отдельном непривязанном топике.",
+        confidence: 0.95,
+        status: "active",
+        visibility: "source",
+        visibility_ref: otherSource.sourceId,
+        evidence_event_ids: [otherSource.id],
+        supersedes_knowledge_ids: [],
+        valid_from: 1_700_000_005,
+        valid_to: null,
+      }],
+      orientation_ready: false,
+      orientation_message: "",
+      clarification_questions: [],
+      intervention: {
+        action: "reply",
+        reply_to_event_id: otherSource.id,
+        message: "Я сам решил вмешаться в непривязанный топик.",
+        reason: "Модель сочла реплику полезной.",
+      },
+    });
+    await understandTeamConversation(otherSource.sourceId);
+
+    assert.equal(runtime.state.pendingTeamEventCountForSource(otherSource.sourceId), 0);
+    assert.equal(
+      runtime.state.teamKnowledge(first.spaceId)
+        .some((item) => item.subject === "Непривязанный топик"),
+      true,
+    );
+    assert.equal(sent.length, 3);
+    assert.equal(sent.some((item) => item.text.includes("сам решил вмешаться")), false);
+    assert.deepEqual(threadModels, [
+      "gpt-5.6-luna",
+      "gpt-5.6-luna",
+      "gpt-5.6-luna",
+      "gpt-5.6-luna",
+    ]);
     assert.equal(threadOptions.every((item) => item.readOnly === true), true);
     assert.equal(threadOptions.every((item) => item.networkAccess === false), true);
     assert.equal(threadOptions.every((item) => item.ephemeral === true), true);
@@ -352,15 +456,20 @@ test("one background understanding loop creates an episode, memory, and optional
     assert.match(prompts[0] ?? "", /Silence is the default/);
     assert.match(prompts[0] ?? "", /Релиз хотим сделать в пятницу/);
     assert.doesNotMatch(prompts[0] ?? "", /другого топика/);
-    assert.match(prompts[1] ?? "", /"reply_to_external_event_id": "102"/);
-    assert.match(prompts[1] ?? "", /"reply_target": \{/);
-    assert.match(prompts[1] ?? "", /Миграция пока блокирует релиз/);
-    assert.deepEqual(unsubscribed, ["thr-team-1", "thr-team-2"]);
+    assert.match(prompts[2] ?? "", /"reply_to_external_event_id": "102"/);
+    assert.match(prompts[2] ?? "", /"reply_target": \{/);
+    assert.match(prompts[2] ?? "", /Миграция пока блокирует релиз/);
+    assert.deepEqual(unsubscribed, [
+      "thr-team-1",
+      "thr-team-2",
+      "thr-team-3",
+      "thr-team-4",
+    ]);
     assert.deepEqual(runtime.state.teamModelEgressUsage(), {
       weeklyResetsAt: 1_800_000_000,
-      turns: 2,
-      measuredTurns: 2,
-      estimatedCreditsMicros: 500_000,
+      turns: 4,
+      measuredTurns: 4,
+      estimatedCreditsMicros: 1_000_000,
       observedWeeklyPercent: 3,
       updatedAt: runtime.state.teamModelEgressUsage()?.updatedAt,
     });

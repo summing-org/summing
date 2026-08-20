@@ -712,23 +712,22 @@ test("explicit questions in unbound topics run without Project access", async ()
     new Map([["repo", workspace]]),
     true,
   );
-  const runtime = new SummingRuntime(
-    new RuntimeConfig(
-      join(root, "data"),
-      join(root, "codex"),
-      join(root, "worktrees"),
-      "token",
-      1,
-      "codex",
-      8765,
-      2,
-      1,
-      "",
-      "medium",
-      true,
-      new Map([["summing", project]]),
-    ),
+  const config = new RuntimeConfig(
+    join(root, "data"),
+    join(root, "codex"),
+    join(root, "worktrees"),
+    "token",
+    1,
+    "codex",
+    8765,
+    2,
+    1,
+    "",
+    "medium",
+    true,
+    new Map([["summing", project]]),
   );
+  const runtime = new SummingRuntime(config);
   const replies: Array<{
     chatId: number;
     text: string;
@@ -737,6 +736,12 @@ test("explicit questions in unbound topics run without Project access", async ()
   let threadOptions: Record<string, unknown> = {};
   let turnPrompt = "";
   let unsubscribedThread = "";
+  let knowledgeContextLookups = 0;
+  config.knowledgeSync.enabled = true;
+  runtime.knowledgeSync.contextForQuestion = async () => {
+    knowledgeContextLookups += 1;
+    return [];
+  };
   runtime.telegram.sendChatAction = async () => {};
   runtime.telegram.sendMessage = async (chatId, text, options) => {
     replies.push({ chatId, text, options });
@@ -845,6 +850,10 @@ test("explicit questions in unbound topics run without Project access", async ()
     assert.match(turnPrompt, /Релиз переносим на пятницу/);
     assert.match(turnPrompt, /"author": "bot"/);
     assert.match(turnPrompt, /что решили/);
+    assert.match(turnPrompt, /Offer cautious general guidance/);
+    assert.match(turnPrompt, /cannot inspect it here/);
+    assert.doesNotMatch(turnPrompt, /Team Space knowledge base/);
+    assert.equal(knowledgeContextLookups, 0);
     assert.equal(unsubscribedThread, "thr-unbound");
     assert.equal(replies.length, 1);
     assert.equal(replies[0]?.chatId, -500);
@@ -879,6 +888,7 @@ test("explicit questions in unbound topics run without Project access", async ()
         options: { topicId: 77, replyTo: 11 },
       },
     ]);
+    assert.equal(knowledgeContextLookups, 0);
   } finally {
     runtime.requestStop();
     runtime.state.close();
