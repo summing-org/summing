@@ -18,6 +18,22 @@ function signedInitData(token: string, authDate: number, userId: number): string
   return params.toString();
 }
 
+function nonCanonicalBase64UrlAlias(value: string): string {
+  const decoded = Buffer.from(value, "base64url");
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  for (const character of alphabet) {
+    const candidate = `${value.slice(0, -1)}${character}`;
+    if (
+      candidate !== value &&
+      Buffer.from(candidate, "base64url").equals(decoded) &&
+      Buffer.from(candidate, "base64url").toString("base64url") !== candidate
+    ) {
+      return candidate;
+    }
+  }
+  throw new Error("could not construct a non-canonical base64url alias");
+}
+
 test("validates Telegram Mini App init data and its age", () => {
   const now = 1_786_500_000;
   const raw = signedInitData("bot-token", now - 10, 42);
@@ -58,8 +74,16 @@ test("issues bounded tamper-evident artifact download grants", () => {
     userId: 42,
     version: 1,
   });
+  const [nonce, ciphertext, tag] = issued.token.split(".") as [string, string, string];
+  const tamperedNonce = `${nonce.startsWith("A") ? "B" : "A"}${nonce.slice(1)}`;
   assert.throws(
-    () => auth.verifyArtifactDownloadGrant(`${issued.token.slice(0, -1)}x`, now),
+    () => auth.verifyArtifactDownloadGrant(`${tamperedNonce}.${ciphertext}.${tag}`, now),
+    (error) => error instanceof ViewerAuthError && error.message.includes("invalid"),
+  );
+  const aliasedTag = nonCanonicalBase64UrlAlias(tag);
+  assert.ok(Buffer.from(aliasedTag, "base64url").equals(Buffer.from(tag, "base64url")));
+  assert.throws(
+    () => auth.verifyArtifactDownloadGrant(`${nonce}.${ciphertext}.${aliasedTag}`, now),
     (error) => error instanceof ViewerAuthError && error.message.includes("invalid"),
   );
   assert.throws(

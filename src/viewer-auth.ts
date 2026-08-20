@@ -24,6 +24,14 @@ function safeEqual(left: string, right: string): boolean {
   return leftBytes.length === rightBytes.length && timingSafeEqual(leftBytes, rightBytes);
 }
 
+function canonicalBase64Url(value: string): Buffer {
+  const decoded = Buffer.from(value, "base64url");
+  if (decoded.toString("base64url") !== value) {
+    throw new ViewerAuthError("Artifact download link is invalid");
+  }
+  return decoded;
+}
+
 export function verifyTelegramInitData(
   raw: string,
   botToken: string,
@@ -132,15 +140,18 @@ export class ViewerAuthenticator {
     }
     let value: unknown;
     try {
+      const nonce = canonicalBase64Url(nonceText);
+      const ciphertext = canonicalBase64Url(ciphertextText);
+      const tag = canonicalBase64Url(tagText);
       const decipher = createDecipheriv(
         "aes-256-gcm",
         this.artifactKey(),
-        Buffer.from(nonceText, "base64url"),
+        nonce,
       );
       decipher.setAAD(Buffer.from("summing-viewer-artifact-download-v1", "utf8"));
-      decipher.setAuthTag(Buffer.from(tagText, "base64url"));
+      decipher.setAuthTag(tag);
       const plaintext = Buffer.concat([
-        decipher.update(Buffer.from(ciphertextText, "base64url")),
+        decipher.update(ciphertext),
         decipher.final(),
       ]);
       value = JSON.parse(plaintext.toString("utf8"));
