@@ -32,7 +32,7 @@ test("selects the weekly Codex window and renders remaining usage", () => {
   const profile = codexLimitsProfileText(snapshot, "UTC");
   assert.match(
     profile,
-    new RegExp(`^${SUMMING_VERSION_LABEL} · Codex: 68% · до `),
+    new RegExp(`^${SUMMING_VERSION_LABEL} · 68% до `),
   );
   const message = codexLimitsMessage(snapshot, "UTC");
   assert.match(message, /5 ч\.: 80% осталось/);
