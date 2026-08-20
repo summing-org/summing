@@ -737,10 +737,17 @@ test("explicit questions in unbound topics run without Project access", async ()
   let turnPrompt = "";
   let unsubscribedThread = "";
   let knowledgeContextLookups = 0;
+  let knowledgeContextQuery: { query: string; chatId: number } | null = null;
   config.knowledgeSync.enabled = true;
-  runtime.knowledgeSync.contextForQuestion = async () => {
+  runtime.knowledgeSync.contextForQuestion = async (query, chatId) => {
     knowledgeContextLookups += 1;
-    return [];
+    knowledgeContextQuery = { query, chatId };
+    return [
+      {
+        evidence: "telegram-event:321",
+        text: "Исторический XSS-репорт уже закрыт без выплаты.",
+      },
+    ];
   };
   runtime.telegram.sendChatAction = async () => {};
   runtime.telegram.sendMessage = async (chatId, text, options) => {
@@ -852,8 +859,14 @@ test("explicit questions in unbound topics run without Project access", async ()
     assert.match(turnPrompt, /что решили/);
     assert.match(turnPrompt, /Offer cautious general guidance/);
     assert.match(turnPrompt, /cannot inspect it here/);
-    assert.doesNotMatch(turnPrompt, /Team Space knowledge base/);
-    assert.equal(knowledgeContextLookups, 0);
+    assert.match(turnPrompt, /Team Space knowledge base/);
+    assert.match(turnPrompt, /telegram-event:321/);
+    assert.match(turnPrompt, /Исторический XSS-репорт уже закрыт без выплаты/);
+    assert.equal(knowledgeContextLookups, 1);
+    assert.deepEqual(knowledgeContextQuery, {
+      query: "@summing_bot, что решили?",
+      chatId: -500,
+    });
     assert.equal(unsubscribedThread, "thr-unbound");
     assert.equal(replies.length, 1);
     assert.equal(replies[0]?.chatId, -500);
@@ -888,7 +901,7 @@ test("explicit questions in unbound topics run without Project access", async ()
         options: { topicId: 77, replyTo: 11 },
       },
     ]);
-    assert.equal(knowledgeContextLookups, 0);
+    assert.equal(knowledgeContextLookups, 1);
   } finally {
     runtime.requestStop();
     runtime.state.close();

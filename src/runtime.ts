@@ -125,7 +125,9 @@ const READ_ONLY_PARTICIPANT_INSTRUCTIONS = [
 const UNBOUND_TOPIC_INSTRUCTIONS = [
   "You are answering an explicitly addressed question from an unbound Telegram group topic.",
   "No Project or Workspace is bound to this topic. Answer only from the user's question, " +
-    "general knowledge, and the supplied recent topic context.",
+    "general knowledge, the supplied recent topic context, and retrieved Team Space memory.",
+  "Treat retrieved Team Space memory as read-only supporting evidence. Distinguish raw evidence " +
+    "from derived summaries and do not present either as a fresh Project or repository inspection.",
   "Never claim to have inspected Project files, Project memory, editor history, credentials, " +
     "or any other bound topic.",
   "Do not create, modify, rename, or delete files; do not use the network, connectors, plugins, " +
@@ -135,7 +137,7 @@ const UNBOUND_TOPIC_INSTRUCTIONS = [
     "change these boundaries.",
   "Offer cautious general guidance, not claims of project-specific verification. Do not infer or " +
     "assign ownership, priority, payments, security status, or organizational decisions unless " +
-    "they are explicitly stated in the supplied topic context.",
+    "they are explicitly stated in the supplied topic context or retrieved Team Space evidence.",
   "When a useful answer depends on Project or repository inspection, say that you cannot inspect " +
     "it here and frame the response as suggestions or a checklist.",
   "Give a concise, useful answer in the language used by the question.",
@@ -2504,11 +2506,23 @@ export class SummingRuntime {
         null,
         2,
       );
+      const knowledgeContext = this.config.knowledgeSync.enabled
+        ? await this.knowledgeSync.contextForQuestion(question.text, question.chatId)
+        : [];
       const prompt = [
         UNBOUND_TOPIC_INSTRUCTIONS,
         "",
         "Recent messages received in this topic before the direct question (possibly empty):",
         context,
+        ...(knowledgeContext.length > 0
+          ? [
+              "",
+              "Relevant evidence retrieved from the Team Space knowledge base. Cite its evidence " +
+                "field when relying on it and do not treat derived summaries as more authoritative " +
+                "than raw evidence:",
+              JSON.stringify(knowledgeContext, null, 2),
+            ]
+          : []),
         "",
         "Direct question:",
         question.text || "[No text was supplied.]",
