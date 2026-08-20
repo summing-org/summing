@@ -42,6 +42,7 @@ import type {
   RunnerJobTrigger,
   RunnerProjectRegistration,
 } from "./project-runner-client.js";
+import { RunnerApprovalError, RunnerApprovalStore } from "./runner-approval.js";
 
 const PROJECT_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const WORKSPACE_ID = PROJECT_ID;
@@ -63,6 +64,7 @@ const ARTIFACTS = new Map([
   ["editorial-plan.json", "application/json"],
   ["errors.json", "application/json"],
   ["report.html", "text/html"],
+  ["approval-request.json", "application/json"],
 ]);
 
 type RunnerProjectConfigSource =
@@ -255,6 +257,7 @@ export class ProjectRunnerServer {
   private processing = false;
   private activeJob: { job: RunnerJob; controller: AbortController } | null = null;
   private readonly environments: ProjectEnvironmentStore;
+  private readonly approvals: RunnerApprovalStore;
   private readonly runtimeEnvironmentRoot: string;
   private ready: boolean;
   private readonly migrationTargets: ReadonlyMap<string, LegacyEnvironmentMigrationTarget>;
@@ -283,6 +286,7 @@ export class ProjectRunnerServer {
     }
     mkdirSync(this.managedConfigRoot(), { recursive: true, mode: 0o700 });
     this.environments = new ProjectEnvironmentStore(resolve(dataRoot, "environments"), environmentKey);
+    this.approvals = new RunnerApprovalStore(dataRoot);
     this.ready = initiallyReady;
     this.migrationTargets = new Map(
       migrationTargets.map((target) => [this.migrationKey(target.projectId, target.workspaceId), target]),
@@ -561,6 +565,73 @@ export class ProjectRunnerServer {
     if (request.method === "GET" && url.pathname === "/artifacts") {
       const { jobId, project } = this.artifactScope(url);
       json(response, 200, { artifacts: this.listArtifacts(jobId, project) });
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/approval") {
+      const projectId = url.searchParams.get("project") ?? "";
+      const workspaceId = url.searchParams.get("workspace") ?? "";
+      const jobId = url.searchParams.get("job") ?? "";
+      if (!PROJECT_ID.test(projectId) || !WORKSPACE_ID.test(workspaceId) || !JOB_ID.test(jobId)) {
+        throw new RunnerHttpError(400, "invalid approval scope");
+      }
+      this.projectConfig(projectId, workspaceId);
+      const job = this.storedJob(projectId, jobId);
+      if (job.workspaceId !== workspaceId || job.action !== "dry-run") {
+        throw new RunnerHttpError(404, "approval request was not found for this job");
+      }
+      const approval = this.approvals.byJob(projectId, workspaceId, jobId);
+      if (!approval) throw new RunnerHttpError(404, "approval request was not found for this job");
+      json(response, 200, { approval });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/approval/message") {
+      const body = await jsonBody(request);
+      const allowedKeys = new Set([
+        "callbackToken",
+        "chatId",
+        "topicId",
+        "messageId",
+        "authorizedUserId",
+      ]);
+      if (Object.keys(body).some((key) => !allowedKeys.has(key))) {
+        throw new RunnerHttpError(400, "approval message binding contains unsupported fields");
+      }
+      json(response, 200, {
+        approval: this.approvals.bind(String(body.callbackToken ?? ""), {
+          chatId: body.chatId,
+          topicId: body.topicId,
+          messageId: body.messageId,
+          authorizedUserId: body.authorizedUserId,
+        }),
+      });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/approval/decision") {
+      const body = await jsonBody(request);
+      const allowedKeys = new Set([
+        "callbackToken",
+        "decision",
+        "chatId",
+        "topicId",
+        "messageId",
+        "userId",
+      ]);
+      if (Object.keys(body).some((key) => !allowedKeys.has(key))) {
+        throw new RunnerHttpError(400, "approval decision contains unsupported fields");
+      }
+      const decision = String(body.decision ?? "") as "approved" | "rejected";
+      json(response, 200, {
+        approval: this.approvals.decide(
+          String(body.callbackToken ?? ""),
+          decision,
+          {
+            chatId: body.chatId,
+            topicId: body.topicId,
+            messageId: body.messageId,
+            userId: body.userId,
+          },
+        ),
+      });
       return;
     }
     if (request.method === "GET" && url.pathname === "/artifact") {
@@ -1227,6 +1298,20 @@ export class ProjectRunnerServer {
       job.exitCode = result.code;
       if (result.code !== 0) throw new Error(`${job.action} exited with code ${result.code}`);
       if (signal.aborted) throw new RunnerCommandCancelledError("runner job cancelled");
+      if (job.action === "dry-run") {
+        const project = this.projectConfig(job.projectId, job.workspaceId);
+        const artifactDirectory = this.safeArtifactDirectory(project, job.id);
+        if (artifactDirectory) {
+          const approval = this.approvals.capture({
+            projectId: job.projectId,
+            workspaceId: job.workspaceId,
+            jobId: job.id,
+            projectDataPath: project.dataPath,
+            artifactDirectory,
+          });
+          if (approval) job.approvalRequired = true;
+        }
+      }
       job.status = "completed";
     } catch (error) {
       if (signal.aborted || error instanceof RunnerCommandCancelledError) {
@@ -1331,12 +1416,27 @@ export class ProjectRunnerServer {
         args.push(
           "--env", "DRY_RUN=true",
           "--env", "PUBLISH_IMMEDIATELY=true",
+          "--env", "SUMMING_APPROVAL_BRIDGE=true",
+          "--env", "SUMMING_PROJECT_DATA_PATH=/app/data",
           "--env", `SUMMING_JOB_ID=${job.id}`,
           "--env", `SUMMING_REVISION=${job.revision}`,
           "--env", `DRY_RUN_ARTIFACT_DIR=/app/data/dry-runs/${job.id}`,
         );
       }
-      if (job.action === "run") args.push("--env", "DRY_RUN=false");
+      if (job.action === "run") {
+        args.push(
+          "--env", "DRY_RUN=false",
+          "--env", "SUMMING_APPROVAL_BRIDGE=true",
+          "--env", "SUMMING_PROJECT_DATA_PATH=/app/data",
+        );
+        const approvalEventPath = this.approvals.eventPath(job.projectId, job.workspaceId);
+        if (approvalEventPath) {
+          args.push(
+            "--env", "SUMMING_APPROVAL_EVENT_PATH=/run/summing-approval-event.json",
+            "--volume", `${approvalEventPath}:/run/summing-approval-event.json:ro`,
+          );
+        }
+      }
       args.push(this.image(job));
       if (job.action === "validate") args.push("node", "dist/src/main.js", "--validate");
       const result = await run(this.dockerBinary, args, {
@@ -1529,6 +1629,10 @@ export class ProjectRunnerServer {
       return;
     }
     if (error instanceof RunnerHttpError) {
+      json(response, error.status, { error: error.message });
+      return;
+    }
+    if (error instanceof RunnerApprovalError) {
       json(response, error.status, { error: error.message });
       return;
     }

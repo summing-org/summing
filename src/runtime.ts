@@ -45,7 +45,7 @@ import {
   REPOSITORY_DYNAMIC_TOOLS,
 } from "./repository-tools.js";
 import { RunnerControlPlane } from "./runner-control.js";
-import { ProjectRunnerClient } from "./project-runner-client.js";
+import { ProjectRunnerClient, ProjectRunnerClientError, type RunnerJob } from "./project-runner-client.js";
 import { executeRunnerTool, RUNNER_DYNAMIC_TOOLS } from "./runner-tools.js";
 import { detectSecretFile, detectSecretText, type SecretDetection } from "./secret-ingress.js";
 import {
@@ -653,6 +653,10 @@ export class SummingRuntime {
           ),
         );
       },
+      Date.now,
+      15_000,
+      async (job, conversationId, authorizedUserId) =>
+        this.sendRunnerApproval(job, conversationId, authorizedUserId),
     );
     this.semaphore = new Semaphore(config.maxParallelConversations);
   }
@@ -1442,6 +1446,9 @@ export class SummingRuntime {
       throw new Error(`invalid Telegram update_id: ${String(update.update_id ?? "")}`);
     }
     const updateId = String(numericUpdateId);
+    const callback = record(update.callback_query);
+    if (callback) await this.handleRunnerApprovalCallback(callback);
+
     const membership = record(update.my_chat_member);
     if (membership) await this.handleChatMemberUpdate(membership, updateId);
 
@@ -1460,6 +1467,134 @@ export class SummingRuntime {
     const nextOffset = Math.max(currentOffset ?? 0, numericUpdateId + 1);
     this.state.setTelegramOffset(nextOffset);
     return nextOffset;
+  }
+
+  private async sendRunnerApproval(
+    job: RunnerJob,
+    conversationId: string,
+    authorizedUserId: number,
+  ): Promise<boolean> {
+    const conversation = this.state.get(conversationId);
+    if (
+      conversation.projectId !== job.projectId ||
+      conversation.workspaceId !== job.workspaceId ||
+      !this.projects.canAccess(authorizedUserId, job.projectId)
+    ) {
+      throw new Error("runner approval notification scope no longer matches the project conversation");
+    }
+    let approval = await this.viewer.runner.approval(job.projectId, job.workspaceId, job.id);
+    let messageId = approval.messageId;
+    if (messageId === null) {
+      const report = await this.viewer.runner.artifact(
+        job.projectId,
+        job.id,
+        approval.reportArtifact,
+      );
+      messageId = await this.telegram.sendDocument(
+        conversation.chatId,
+        new TextEncoder().encode(report.content),
+        `dry-run-${approval.planId}.html`,
+        report.contentType,
+        { topicId: conversation.topicId, caption: approval.message },
+      );
+      approval = await this.viewer.runner.bindApproval(approval.callbackToken, {
+        chatId: conversation.chatId,
+        topicId: conversation.topicId,
+        messageId,
+        authorizedUserId,
+      });
+    }
+    if (
+      approval.chatId !== conversation.chatId ||
+      approval.topicId !== conversation.topicId ||
+      approval.messageId !== messageId ||
+      approval.authorizedUserId !== authorizedUserId
+    ) {
+      throw new Error("runner approval request is bound outside the trusted conversation scope");
+    }
+    if (approval.status !== "pending") {
+      const statusText = approval.status === "approved"
+        ? `✅ План ${approval.planId} одобрен.`
+        : `❌ План ${approval.planId} отклонён.`;
+      await this.telegram.editMessageCaption(
+        conversation.chatId,
+        messageId,
+        `${approval.message}\n\n${statusText}`,
+        { inline_keyboard: [] },
+      );
+      return true;
+    }
+    await this.telegram.editMessageCaption(
+      conversation.chatId,
+      messageId,
+      approval.message,
+      {
+        inline_keyboard: [[
+          {
+            text: "✅ Одобрить",
+            callback_data: `sma:${approval.callbackToken}:approved`,
+          },
+          {
+            text: "❌ Отклонить",
+            callback_data: `sma:${approval.callbackToken}:rejected`,
+          },
+        ]],
+      },
+    );
+    return true;
+  }
+
+  private async handleRunnerApprovalCallback(callback: TelegramObject): Promise<void> {
+    const data = String(callback.data ?? "");
+    const match = /^sma:([A-Za-z0-9_-]{20,48}):(approved|rejected)$/.exec(data);
+    if (!match) return;
+    const callbackQueryId = String(callback.id ?? "");
+    const message = record(callback.message);
+    const chat = record(message?.chat);
+    const sender = record(callback.from);
+    const chatId = Number(chat?.id ?? 0);
+    const topicId = Number(message?.message_thread_id ?? 0);
+    const messageId = Number(message?.message_id ?? 0);
+    const userId = Number(sender?.id ?? 0);
+    if (
+      !callbackQueryId ||
+      !Number.isSafeInteger(chatId) || chatId === 0 ||
+      !Number.isSafeInteger(topicId) || topicId < 0 ||
+      !Number.isSafeInteger(messageId) || messageId <= 0 ||
+      !Number.isSafeInteger(userId) || userId <= 0
+    ) {
+      if (callbackQueryId) {
+        await this.telegram.answerCallbackQuery(callbackQueryId, "Некорректный callback Telegram", true);
+      }
+      return;
+    }
+    try {
+      const decision = match[2] as "approved" | "rejected";
+      const approval = await this.viewer.runner.decideApproval(match[1]!, decision, {
+        chatId,
+        topicId,
+        messageId,
+        userId,
+      });
+      const statusText = decision === "approved"
+        ? `✅ План ${approval.planId} одобрен.`
+        : `❌ План ${approval.planId} отклонён.`;
+      await this.telegram.answerCallbackQuery(
+        callbackQueryId,
+        decision === "approved" ? "План одобрен" : "План отклонён",
+      );
+      await this.telegram.editMessageCaption(
+        chatId,
+        messageId,
+        `${approval.message}\n\n${statusText}`,
+        { inline_keyboard: [] },
+      );
+    } catch (error) {
+      const message = error instanceof ProjectRunnerClientError
+        ? error.message
+        : "Не удалось зафиксировать решение";
+      await this.telegram.answerCallbackQuery(callbackQueryId, message, true);
+    }
   }
 
   private messageLocation(message: TelegramObject): [number, number, number] {

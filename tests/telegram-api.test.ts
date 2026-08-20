@@ -71,6 +71,7 @@ test("sendDocument uploads bytes as multipart and preserves Telegram reply scope
     const form = init.body;
     assert.equal(form.get("chat_id"), "-10042");
     assert.equal(form.get("message_thread_id"), "17");
+    assert.equal(form.get("caption"), "Approval report");
     assert.equal(
       form.get("reply_parameters"),
       JSON.stringify({ message_id: 18, allow_sending_without_reply: true }),
@@ -93,7 +94,7 @@ test("sendDocument uploads bytes as multipart and preserves Telegram reply scope
         Uint8Array.from([1, 2, 3, 4]),
         "report.pdf",
         "application/pdf",
-        { topicId: 17, replyTo: 18 },
+        { topicId: 17, replyTo: 18, caption: "Approval report" },
       ),
       19,
     );
@@ -122,6 +123,44 @@ test("editMessage forwards Telegram HTML parse mode", async () => {
       disable_web_page_preview: true,
       parse_mode: "HTML",
     });
+  } finally {
+    await api.close();
+  }
+});
+
+test("approval callback helpers edit the report caption and answer Telegram", async () => {
+  const api = new TelegramAPI("token");
+  const calls: Array<{ method: string; payload: Record<string, unknown> }> = [];
+  api.call = async (method, payload) => {
+    calls.push({ method, payload });
+    return true;
+  };
+  try {
+    await api.editMessageCaption(-10042, 19, "План готов", {
+      inline_keyboard: [[{ text: "✅ Одобрить", callback_data: "sma:token:approved" }]],
+    });
+    await api.answerCallbackQuery("callback-1", "План одобрен");
+    assert.deepEqual(calls, [
+      {
+        method: "editMessageCaption",
+        payload: {
+          chat_id: -10042,
+          message_id: 19,
+          caption: "План готов",
+          reply_markup: {
+            inline_keyboard: [[{ text: "✅ Одобрить", callback_data: "sma:token:approved" }]],
+          },
+        },
+      },
+      {
+        method: "answerCallbackQuery",
+        payload: {
+          callback_query_id: "callback-1",
+          text: "План одобрен",
+          show_alert: false,
+        },
+      },
+    ]);
   } finally {
     await api.close();
   }
@@ -167,6 +206,7 @@ test("getUpdates subscribes to the complete Team Space event surface", async () 
       "message_reaction_count",
       "my_chat_member",
       "chat_member",
+      "callback_query",
     ]);
     assert.equal(payload.offset, 25);
   } finally {

@@ -1024,6 +1024,47 @@ Workspace сначала фиксируют точные `jobId/name` в отд�
 без symlink, переносит его в приватный `.trash` на том же filesystem и обновляет
 `artifactCount`. Результат различает успешно перемещённые и неудавшиеся цели.
 
+### 9.1. Approval bridge для project runner
+
+Одноразовый project-контейнер не принимает Telegram updates и не получает token
+основного бота. Если успешный manual `dry-run` требует согласования, приложение
+создаёт allowlisted `approval-request.json` рядом с `report.html`:
+
+```json
+{
+  "schemaVersion": 1,
+  "planId": "768d307d-8bd1-49ea-9ae5-ee6de0793e1d",
+  "digest": "f3a497ee88cdd0e3f2d9343ccceb38f4a56d80d13443b40fd99213c5cda2b314",
+  "statePath": "approval-plans/768d307d-8bd1-49ea-9ae5-ee6de0793e1d/approval.json",
+  "reportArtifact": "report.html",
+  "message": "План готов к согласованию."
+}
+```
+
+Runner принимает только bounded regular JSON, фиксированный `report.html` и
+относительный `statePath` внутри project data без symlink/traversal. `planId` и
+SHA-256 обязаны совпасть с pending project state. После завершения job runner
+сохраняет приватную запись в `SUMMING_RUNNER_DATA/approval-events`; callback token
+не передаётся project-контейнеру.
+
+Runtime отправляет отчёт через основной Bot API в conversation, из которой был
+запущен dry-run. Сначала сообщение создаётся без активных кнопок, затем runner
+атомарно связывает его с `chat_id`, `message_thread_id`, `message_id` и actor user
+ID, и только после этого runtime добавляет inline-кнопки. `callback_query`
+принимается постоянным Telegram update loop. Runner повторно сверяет весь scope,
+текущий pending state, `planId` и digest; повтор того же callback идемпотентен,
+противоположное решение отклоняется.
+
+Нажатие кнопки не меняет project `approval.json` на `approved`: это сохранило бы
+решение и публикацию в одном live-run. Вместо этого runner пишет отдельное
+approval event и при следующем `run` монтирует его read-only как
+`SUMMING_APPROVAL_EVENT_PATH`. Первый live-run обязан ещё раз сверить `planId` и
+digest, перенести решение в собственный project state и завершиться без
+публикации. Только второй отдельный live-run видит уже локальный `approved`, снова
+проверяет digest неизменяемого плана и публикует. Runner объявляет контракт через
+`SUMMING_APPROVAL_BRIDGE=true` и `SUMMING_PROJECT_DATA_PATH=/app/data`; bot token и
+чтение Telegram history контейнеру для согласования не нужны.
+
 Dynamic tools нельзя добавить при `thread/resume`, поэтому Conversation хранит
 версию capability. При первом write-turn существующего topic старый editor
 thread без `runner-control-v1` атомарно переносится в `previous_codex_thread_id`,

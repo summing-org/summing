@@ -285,6 +285,64 @@ test("manual tool calls deduplicate jobs, expose an overview, and notify their c
   }
 });
 
+test("a completed manual dry-run routes its approval request to the originating actor and conversation", async () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-runner-approval-watch-"));
+  const job: RunnerJob = {
+    id: "b4a0bb44-d858-40ba-93b9-5e8f0c105c85",
+    projectId: "demo",
+    workspaceId: "repo",
+    action: "dry-run",
+    revision: "a".repeat(40),
+    status: "completed",
+    approvalRequired: true,
+    createdAt: "2026-08-20T04:00:00.000Z",
+    completedAt: "2026-08-20T04:01:00.000Z",
+  };
+  const genericNotifications: string[] = [];
+  const approvalNotifications: Array<{
+    jobId: string;
+    conversationId: string;
+    authorizedUserId: number;
+  }> = [];
+  const runner = {
+    available: async () => true,
+    jobs: async () => [job],
+  } as unknown as ProjectRunnerClient;
+  const control = new RunnerControlPlane(
+    join(root, "control.sqlite3"),
+    {} as ProjectCatalog,
+    runner,
+    async (_projectId, message) => {
+      genericNotifications.push(message);
+    },
+    () => Date.parse("2026-08-20T04:01:15.000Z"),
+    15_000,
+    async (approvalJob, conversationId, authorizedUserId) => {
+      approvalNotifications.push({ jobId: approvalJob.id, conversationId, authorizedUserId });
+      return true;
+    },
+  );
+  try {
+    const { approvalRequired: _approvalRequired, ...queuedJob } = job;
+    control.store.watchJob(
+      context("turn-approval"),
+      { ...queuedJob, status: "queued" },
+      Date.parse("2026-08-20T04:00:00.000Z"),
+    );
+    await control.tick();
+    await control.tick();
+    assert.deepEqual(approvalNotifications, [{
+      jobId: job.id,
+      conversationId: "conversation-1",
+      authorizedUserId: 42,
+    }]);
+    assert.deepEqual(genericNotifications, []);
+  } finally {
+    control.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("runner tools expose only conversation-scoped arguments and treat artifacts as bounded data", async () => {
   const root = mkdtempSync(join(tmpdir(), "summing-runner-tools-"));
   let availableArtifacts = [{

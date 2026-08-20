@@ -41,7 +41,30 @@ export interface RunnerJob {
   exitCode?: number;
   error?: string;
   artifactCount?: number;
+  approvalRequired?: boolean;
   environmentRevision?: number;
+}
+
+export type RunnerApprovalDecision = "approved" | "rejected";
+
+export interface RunnerApproval {
+  projectId: string;
+  workspaceId: string;
+  jobId: string;
+  planId: string;
+  digest: string;
+  reportArtifact: "report.html";
+  message: string;
+  callbackToken: string;
+  status: "pending" | RunnerApprovalDecision;
+  chatId: number | null;
+  topicId: number | null;
+  messageId: number | null;
+  authorizedUserId: number | null;
+  decidedBy: number | null;
+  decidedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface RunnerArtifact {
@@ -235,6 +258,42 @@ export class ProjectRunnerClient {
       `/artifact?${query.toString()}`,
     );
     return result.artifact;
+  }
+
+  async approval(projectId: string, workspaceId: string, jobId: string): Promise<RunnerApproval> {
+    const query = new URLSearchParams({ project: projectId, workspace: workspaceId, job: jobId });
+    const result = await this.call<{ approval: RunnerApproval }>(
+      "GET",
+      `/approval?${query.toString()}`,
+    );
+    return result.approval;
+  }
+
+  async bindApproval(
+    callbackToken: string,
+    input: { chatId: number; topicId: number; messageId: number; authorizedUserId: number },
+  ): Promise<RunnerApproval> {
+    const body = Buffer.from(JSON.stringify({ callbackToken, ...input }), "utf8");
+    const result = await this.call<{ approval: RunnerApproval }>(
+      "POST",
+      "/approval/message",
+      body,
+    );
+    return result.approval;
+  }
+
+  async decideApproval(
+    callbackToken: string,
+    decision: RunnerApprovalDecision,
+    input: { chatId: number; topicId: number; messageId: number; userId: number },
+  ): Promise<RunnerApproval> {
+    const body = Buffer.from(JSON.stringify({ callbackToken, decision, ...input }), "utf8");
+    const result = await this.call<{ approval: RunnerApproval }>(
+      "POST",
+      "/approval/decision",
+      body,
+    );
+    return result.approval;
   }
 
   async deleteArtifact(

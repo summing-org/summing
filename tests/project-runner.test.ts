@@ -130,8 +130,11 @@ if [ "$1" = run ]; then
   printf 'application said key=%s\n' "$secret"
   if [ -n "$job" ]; then
     mkdir -p "${appData}/dry-runs/$job"
+    mkdir -p "${appData}/approval-plans/$job"
     printf '{"status":"completed","key":"%s"}\n' "$secret" > "${appData}/dry-runs/$job/manifest.json"
     printf '<html>report</html>\n' > "${appData}/dry-runs/$job/report.html"
+    printf '{"planId":"%s","digest":"%s","status":"pending","requestMessageId":null,"approvedBy":null,"approvedAt":null,"approvalMessageId":null,"updatedAt":"2026-08-20T04:00:00.000Z"}\n' "$job" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" > "${appData}/approval-plans/$job/approval.json"
+    printf '{"schemaVersion":1,"planId":"%s","digest":"%s","statePath":"approval-plans/%s/approval.json","reportArtifact":"report.html","message":"Plan ready for approval."}\n' "$job" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "$job" > "${appData}/dry-runs/$job/approval-request.json"
   fi
 fi
 exit 0
@@ -202,14 +205,43 @@ exit 0
     assert.equal(dryRunCompleted.scheduleId, scheduleId);
     assert.equal(dryRunCompleted.scheduledFor, scheduledFor);
     assert.equal(dryRunCompleted.environmentRevision, 2);
-    assert.equal(dryRunCompleted.artifactCount, 2);
+    assert.equal(dryRunCompleted.artifactCount, 3);
+    assert.equal(dryRunCompleted.approvalRequired, true);
     assert.deepEqual(
       (await client.artifacts("demo", dryRun.id)).map((artifact) => artifact.name),
-      ["manifest.json", "report.html"],
+      ["manifest.json", "report.html", "approval-request.json"],
     );
     assert.equal(
       (await client.artifact("demo", dryRun.id, "manifest.json")).content,
       '{"status":"completed","key":"[REDACTED]"}\n',
+    );
+    const approval = await client.approval("demo", "repo", dryRun.id);
+    assert.equal(approval.planId, dryRun.id);
+    assert.equal(approval.status, "pending");
+    await client.bindApproval(approval.callbackToken, {
+      chatId: -10042,
+      topicId: 17,
+      messageId: 245,
+      authorizedUserId: 42,
+    });
+    const decided = await client.decideApproval(approval.callbackToken, "approved", {
+      chatId: -10042,
+      topicId: 17,
+      messageId: 245,
+      userId: 42,
+    });
+    assert.equal(decided.status, "approved");
+    assert.equal(
+      JSON.parse(
+        readFileSync(join(appData, "approval-plans", dryRun.id, "approval.json"), "utf8"),
+      ).status,
+      "pending",
+    );
+    assert.equal(
+      JSON.parse(
+        readFileSync(join(dataRoot, "approval-events", "delivery", "demo--repo.json"), "utf8"),
+      ).approvedBy,
+      42,
     );
     await assert.rejects(
       client.deleteArtifact("demo", "another-workspace", dryRun.id, "manifest.json"),
@@ -224,9 +256,10 @@ exit 0
     assert.equal(deletedManifest.name, "manifest.json");
     assert.deepEqual(
       (await client.artifacts("demo", dryRun.id)).map((artifact) => artifact.name),
-      ["report.html"],
+      ["report.html", "approval-request.json"],
     );
     await client.deleteArtifact("demo", "repo", dryRun.id, "report.html");
+    await client.deleteArtifact("demo", "repo", dryRun.id, "approval-request.json");
     assert.deepEqual(await client.artifacts("demo", dryRun.id), []);
     assert.equal(
       (await client.jobs("demo", "repo")).find((job) => job.id === dryRun.id)?.artifactCount,
@@ -234,12 +267,14 @@ exit 0
     );
     assert.equal(
       readdirSync(join(dataRoot, "artifact-trash", "demo", dryRun.id)).length,
-      2,
+      3,
     );
     assert.doesNotMatch(await client.log("demo", dryRun.id), /rotated-runtime-secret/);
     assert.match(await client.log("demo", dryRun.id), /application said key=\[REDACTED\]/);
     const args = readFileSync(dockerArgs, "utf8");
     assert.match(args, new RegExp(`SUMMING_JOB_ID=${dryRun.id}`));
+    assert.match(args, /SUMMING_APPROVAL_BRIDGE=true/);
+    assert.match(args, /SUMMING_PROJECT_DATA_PATH=\/app\/data/);
     assert.match(
       args,
       new RegExp(`/projects/demo/runs/${dryRun.id}/source/app\\.json:/run/config\\.json:ro`),

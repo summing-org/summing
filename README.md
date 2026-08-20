@@ -106,6 +106,12 @@ Team Space: создаётся при подключении командног�
   удаление/очистка артефактов используют отдельное подтверждение в следующем
   сообщении. Автоматические commit/merge/push, force push, Claudexor, swarm,
   произвольные MCP/marketplaces, local models и автономная Evolution отсутствуют.
+- project dry-run может передать `approval-request.json` постоянному approval
+  bridge. SUMMING отправляет HTML-отчёт своим Telegram-ботом с кнопками
+  **Одобрить / Отклонить**, проверяет callback по Project/Workspace,
+  conversation, сообщению и numeric user ID, а затем сохраняет отдельное
+  immutable approval event. Первый последующий live-run только переносит это
+  событие в project state; публикация разрешается лишь вторым live-run.
 
 ## Требования
 

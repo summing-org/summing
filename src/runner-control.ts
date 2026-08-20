@@ -152,6 +152,7 @@ interface RunnerJobWatch {
   projectId: string;
   workspaceId: string;
   conversationId: string;
+  actorUserId: number;
   action: RunnerAction;
   lastStatus: RunnerJob["status"];
   createdAt: string;
@@ -374,6 +375,7 @@ export class RunnerControlStore {
         project_id TEXT NOT NULL,
         workspace_id TEXT NOT NULL,
         conversation_id TEXT NOT NULL,
+        actor_user_id INTEGER NOT NULL,
         action TEXT NOT NULL CHECK(action IN ('build', 'validate', 'dry-run', 'run')),
         last_status TEXT NOT NULL,
         created_at TEXT NOT NULL,
@@ -400,6 +402,12 @@ export class RunnerControlStore {
     if (!planColumns.some((column) => column.name === "created_turn_id")) {
       this.db.exec(
         "ALTER TABLE runner_control_plans ADD COLUMN created_turn_id TEXT NOT NULL DEFAULT ''",
+      );
+    }
+    const watchColumns = this.db.prepare("PRAGMA table_info(runner_job_watches)").all() as Row[];
+    if (!watchColumns.some((column) => column.name === "actor_user_id")) {
+      this.db.exec(
+        "ALTER TABLE runner_job_watches ADD COLUMN actor_user_id INTEGER NOT NULL DEFAULT 0",
       );
     }
   }
@@ -689,14 +697,15 @@ export class RunnerControlStore {
     const timestamp = iso(nowMilliseconds);
     this.db.prepare(`
       INSERT OR IGNORE INTO runner_job_watches
-        (job_id, project_id, workspace_id, conversation_id, action, last_status,
-         created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        (job_id, project_id, workspace_id, conversation_id, actor_user_id, action,
+         last_status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       job.id,
       context.projectId,
       context.workspaceId,
       context.conversationId,
+      context.actorUserId,
       job.action,
       job.status,
       timestamp,
@@ -714,6 +723,7 @@ export class RunnerControlStore {
       projectId: String(row.project_id),
       workspaceId: String(row.workspace_id),
       conversationId: String(row.conversation_id),
+      actorUserId: Number(row.actor_user_id),
       action: String(row.action) as RunnerAction,
       lastStatus: String(row.last_status) as RunnerJob["status"],
       createdAt: String(row.created_at),
@@ -824,6 +834,11 @@ export class RunnerControlPlane {
     ) => Promise<void> = async () => {},
     readonly now: () => number = Date.now,
     readonly intervalMilliseconds = 15_000,
+    readonly notifyApproval: (
+      job: RunnerJob,
+      conversationId: string,
+      authorizedUserId: number,
+    ) => Promise<boolean> = async () => false,
   ) {
     this.store = new RunnerControlStore(storePath);
   }
@@ -1367,6 +1382,16 @@ export class RunnerControlPlane {
         if (job.status !== watch.lastStatus) this.store.updateJobWatch(job, this.now());
         if (!MANUAL_JOB_TERMINAL_STATUSES.has(job.status)) continue;
         try {
+          if (
+            job.status === "completed" &&
+            job.action === "dry-run" &&
+            job.approvalRequired &&
+            watch.actorUserId > 0 &&
+            await this.notifyApproval(job, watch.conversationId, watch.actorUserId)
+          ) {
+            this.store.markJobWatchNotified(job.id, this.now());
+            continue;
+          }
           await this.notify(projectId, manualJobNotification(job), watch.conversationId);
           this.store.markJobWatchNotified(job.id, this.now());
         } catch (error) {
