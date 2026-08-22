@@ -3,7 +3,11 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { detectSecretFile, detectSecretText } from "../src/secret-ingress.js";
+import {
+  detectSecretData,
+  detectSecretFile,
+  detectSecretText,
+} from "../src/secret-ingress.js";
 
 test("detects known credentials and high-confidence assignments without retaining values", () => {
   const detections = detectSecretText([
@@ -22,6 +26,13 @@ test("scans bounded text attachments but ignores binary files", () => {
     const env = join(root, ".env");
     writeFileSync(env, "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz1234567890\n");
     assert.ok(detectSecretFile(env, ".env", "text/plain").length > 0);
+    assert.ok(
+      detectSecretData(
+        new TextEncoder().encode("ACCESS_TOKEN=customer-secret-1234567890\n"),
+        "notes.txt",
+        "text/plain",
+      ).length > 0,
+    );
     const binary = join(root, "image.bin");
     writeFileSync(binary, Buffer.from([0, 1, 2, 3]));
     assert.deepEqual(detectSecretFile(binary, "image.bin", "application/octet-stream"), []);

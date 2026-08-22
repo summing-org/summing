@@ -23,6 +23,14 @@ const TEXT_EXTENSIONS = new Set([
   ".conf", ".env", ".ini", ".json", ".md", ".properties", ".text", ".toml", ".txt", ".yaml", ".yml",
 ]);
 
+function textLikeFile(fileName: string, mimeType: string): boolean {
+  return mimeType.startsWith("text/") ||
+    mimeType === "application/json" ||
+    mimeType.endsWith("+json") ||
+    TEXT_EXTENSIONS.has(extname(fileName).toLowerCase()) ||
+    fileName.toLowerCase().startsWith(".env");
+}
+
 export function detectSecretText(text: string): SecretDetection[] {
   if (!text || text.length > 2_000_000) return [];
   const kinds = new Set<string>();
@@ -45,12 +53,7 @@ export function detectSecretFile(
   mimeType: string,
   maximumBytes = 1_000_000,
 ): SecretDetection[] {
-  const textLike = mimeType.startsWith("text/") ||
-    mimeType === "application/json" ||
-    mimeType.endsWith("+json") ||
-    TEXT_EXTENSIONS.has(extname(fileName).toLowerCase()) ||
-    fileName.toLowerCase().startsWith(".env");
-  if (!textLike) return [];
+  if (!textLikeFile(fileName, mimeType)) return [];
   const metadata = lstatSync(path);
   if (!metadata.isFile() || metadata.isSymbolicLink()) return [];
   if (metadata.size > maximumBytes) return [{ kind: "unscanned-large-text" }];
@@ -60,10 +63,22 @@ export function detectSecretFile(
   try {
     const bytes = readSync(fd, buffer, 0, size, 0);
     const sample = buffer.subarray(0, bytes);
-    if (sample.includes(0)) return [];
-    return detectSecretText(sample.toString("utf8"));
+    return detectSecretData(sample, fileName, mimeType, maximumBytes);
   } finally {
     buffer.fill(0);
     closeSync(fd);
   }
+}
+
+export function detectSecretData(
+  data: Uint8Array,
+  fileName: string,
+  mimeType: string,
+  maximumBytes = 1_000_000,
+): SecretDetection[] {
+  if (!textLikeFile(fileName, mimeType)) return [];
+  if (data.byteLength > maximumBytes) return [{ kind: "unscanned-large-text" }];
+  const sample = Buffer.from(data.buffer, data.byteOffset, data.byteLength);
+  if (sample.includes(0)) return [];
+  return detectSecretText(sample.toString("utf8"));
 }

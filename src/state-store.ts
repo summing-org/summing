@@ -154,6 +154,16 @@ export interface TeamSource {
   updatedAt: number;
 }
 
+export interface ProjectPortalBinding {
+  portalId: string;
+  projectId: string;
+  workspaceId: string;
+  chatId: number;
+  topicId: number;
+  sourceId: string | null;
+  title: string;
+}
+
 export interface TeamEventAttachment {
   kind: string;
   fileName: string;
@@ -2298,6 +2308,54 @@ export class StateStore {
         AND conversation.binding_mode = 'external-readonly'
       ORDER BY source.updated_at DESC, source.id
     `).all(projectId) as Row[]).map((row) => this.toTeamSource(row));
+  }
+
+  projectPortals(projectId: string, workspaceId: string): ProjectPortalBinding[] {
+    return (this.db.prepare(`
+      SELECT conversation.id AS portal_id, conversation.project_id,
+        conversation.workspace_id, conversation.chat_id, conversation.topic_id,
+        source.id AS source_id,
+        COALESCE(NULLIF(topic.name, ''), NULLIF(source.title, ''),
+          'topic ' || CAST(conversation.topic_id AS TEXT)) AS title
+      FROM conversations conversation
+      LEFT JOIN team_sources source
+        ON source.provider = 'telegram'
+       AND source.external_space_id = CAST(conversation.chat_id AS TEXT)
+       AND source.external_thread_id = CAST(conversation.topic_id AS TEXT)
+      LEFT JOIN telegram_topics topic
+        ON topic.chat_id = conversation.chat_id AND topic.topic_id = conversation.topic_id
+      WHERE conversation.project_id = ? AND conversation.workspace_id = ?
+        AND conversation.binding_mode = 'external-readonly'
+      ORDER BY conversation.updated_at DESC, conversation.id
+    `).all(projectId, workspaceId) as Row[]).map((row) => ({
+      portalId: String(row.portal_id),
+      projectId: String(row.project_id),
+      workspaceId: String(row.workspace_id),
+      chatId: Number(row.chat_id),
+      topicId: Number(row.topic_id),
+      sourceId: row.source_id === null ? null : String(row.source_id),
+      title: String(row.title),
+    }));
+  }
+
+  projectPortal(
+    projectId: string,
+    workspaceId: string,
+    portalId: string,
+  ): ProjectPortalBinding | null {
+    return this.projectPortals(projectId, workspaceId)
+      .find((portal) => portal.portalId === portalId) ?? null;
+  }
+
+  projectPortalReplyMessageId(portal: ProjectPortalBinding, eventId: number): number | null {
+    if (!portal.sourceId || !Number.isSafeInteger(eventId) || eventId <= 0) return null;
+    const row = this.db.prepare(`
+      SELECT external_event_id FROM team_events
+      WHERE id = ? AND source_id = ? AND synthesis_state <> 'redacted'
+    `).get(eventId, portal.sourceId) as Row | undefined;
+    if (!row || !/^\d+$/.test(String(row.external_event_id))) return null;
+    const messageId = Number(row.external_event_id);
+    return Number.isSafeInteger(messageId) && messageId > 0 ? messageId : null;
   }
 
   externalProjectEvents(input: {

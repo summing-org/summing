@@ -118,7 +118,8 @@ export interface NodeRecoverySessionRecord {
 
 export interface NodeRecoveryComponentManifest {
   id: string;
-  kind: "node-state" | "codex-sessions" | "run-artifacts" | "attachments" | "workspace" | "config" | "secrets";
+  kind: "node-state" | "codex-sessions" | "run-artifacts" | "attachments" |
+    "project-portal-outbox" | "workspace" | "config" | "secrets";
   key: string;
   sha256: string;
   size: number;
@@ -949,6 +950,11 @@ export class NodeRecoveryManager {
       for (const [id, kind, path] of [
         ["run-artifacts", "run-artifacts", join(this.config.dataDir, "run-artifacts")],
         ["attachments", "attachments", join(this.config.dataDir, "attachments")],
+        [
+          "project-portal-outbox",
+          "project-portal-outbox",
+          join(this.config.dataDir, "project-portal-outbox"),
+        ],
       ] as const) {
         await addComponent(id, kind, [
           { sourcePath: path, archivePath: `payload/data/${id}`, optional: true },

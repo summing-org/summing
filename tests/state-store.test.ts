@@ -123,6 +123,10 @@ test("external read-only bindings expose their durable topic history to the Proj
         .map((item) => [item.externalEventId, item.replyToExternalEventId, item.text]),
       [["78061", "78032", "Нужен лёгкий контент без отраслевой аналитики."]],
     );
+    const portal = store.projectPortals("ash-telegrams", "repo")[0]!;
+    assert.equal(portal.portalId, conversation.id);
+    assert.equal(portal.sourceId, event.sourceId);
+    assert.equal(store.projectPortalReplyMessageId(portal, event.id), 78061);
 
     const rebound = store.bind(-100500, 9, "ash-telegrams", "repo");
     assert.equal(rebound.bindingMode, "project");

@@ -300,6 +300,14 @@ test("conversation gets a persistent worktree and project memory", async () => {
       readFileSync(join(prepared.path, materialized[0]!.relativePath), "utf8"),
       "PK test archive",
     );
+    const portalDocument = manager.portalDocument(prepared, materialized[0]!.relativePath);
+    assert.equal(portalDocument.fileName, "99-7-source.zip");
+    assert.equal(Buffer.from(portalDocument.data).toString("utf8"), "PK test archive");
+    writeFileSync(join(prepared.path, ".env.portal"), "API_TOKEN=secret\n");
+    await assert.rejects(
+      async () => manager.portalDocument(prepared, ".env.portal"),
+      /unsafe Project portal file path|credentials or unscanned secrets/,
+    );
     await assert.rejects(
       async () => manager.materializeAttachments(prepared, [{
         inputId: 8,

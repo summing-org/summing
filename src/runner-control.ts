@@ -853,7 +853,7 @@ export class RunnerControlPlane {
     ) => Promise<void> = async () => {},
     readonly now: () => number = Date.now,
     readonly intervalMilliseconds = 15_000,
-    readonly notifyReport: (
+    readonly notifyPortalMessages: (
       job: RunnerJob,
       conversationId: string,
       authorizedUserId: number,
@@ -1404,9 +1404,9 @@ export class RunnerControlPlane {
           if (
             job.status === "completed" &&
             job.action === "dry-run" &&
-            job.reportAvailable &&
+            (job.portalMessageCount ?? 0) > 0 &&
             watch.actorUserId > 0 &&
-            await this.notifyReport(job, watch.conversationId, watch.actorUserId)
+            await this.notifyPortalMessages(job, watch.conversationId, watch.actorUserId)
           ) {
             this.store.markJobWatchNotified(job.id, this.now());
             continue;

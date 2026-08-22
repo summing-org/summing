@@ -41,22 +41,23 @@ export interface RunnerJob {
   exitCode?: number;
   error?: string;
   artifactCount?: number;
-  reportAvailable?: boolean;
+  portalMessageCount?: number;
   environmentRevision?: number;
 }
 
-export interface RunnerReport {
+export interface RunnerPortalMessage {
+  id: string;
+  type: "text" | "document";
+  text: string;
+  artifact: string | null;
+}
+
+export interface RunnerPortalMessageBatch {
   projectId: string;
   workspaceId: string;
   jobId: string;
-  reportId: string;
-  reportArtifact: "report.html";
-  message: string;
-  chatId: number;
-  topicId: number;
-  messageId: number | null;
+  messages: RunnerPortalMessage[];
   createdAt: string;
-  updatedAt: string;
 }
 
 export interface RunnerArtifact {
@@ -252,26 +253,17 @@ export class ProjectRunnerClient {
     return result.artifact;
   }
 
-  async report(projectId: string, workspaceId: string, jobId: string): Promise<RunnerReport> {
+  async portalMessages(
+    projectId: string,
+    workspaceId: string,
+    jobId: string,
+  ): Promise<RunnerPortalMessageBatch> {
     const query = new URLSearchParams({ project: projectId, workspace: workspaceId, job: jobId });
-    const result = await this.call<{ report: RunnerReport }>(
+    const result = await this.call<{ batch: RunnerPortalMessageBatch }>(
       "GET",
-      `/report?${query.toString()}`,
+      `/portal/messages?${query.toString()}`,
     );
-    return result.report;
-  }
-
-  async bindReportMessage(input: {
-    projectId: string;
-    workspaceId: string;
-    jobId: string;
-    chatId: number;
-    topicId: number;
-    messageId: number;
-  }): Promise<RunnerReport> {
-    const body = Buffer.from(JSON.stringify(input), "utf8");
-    const result = await this.call<{ report: RunnerReport }>("POST", "/report/message", body);
-    return result.report;
+    return result.batch;
   }
 
 

@@ -114,10 +114,15 @@ Team Space: создаётся при подключении командног�
   что-либо менять. Внутренний Project-агент получает read-only поиск с пагинацией
   по всей доступной истории внешних порталов. Комментарий заказчика — контекст,
   а не команда на изменение, запуск или публикацию;
-- project dry-run может передать `report-request.json` постоянному report bridge.
-  SUMMING проверяет, что `REPORT_CHAT_ID` / `REPORT_THREAD_ID` уже привязаны к тому
-  же Project/Workspace как внешний read-only портал, и отправляет HTML-отчёт своим
-  Telegram-ботом без кнопок и callback state machine.
+- универсальный Project portal transport позволяет внутреннему авторизованному
+  агенту по явной просьбе владельца отправить во внешний портал текст или файл
+  из workspace, включая входящее вложение, ранее сохранённый Project-файл или
+  runner-артефакт. Сообщение сначала попадает в постоянную outbox-очередь с
+  idempotency key, SHA-256 вложения и retry, затем его отправляет Telegram-бот
+  SUMMING. Маршрут всегда берётся из привязки Project/Workspace; произвольные
+  host paths и Telegram-токен проекту недоступны. Dry-run использует тот же
+  транспорт через обычный `portal-messages.json`, без отдельного report bridge,
+  кнопок и callback state machine.
 
 ## Требования
 

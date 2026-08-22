@@ -33,6 +33,7 @@ test("node recovery exports, verifies and stages portable node state", async () 
   mkdirSync(discoveredRepository, { recursive: true });
   mkdirSync(join(dataDir, "memory"), { recursive: true });
   mkdirSync(join(dataDir, "projects", "demo"), { recursive: true });
+  mkdirSync(join(dataDir, "project-portal-outbox", "pending-message"), { recursive: true });
   mkdirSync(join(codexHome, "sessions", "2026", "08", "18"), { recursive: true });
   git(repository, "init", "--initial-branch=master");
   git(repository, "config", "user.name", "SUMMING Test");
@@ -50,6 +51,10 @@ test("node recovery exports, verifies and stages portable node state", async () 
   git(discoveredRepository, "commit", "-m", "orphan base");
   writeFileSync(join(dataDir, "memory", "identity.md"), "node identity\n");
   writeFileSync(join(dataDir, "projects", "demo", "memory.md"), "project memory\n");
+  writeFileSync(
+    join(dataDir, "project-portal-outbox", "pending-message", "record.json"),
+    "pending portal delivery\n",
+  );
   const configPath = join(root, "config.toml");
   const environmentPath = join(root, "summing.env");
   const mtprotoMasterKeyPath = join(root, "mtproto.key");
@@ -143,6 +148,10 @@ test("node recovery exports, verifies and stages portable node state", async () 
       assert.equal(discoveredWorkspace?.kind, "discovered");
       assert.equal(discoveredWorkspace?.state, "captured");
       assert.equal(inspection.components.some((component) => component.kind === "secrets"), false);
+      assert.equal(
+        inspection.components.some((component) => component.kind === "project-portal-outbox"),
+        true,
+      );
       assert.match(inspection.restore.excluded.join("\n"), /Team Space contents/);
       assert.match(inspection.restore.reconnectRequired.join("\n"), /Codex account/);
 
@@ -183,6 +192,16 @@ test("node recovery exports, verifies and stages portable node state", async () 
         "demo",
         "memory.md",
       ), "utf8"), "project memory\n");
+      assert.equal(readFileSync(join(
+        staged.stagePath,
+        "components",
+        "project-portal-outbox",
+        "payload",
+        "data",
+        "project-portal-outbox",
+        "pending-message",
+        "record.json",
+      ), "utf8"), "pending portal delivery\n");
       assert.equal(readFileSync(join(
         staged.stagePath,
         "components",

@@ -132,7 +132,7 @@ if [ "$1" = run ]; then
     mkdir -p "${appData}/dry-runs/$job"
     printf '{"status":"completed","key":"%s"}\n' "$secret" > "${appData}/dry-runs/$job/manifest.json"
     printf '<html>report</html>\n' > "${appData}/dry-runs/$job/report.html"
-    printf '{"schemaVersion":1,"reportId":"%s","reportArtifact":"report.html","message":"Informational dry-run report is ready."}\n' "$job" > "${appData}/dry-runs/$job/report-request.json"
+    printf '{"schemaVersion":1,"messages":[{"id":"dry-run-report","type":"document","text":"Informational dry-run report is ready.","artifact":"report.html"}]}\n' > "${appData}/dry-runs/$job/portal-messages.json"
   fi
 fi
 exit 0
@@ -169,8 +169,6 @@ exit 0
       [
         "LOG_LEVEL=info",
         "API_TOKEN=rotated-runtime-secret-987654321",
-        "REPORT_CHAT_ID=-1001674344837",
-        "REPORT_THREAD_ID=67800",
         "",
       ].join("\n"),
       1,
@@ -210,40 +208,22 @@ exit 0
     assert.equal(dryRunCompleted.scheduledFor, scheduledFor);
     assert.equal(dryRunCompleted.environmentRevision, 2);
     assert.equal(dryRunCompleted.artifactCount, 3);
-    assert.equal(dryRunCompleted.reportAvailable, true);
+    assert.equal(dryRunCompleted.portalMessageCount, 1);
     assert.deepEqual(
       (await client.artifacts("demo", dryRun.id)).map((artifact) => artifact.name),
-      ["manifest.json", "report.html", "report-request.json"],
+      ["manifest.json", "report.html", "portal-messages.json"],
     );
     assert.equal(
       (await client.artifact("demo", dryRun.id, "manifest.json")).content,
       '{"status":"completed","key":"[REDACTED]"}\n',
     );
-    const report = await client.report("demo", "repo", dryRun.id);
-    assert.equal(report.reportId, dryRun.id);
-    assert.equal(report.messageId, null);
-    assert.equal(report.chatId, -1001674344837);
-    assert.equal(report.topicId, 67800);
-    await assert.rejects(
-      client.bindReportMessage({
-        projectId: "demo",
-        workspaceId: "repo",
-        jobId: dryRun.id,
-        chatId: -10042,
-        topicId: 17,
-        messageId: 245,
-      }),
-      /outside its configured portal scope/,
-    );
-    const delivered = await client.bindReportMessage({
-      projectId: "demo",
-      workspaceId: "repo",
-      jobId: dryRun.id,
-      chatId: -1001674344837,
-      topicId: 67800,
-      messageId: 245,
-    });
-    assert.equal(delivered.messageId, 245);
+    const portalMessages = await client.portalMessages("demo", "repo", dryRun.id);
+    assert.deepEqual(portalMessages.messages, [{
+      id: "dry-run-report",
+      type: "document",
+      text: "Informational dry-run report is ready.",
+      artifact: "report.html",
+    }]);
     await assert.rejects(
       client.deleteArtifact("demo", "another-workspace", dryRun.id, "manifest.json"),
       /not available for this workspace/,
@@ -257,10 +237,10 @@ exit 0
     assert.equal(deletedManifest.name, "manifest.json");
     assert.deepEqual(
       (await client.artifacts("demo", dryRun.id)).map((artifact) => artifact.name),
-      ["report.html", "report-request.json"],
+      ["report.html", "portal-messages.json"],
     );
     await client.deleteArtifact("demo", "repo", dryRun.id, "report.html");
-    await client.deleteArtifact("demo", "repo", dryRun.id, "report-request.json");
+    await client.deleteArtifact("demo", "repo", dryRun.id, "portal-messages.json");
     assert.deepEqual(await client.artifacts("demo", dryRun.id), []);
     assert.equal(
       (await client.jobs("demo", "repo")).find((job) => job.id === dryRun.id)?.artifactCount,
@@ -274,7 +254,7 @@ exit 0
     assert.match(await client.log("demo", dryRun.id), /application said key=\[REDACTED\]/);
     const args = readFileSync(dockerArgs, "utf8");
     assert.match(args, new RegExp(`SUMMING_JOB_ID=${dryRun.id}`));
-    assert.match(args, /SUMMING_REPORT_BRIDGE=true/);
+    assert.match(args, /SUMMING_PORTAL_TRANSPORT=true/);
     assert.match(args, /SUMMING_PROJECT_DATA_PATH=\/app\/data/);
     assert.match(
       args,

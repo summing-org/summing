@@ -669,12 +669,12 @@ test("owners control projects while group participants get read-only Q&A", async
     assert.ok(Array.isArray(writeOptions.dynamicTools));
     assert.deepEqual(
       (writeOptions.dynamicTools as Array<{ name: string }>).map((tool) => tool.name),
-      ["runner", "repository", "project_context"],
+      ["runner", "repository", "project_context", "project_portal"],
     );
     assert.equal(typeof writeOptions.dynamicToolHandler, "function");
     assert.equal(
       runtime.state.get(bound.id).codexThreadCapability,
-      "runner-repository-project-context-v3",
+      "runner-repository-project-portal-v4",
     );
     assert.equal(runtime.state.get(bound.id).previousCodexThreadId, "thr-legacy");
 

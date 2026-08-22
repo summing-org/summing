@@ -43,10 +43,9 @@ import type {
   RunnerProjectRegistration,
 } from "./project-runner-client.js";
 import {
-  RunnerReportError,
-  RunnerReportStore,
-  type RunnerReportDelivery,
-} from "./runner-report.js";
+  RunnerPortalMessageError,
+  RunnerPortalMessageStore,
+} from "./runner-portal-messages.js";
 
 const PROJECT_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const WORKSPACE_ID = PROJECT_ID;
@@ -68,7 +67,7 @@ const ARTIFACTS = new Map([
   ["editorial-plan.json", "application/json"],
   ["errors.json", "application/json"],
   ["report.html", "text/html"],
-  ["report-request.json", "application/json"],
+  ["portal-messages.json", "application/json"],
 ]);
 
 type RunnerProjectConfigSource =
@@ -261,7 +260,7 @@ export class ProjectRunnerServer {
   private processing = false;
   private activeJob: { job: RunnerJob; controller: AbortController } | null = null;
   private readonly environments: ProjectEnvironmentStore;
-  private readonly reports: RunnerReportStore;
+  private readonly portalMessages: RunnerPortalMessageStore;
   private readonly runtimeEnvironmentRoot: string;
   private ready: boolean;
   private readonly migrationTargets: ReadonlyMap<string, LegacyEnvironmentMigrationTarget>;
@@ -290,7 +289,7 @@ export class ProjectRunnerServer {
     }
     mkdirSync(this.managedConfigRoot(), { recursive: true, mode: 0o700 });
     this.environments = new ProjectEnvironmentStore(resolve(dataRoot, "environments"), environmentKey);
-    this.reports = new RunnerReportStore(dataRoot);
+    this.portalMessages = new RunnerPortalMessageStore(dataRoot);
     this.ready = initiallyReady;
     this.migrationTargets = new Map(
       migrationTargets.map((target) => [this.migrationKey(target.projectId, target.workspaceId), target]),
@@ -571,46 +570,21 @@ export class ProjectRunnerServer {
       json(response, 200, { artifacts: this.listArtifacts(jobId, project) });
       return;
     }
-    if (request.method === "GET" && url.pathname === "/report") {
+    if (request.method === "GET" && url.pathname === "/portal/messages") {
       const projectId = url.searchParams.get("project") ?? "";
       const workspaceId = url.searchParams.get("workspace") ?? "";
       const jobId = url.searchParams.get("job") ?? "";
       if (!PROJECT_ID.test(projectId) || !WORKSPACE_ID.test(workspaceId) || !JOB_ID.test(jobId)) {
-        throw new RunnerHttpError(400, "invalid report scope");
+        throw new RunnerHttpError(400, "invalid portal message scope");
       }
       this.projectConfig(projectId, workspaceId);
       const job = this.storedJob(projectId, jobId);
       if (job.workspaceId !== workspaceId || job.action !== "dry-run") {
-        throw new RunnerHttpError(404, "report request was not found for this job");
+        throw new RunnerHttpError(404, "portal messages were not found for this job");
       }
-      const report = this.reports.byJob(projectId, workspaceId, jobId);
-      if (!report) throw new RunnerHttpError(404, "report request was not found for this job");
-      json(response, 200, { report });
-      return;
-    }
-    if (request.method === "POST" && url.pathname === "/report/message") {
-      const body = await jsonBody(request);
-      const allowedKeys = new Set([
-        "projectId",
-        "workspaceId",
-        "jobId",
-        "chatId",
-        "topicId",
-        "messageId",
-      ]);
-      if (Object.keys(body).some((key) => !allowedKeys.has(key))) {
-        throw new RunnerHttpError(400, "report message binding contains unsupported fields");
-      }
-      json(response, 200, {
-        report: this.reports.bindMessage({
-          projectId: String(body.projectId ?? ""),
-          workspaceId: String(body.workspaceId ?? ""),
-          jobId: String(body.jobId ?? ""),
-          chatId: Number(body.chatId),
-          topicId: Number(body.topicId),
-          messageId: Number(body.messageId),
-        }),
-      });
+      const batch = this.portalMessages.byJob(projectId, workspaceId, jobId);
+      if (!batch) throw new RunnerHttpError(404, "portal messages were not found for this job");
+      json(response, 200, { batch });
       return;
     }
     if (request.method === "GET" && url.pathname === "/artifact") {
@@ -1281,14 +1255,16 @@ export class ProjectRunnerServer {
         const project = this.projectConfig(job.projectId, job.workspaceId);
         const artifactDirectory = this.safeArtifactDirectory(project, job.id);
         if (artifactDirectory) {
-          const report = this.reports.capture({
+          const batch = this.portalMessages.capture({
             projectId: job.projectId,
             workspaceId: job.workspaceId,
             jobId: job.id,
             artifactDirectory,
-            delivery: this.reportDelivery(job),
+            allowedArtifacts: new Set(
+              [...ARTIFACTS.keys()].filter((name) => name !== "portal-messages.json"),
+            ),
           });
-          if (report) job.reportAvailable = true;
+          if (batch) job.portalMessageCount = batch.messages.length;
         }
       }
       job.status = "completed";
@@ -1319,35 +1295,6 @@ export class ProjectRunnerServer {
 
   private image(job: RunnerJob): string {
     return `summing/${job.projectId}-${job.workspaceId}:${job.revision}`;
-  }
-
-  private reportDelivery(job: RunnerJob): RunnerReportDelivery | null {
-    const snapshotPath = resolve(this.jobDirectory(job.projectId, job.id), "environment.json");
-    if (!existsSync(snapshotPath)) return null;
-    const environment = this.environments.readJobSnapshot(
-      job.projectId,
-      job.workspaceId,
-      job.id,
-      snapshotPath,
-    ).values;
-    const reportChatId = environment.get("REPORT_CHAT_ID")?.trim() ?? "";
-    const reportTopicId = environment.get("REPORT_THREAD_ID")?.trim() ?? "";
-    if (!reportChatId && !reportTopicId) return null;
-    if (!reportChatId || !reportTopicId) {
-      throw new RunnerReportError(
-        409,
-        "report delivery requires REPORT_CHAT_ID and REPORT_THREAD_ID in one environment snapshot",
-      );
-    }
-    const chatId = Number(reportChatId);
-    const topicId = Number(reportTopicId);
-    if (!Number.isSafeInteger(chatId) || chatId === 0) {
-      throw new RunnerReportError(409, "REPORT_CHAT_ID must be a non-zero safe integer");
-    }
-    if (!Number.isSafeInteger(topicId) || topicId < 0) {
-      throw new RunnerReportError(409, "REPORT_THREAD_ID must be a non-negative safe integer");
-    }
-    return { chatId, topicId };
   }
 
   private async ensureImage(
@@ -1424,7 +1371,7 @@ export class ProjectRunnerServer {
         args.push(
           "--env", "DRY_RUN=true",
           "--env", "PUBLISH_IMMEDIATELY=true",
-          "--env", "SUMMING_REPORT_BRIDGE=true",
+          "--env", "SUMMING_PORTAL_TRANSPORT=true",
           "--env", "SUMMING_PROJECT_DATA_PATH=/app/data",
           "--env", `SUMMING_JOB_ID=${job.id}`,
           "--env", `SUMMING_REVISION=${job.revision}`,
@@ -1632,7 +1579,7 @@ export class ProjectRunnerServer {
       json(response, error.status, { error: error.message });
       return;
     }
-    if (error instanceof RunnerReportError) {
+    if (error instanceof RunnerPortalMessageError) {
       json(response, error.status, { error: error.message });
       return;
     }

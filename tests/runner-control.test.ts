@@ -285,8 +285,8 @@ test("manual tool calls deduplicate jobs, expose an overview, and notify their c
   }
 });
 
-test("a completed manual dry-run routes its report to the originating actor and conversation", async () => {
-  const root = mkdtempSync(join(tmpdir(), "summing-runner-report-watch-"));
+test("a completed manual dry-run routes portal messages to the originating actor and conversation", async () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-runner-portal-watch-"));
   const job: RunnerJob = {
     id: "b4a0bb44-d858-40ba-93b9-5e8f0c105c85",
     projectId: "demo",
@@ -294,12 +294,12 @@ test("a completed manual dry-run routes its report to the originating actor and 
     action: "dry-run",
     revision: "a".repeat(40),
     status: "completed",
-    reportAvailable: true,
+    portalMessageCount: 1,
     createdAt: "2026-08-20T04:00:00.000Z",
     completedAt: "2026-08-20T04:01:00.000Z",
   };
   const genericNotifications: string[] = [];
-  const reportNotifications: Array<{
+  const portalNotifications: Array<{
     jobId: string;
     conversationId: string;
     authorizedUserId: number;
@@ -317,13 +317,13 @@ test("a completed manual dry-run routes its report to the originating actor and 
     },
     () => Date.parse("2026-08-20T04:01:15.000Z"),
     15_000,
-    async (reportJob, conversationId, authorizedUserId) => {
-      reportNotifications.push({ jobId: reportJob.id, conversationId, authorizedUserId });
+    async (portalJob, conversationId, authorizedUserId) => {
+      portalNotifications.push({ jobId: portalJob.id, conversationId, authorizedUserId });
       return true;
     },
   );
   try {
-    const { reportAvailable: _reportAvailable, ...queuedJob } = job;
+    const { portalMessageCount: _portalMessageCount, ...queuedJob } = job;
     control.store.watchJob(
       context("turn-report"),
       { ...queuedJob, status: "queued" },
@@ -331,7 +331,7 @@ test("a completed manual dry-run routes its report to the originating actor and 
     );
     await control.tick();
     await control.tick();
-    assert.deepEqual(reportNotifications, [{
+    assert.deepEqual(portalNotifications, [{
       jobId: job.id,
       conversationId: "conversation-1",
       authorizedUserId: 42,
