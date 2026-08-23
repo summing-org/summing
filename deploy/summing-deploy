@@ -423,6 +423,16 @@ install_project_runner_host() {
     "${installer}"
 }
 
+provision_self_project_worktree() {
+  local release=$1
+  local provisioner=${release}/deploy/provision-self-project-worktree
+  if [ ! -x "${provisioner}" ] || [ -L "${provisioner}" ]; then
+    printf 'SUMMING self-project provisioner is missing or unsafe: %s\n' "${provisioner}" >&2
+    return 2
+  fi
+  SUMMING_SELF_PROJECT_BRANCH="${branch}" "${provisioner}"
+}
+
 restart_services() {
   if systemctl is-enabled --quiet summing-project-runner.service 2>/dev/null; then
     systemctl restart summing-project-runner.service
@@ -736,6 +746,10 @@ fi
 phase=drain
 failure_kind=runtime
 wait_for_idle_runtime
+phase=self-project
+failure_kind=runtime
+write_state deploying "Готовим постоянный worktree SUMMING" "${previous_sha}" "${target_sha}"
+provision_self_project_worktree "${release_dir}"
 phase=restart
 failure_kind=restart
 write_state deploying "Перезапускаем сервисы на ${target_sha:0:12}" "${previous_sha}" "${target_sha}"

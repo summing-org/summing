@@ -1,0 +1,241 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+umask 0027
+
+legacy_repo=${SUMMING_SELF_PROJECT_SOURCE:-/opt/summing}
+integration_worktree=${SUMMING_SELF_PROJECT_WORKTREE:-/var/lib/summing/data/repositories/summing/repo}
+config_path=${SUMMING_SELF_PROJECT_CONFIG:-/var/lib/summing/data/config.toml}
+branch=${SUMMING_SELF_PROJECT_BRANCH:-master}
+runtime_user=${SUMMING_SELF_PROJECT_USER:-summing}
+test_root=${SUMMING_SELF_PROJECT_TEST_ROOT:-}
+remote=${SUMMING_SELF_PROJECT_REMOTE:-origin}
+
+case "${legacy_repo}:${integration_worktree}:${config_path}" in
+  *$'\n'*|*'"'*)
+    printf '%s\n' 'Self-project paths contain unsupported characters.' >&2
+    exit 2
+    ;;
+esac
+for path in "${legacy_repo}" "${integration_worktree}" "${config_path}"; do
+  case "${path}" in
+    /*) ;;
+    *)
+      printf 'Self-project path must be absolute: %s\n' "${path}" >&2
+      exit 2
+      ;;
+  esac
+done
+for value in "${branch}" "${remote}"; do
+  case "${value}" in
+    ''|*[!A-Za-z0-9._/-]*|*..*|/*|*/)
+      printf '%s\n' 'Self-project branch or remote is invalid.' >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [ "${EUID}" -ne 0 ]; then
+  if [ -z "${test_root}" ]; then
+    printf '%s\n' 'provision-self-project-worktree must run as root.' >&2
+    exit 2
+  fi
+  runtime_user=$(id -un)
+fi
+
+if ! id "${runtime_user}" >/dev/null 2>&1; then
+  printf 'Self-project runtime user does not exist: %s\n' "${runtime_user}" >&2
+  exit 2
+fi
+runtime_group=$(id -gn "${runtime_user}")
+if [ "${EUID}" -eq 0 ]; then
+  runtime_home=$(getent passwd "${runtime_user}" | cut -d: -f6)
+else
+  runtime_home=${HOME}
+fi
+if [ -z "${runtime_home}" ]; then
+  printf 'Cannot resolve home for self-project runtime user: %s\n' "${runtime_user}" >&2
+  exit 2
+fi
+
+if [ -n "${test_root}" ]; then
+  test_root=$(realpath "${test_root}")
+  for path in "${legacy_repo}" "${config_path}" "$(dirname "${integration_worktree}")"; do
+    resolved=$(realpath "${path}")
+    case "${resolved}" in
+      "${test_root}"|"${test_root}"/*) ;;
+      *)
+        printf 'Test-mode self-project path escapes its root: %s\n' "${path}" >&2
+        exit 2
+        ;;
+    esac
+  done
+fi
+
+if [ ! -d "${legacy_repo}" ] || [ -L "${legacy_repo}" ] || [ ! -e "${legacy_repo}/.git" ]; then
+  printf 'Legacy SUMMING repository is missing or unsafe: %s\n' "${legacy_repo}" >&2
+  exit 2
+fi
+if [ ! -f "${config_path}" ] || [ -L "${config_path}" ]; then
+  printf 'SUMMING config is missing or unsafe: %s\n' "${config_path}" >&2
+  exit 2
+fi
+
+configured_path=$(awk '
+  $0 == "[projects.summing.workspaces.repo]" { section = 1; next }
+  section && /^\[/ { exit }
+  section && /^[[:space:]]*path[[:space:]]*=[[:space:]]*"[^"]+"[[:space:]]*$/ {
+    value = $0
+    sub(/^[^"]*"/, "", value)
+    sub(/"[[:space:]]*$/, "", value)
+    print value
+    exit
+  }
+' "${config_path}")
+if [ -z "${configured_path}" ]; then
+  printf '%s\n' 'projects.summing.workspaces.repo.path is missing from config.toml.' >&2
+  exit 2
+fi
+if [ "${configured_path}" != "${legacy_repo}" ] && \
+  [ "${configured_path}" != "${integration_worktree}" ]; then
+  printf 'Self-project already uses a custom workspace; leaving it unchanged: %s\n' \
+    "${configured_path}"
+  exit 0
+fi
+
+git_as_runtime() {
+  if [ "$(id -u)" -eq "$(id -u "${runtime_user}")" ]; then
+    env -i \
+      HOME="${runtime_home}" \
+      USER="${runtime_user}" \
+      LOGNAME="${runtime_user}" \
+      PATH=/usr/local/bin:/usr/bin:/bin \
+      GIT_TERMINAL_PROMPT=0 \
+      git -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"
+  else
+    runuser -u "${runtime_user}" -- env -i \
+      HOME="${runtime_home}" \
+      USER="${runtime_user}" \
+      LOGNAME="${runtime_user}" \
+      PATH=/usr/local/bin:/usr/bin:/bin \
+      GIT_TERMINAL_PROMPT=0 \
+      git -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"
+  fi
+}
+
+source_root=$(git_as_runtime -C "${legacy_repo}" rev-parse --show-toplevel)
+if [ "$(realpath "${source_root}")" != "$(realpath "${legacy_repo}")" ]; then
+  printf '%s\n' 'Legacy SUMMING path is not the root Git worktree.' >&2
+  exit 2
+fi
+source_common=$(git_as_runtime -C "${legacy_repo}" \
+  rev-parse --path-format=absolute --git-common-dir)
+
+git_as_runtime -C "${legacy_repo}" fetch --prune "${remote}"
+remote_ref="refs/remotes/${remote}/${branch}"
+if ! git_as_runtime -C "${legacy_repo}" show-ref --verify --quiet "${remote_ref}"; then
+  printf 'Self-project remote branch is missing: %s\n' "${remote_ref}" >&2
+  exit 2
+fi
+
+if [ ! -e "${integration_worktree}" ]; then
+  if [ -n "$(git_as_runtime -C "${legacy_repo}" status --porcelain)" ]; then
+    printf '%s\n' 'Legacy SUMMING worktree is dirty; refusing to detach it.' >&2
+    exit 2
+  fi
+  branch_holder=$(git_as_runtime -C "${legacy_repo}" worktree list --porcelain | awk \
+    -v target="refs/heads/${branch}" '
+      $1 == "worktree" { worktree = substr($0, length($1) + 2) }
+      $1 == "branch" && $2 == target { print worktree; exit }
+    ')
+  if [ -n "${branch_holder}" ] && \
+    [ "$(realpath "${branch_holder}")" != "$(realpath "${legacy_repo}")" ]; then
+    printf 'Self-project branch is already checked out elsewhere: %s\n' "${branch_holder}" >&2
+    exit 2
+  fi
+  current_branch=$(git_as_runtime -C "${legacy_repo}" symbolic-ref --quiet --short HEAD || true)
+  if [ -n "${current_branch}" ] && [ "${current_branch}" != "${branch}" ]; then
+    printf 'Legacy SUMMING worktree is on unexpected branch: %s\n' "${current_branch}" >&2
+    exit 2
+  fi
+  if [ "${current_branch}" = "${branch}" ]; then
+    git_as_runtime -C "${legacy_repo}" switch --detach
+  fi
+  if [ "${EUID}" -eq 0 ]; then
+    install -d -o "${runtime_user}" -g "${runtime_group}" -m 0700 \
+      "$(dirname "${integration_worktree}")"
+  else
+    mkdir -p "$(dirname "${integration_worktree}")"
+    chmod 0700 "$(dirname "${integration_worktree}")"
+  fi
+  git_as_runtime -C "${legacy_repo}" worktree prune
+  git_as_runtime -C "${legacy_repo}" worktree add "${integration_worktree}" "${branch}"
+fi
+
+if [ ! -d "${integration_worktree}" ] || [ -L "${integration_worktree}" ] || \
+  [ ! -e "${integration_worktree}/.git" ]; then
+  printf 'Self-project integration worktree is missing or unsafe: %s\n' \
+    "${integration_worktree}" >&2
+  exit 2
+fi
+target_common=$(git_as_runtime -C "${integration_worktree}" \
+  rev-parse --path-format=absolute --git-common-dir)
+if [ "$(realpath "${source_common}")" != "$(realpath "${target_common}")" ]; then
+  printf '%s\n' 'Self-project integration worktree belongs to another repository.' >&2
+  exit 2
+fi
+target_branch=$(git_as_runtime -C "${integration_worktree}" \
+  symbolic-ref --quiet --short HEAD || true)
+if [ "${target_branch}" != "${branch}" ]; then
+  printf 'Self-project integration worktree is on unexpected branch: %s\n' \
+    "${target_branch:-detached}" >&2
+  exit 2
+fi
+if [ -n "$(git_as_runtime -C "${integration_worktree}" status --porcelain)" ]; then
+  printf '%s\n' 'Self-project integration worktree is dirty; refusing to update it.' >&2
+  exit 2
+fi
+
+local_sha=$(git_as_runtime -C "${integration_worktree}" rev-parse "refs/heads/${branch}^{commit}")
+remote_sha=$(git_as_runtime -C "${integration_worktree}" rev-parse "${remote_ref}^{commit}")
+if git_as_runtime -C "${integration_worktree}" merge-base --is-ancestor \
+  "${local_sha}" "${remote_sha}"; then
+  if [ "${local_sha}" != "${remote_sha}" ]; then
+    git_as_runtime -C "${integration_worktree}" merge --ff-only "${remote_ref}"
+  fi
+elif git_as_runtime -C "${integration_worktree}" merge-base --is-ancestor \
+  "${remote_sha}" "${local_sha}"; then
+  printf 'Self-project master is ahead of %s; preserving local commits.\n' "${remote_ref}"
+else
+  printf 'Self-project master diverged from %s; refusing automatic reconciliation.\n' \
+    "${remote_ref}" >&2
+  exit 2
+fi
+
+if [ "${configured_path}" != "${integration_worktree}" ]; then
+  temporary=$(mktemp "${config_path}.self-project.XXXXXX")
+  if ! awk -v target="${integration_worktree}" '
+    $0 == "[projects.summing.workspaces.repo]" { section = 1; print; next }
+    section && /^\[/ { section = 0 }
+    section && /^[[:space:]]*path[[:space:]]*=[[:space:]]*"[^"]+"[[:space:]]*$/ {
+      print "path = \"" target "\""
+      updated = 1
+      next
+    }
+    { print }
+    END { if (!updated) exit 42 }
+  ' "${config_path}" > "${temporary}"; then
+    rm -f -- "${temporary}"
+    printf '%s\n' 'Could not update self-project workspace in config.toml.' >&2
+    exit 2
+  fi
+  if [ "${EUID}" -eq 0 ]; then
+    chown --reference="${config_path}" "${temporary}"
+    chmod --reference="${config_path}" "${temporary}"
+  fi
+  mv -f -- "${temporary}" "${config_path}"
+fi
+
+printf 'Self-project integration worktree ready: %s@%s\n' \
+  "${integration_worktree}" \
+  "$(git_as_runtime -C "${integration_worktree}" rev-parse --short=12 HEAD)"

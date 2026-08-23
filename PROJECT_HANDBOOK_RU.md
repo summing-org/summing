@@ -973,8 +973,11 @@ runner-ом, а не клиентом: фиксированные config paths, 
 network policy и точный список Workspace. Root-managed JSON остаётся только для
 статических Project и имеет приоритет над динамическим профилем. Managed profile
 сначала использует `config.json`, а для старых pinned revisions допускает
-`config.example.json`; отдельная постоянная host-копия application config не
-является runtime source. Поэтому code SHA, config и env revision образуют один
+`config.example.json`. Если оба файла отсутствуют, runner создаёт для Release
+пустой `{}` config; это разрешено только автоматически зарегистрированному
+managed profile. Статический root-managed profile по-прежнему fail-closed требует
+хотя бы один указанный `configSourcePaths`. Отдельная постоянная host-копия
+application config не является runtime source. Поэтому code SHA, config и env revision образуют один
 проверяемый job snapshot, а изменение Project config не требует ручной синхронизации
 дублирующего host-файла. Старый абсолютный `configPath` сохранён только как
 совместимый режим для других root-managed Project.
@@ -1550,6 +1553,16 @@ Production не запускается непосредственно из из�
 первого обновления — на неизменяемый каталог
 `/opt/summing-releases/<full-commit-sha>`.
 
+Сам `/opt/summing` после активации остаётся detached deployment source. Branch
+`master`, в который self-project agent интегрирует подготовленные commits, живёт
+в durable linked worktree `/var/lib/summing/data/repositories/summing/repo`.
+Оба пути и все conversation worktrees используют один Git common directory,
+поэтому restart сервиса и переключение immutable release не теряют branches или
+готовые commits.
+Первое обновление выполняется ещё предыдущей версией deployment worker, поэтому
+уже существующий runner-installer release-hook также идемпотентно вызывает
+provisioner нового release до перезапуска runtime.
+
 Один `summing-deploy.service` обслуживает два источника запроса:
 
 - `summing-deploy.timer` проверяет `origin/master` каждые 30 минут;
@@ -1578,18 +1591,20 @@ helper уже из нового release; так изменение timer при�
 Порядок deployment:
 
 1. под process-wide `flock` получить закреплённый `origin/master` от имени
-   `summing`, не меняя index, branch или working tree `/opt/summing`;
+   `summing`, не меняя index или files `/opt/summing`;
 2. отклонить неожиданный remote URL и non-fast-forward переход;
 3. экспортировать точный commit через `git archive` во временный release;
 4. от имени отдельного `summing-builder`, не имеющего доступа к application
    secrets и data dir, последовательно выполнить `npm ci`, lint, тесты и
    production prune, публикуя текущую фазу;
-5. дождаться `active = 0`, атомарно заменить symlink и перезапустить runner и
-   основной сервис;
-6. проверить оба loopback health endpoints; при ошибке вернуть прежний symlink
+5. дождаться `active = 0`, один раз отделить `master` от `/opt/summing`, создать
+   durable integration worktree и затем только fast-forward-ить его; локальные
+   commits сохраняются, divergence останавливает deployment;
+6. атомарно заменить symlink и перезапустить runner и основной сервис;
+7. проверить оба loopback health endpoints; при ошибке вернуть прежний symlink
    и повторно запустить старый release;
-7. атомарно синхронизировать systemd units и перезапустить deployment path/timer;
-8. сохранить JSON-состояние для Mini App и оставить последние пять releases.
+8. атомарно синхронизировать systemd units и перезапустить deployment path/timer;
+9. сохранить JSON-состояние для Mini App и оставить последние пять releases.
 
 Каждая значимая завершённая попытка (`succeeded`, `failed` или migration
 `waiting`) попадает в ограниченную историю из 20 записей. Для ошибки worker

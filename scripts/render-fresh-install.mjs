@@ -280,7 +280,7 @@ default_workspace = "repo"
 self_change = true
 
 [projects.summing.workspaces.repo]
-path = "/opt/summing"
+path = "/var/lib/summing/data/repositories/summing/repo"
 `;
 
   const caddy = viewerDomain

@@ -173,6 +173,8 @@ if [ "${build_status}" -ne 0 ]; then
   exit "${build_status}"
 fi
 
+"${repo_dir}/deploy/provision-self-project-worktree"
+
 if [ -L "${current_link}" ]; then
   :
 elif [ -e "${current_link}" ]; then

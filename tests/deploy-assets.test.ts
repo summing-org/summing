@@ -20,6 +20,8 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
   const activation = asset("deploy/activate.sh");
   const runnerInstallerPath = join(root, "deploy/install-project-runner-host");
   const runnerInstaller = asset("deploy/install-project-runner-host");
+  const selfProjectProvisionerPath = join(root, "deploy/provision-self-project-worktree");
+  const selfProjectProvisioner = asset("deploy/provision-self-project-worktree");
   const projectRunnerService = asset("deploy/summing-project-runner.service");
   const cloudInit = asset("deploy/cloud-init.yaml");
 
@@ -37,6 +39,10 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
     encoding: "utf8",
   });
   assert.equal(runnerInstallerSyntax.status, 0, runnerInstallerSyntax.stderr);
+  const selfProjectProvisionerSyntax = spawnSync("bash", ["-n", selfProjectProvisionerPath], {
+    encoding: "utf8",
+  });
+  assert.equal(selfProjectProvisionerSyntax.status, 0, selfProjectProvisionerSyntax.stderr);
   assert.notEqual(statSync(cutoverPath).mode & 0o111, 0, "cutover hook must be executable");
   assert.notEqual(
     statSync(systemdSyncPath).mode & 0o111,
@@ -47,6 +53,11 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
     statSync(runnerInstallerPath).mode & 0o111,
     0,
     "project runner installer must be executable",
+  );
+  assert.notEqual(
+    statSync(selfProjectProvisionerPath).mode & 0o111,
+    0,
+    "self-project worktree provisioner must be executable",
   );
   assert.match(script, /git_as_summing -C "\$\{repo_dir\}" fetch --prune/);
   assert.match(script, /manual_action=deploy/);
@@ -77,6 +88,8 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
   assert.match(script, /mv -Tf "\$\{next_link\}" "\$\{current_link\}"/);
   assert.match(script, /rolling_back/);
   assert.match(script, /wait_for_idle_runtime/);
+  assert.match(script, /provision_self_project_worktree\(\)/);
+  assert.match(script, /SUMMING_SELF_PROJECT_BRANCH="\$\{branch\}" "\$\{provisioner\}"/);
   assert.match(script, /sync_project_runner_configs\(\)/);
   assert.match(script, /assets=\("\$\{release\}"\/deploy\/\*\.runner\.json\)/);
   assert.match(script, /Managed runner config must not be a symlink/);
@@ -119,6 +132,15 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
   );
   assert.ok(unchangedUnitSync > unchangedSync && unchangedCutover > unchangedUnitSync);
   const releaseSwitch = script.indexOf('switch_current "${release_dir}"');
+  const idleWait = script.lastIndexOf("wait_for_idle_runtime", releaseSwitch);
+  const selfProjectProvision = script.lastIndexOf(
+    'provision_self_project_worktree "${release_dir}"',
+    releaseSwitch,
+  );
+  assert.ok(
+    idleWait >= 0 && selfProjectProvision > idleWait && selfProjectProvision < releaseSwitch,
+    "self-project master must move to durable storage while the runtime is idle",
+  );
   const releaseSync = script.indexOf(
     'sync_project_runner_configs "${release_dir}"',
     releaseSwitch,
@@ -170,10 +192,25 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
   assert.match(activation, /KB transfer key must be a regular file containing 64 hex characters/);
   assert.match(activation, /install -d -o root -g summing -m 1770 "\$\{deploy_state_dir\}"/);
   assert.match(activation, /deploy\/install-project-runner-host/);
+  assert.match(activation, /deploy\/provision-self-project-worktree/);
   assert.match(activation, /summing-builder must not belong to the secret-bearing summing group/);
   assert.match(activation, /runuser -u summing-builder -- env -i/);
   assert.match(activation, /chown -R summing:summing "\$\{repo_dir\}"/);
   assert.match(activation, /Initial release build failed with exit code/);
+  assert.match(
+    asset("deploy/config.production.toml"),
+    /\[projects\.summing\.workspaces\.repo\][\s\S]*path = "\/var\/lib\/summing\/data\/repositories\/summing\/repo"/,
+  );
+  assert.match(selfProjectProvisioner, /git_as_runtime -C "\$\{legacy_repo\}" switch --detach/);
+  assert.match(
+    selfProjectProvisioner,
+    /git_as_runtime -C "\$\{legacy_repo\}" worktree add "\$\{integration_worktree\}" "\$\{branch\}"/,
+  );
+  assert.match(
+    selfProjectProvisioner,
+    /git_as_runtime -C "\$\{integration_worktree\}" merge --ff-only "\$\{remote_ref\}"/,
+  );
+  assert.doesNotMatch(selfProjectProvisioner, /git\s+(?:reset|checkout|clean)\b/);
   assert.match(activation, /\n  openssh-client\n/);
   assert.match(cloudInit, /\n  - openssh-client\n/);
   assert.doesNotMatch(activation, /systemctl restart summing-secrets\.service/);
@@ -200,6 +237,11 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
   assert.match(cutover, /No explicit SUMMING_ENV_MIGRATION_PROJECT/);
   assert.doesNotMatch(cutover, /ash-seo/);
   assert.match(runnerInstaller, /runner_user=summing-project-runner/);
+  assert.match(
+    runnerInstaller,
+    /self_project_provisioner=\$\{release_root\}\/deploy\/provision-self-project-worktree[\s\S]*\n"\$\{self_project_provisioner\}"\n/,
+    "the existing runner installer hook must migrate the self-project on the first upgrade",
+  );
   assert.match(runnerInstaller, /usermod --append --groups "\$\{runner_user\}" summing/);
   assert.doesNotMatch(
     runnerInstaller,

@@ -50,6 +50,7 @@ fi
 for asset in \
   "${release_root}/deploy/summing-project-runner.service" \
   "${release_root}/deploy/docker-rootless-daemon.json" \
+  "${release_root}/deploy/provision-self-project-worktree" \
   "${release_root}/dist/src/project-runner-main.js"; do
   if [ ! -f "${asset}" ] || [ -L "${asset}" ]; then
     printf 'SUMMING project runner asset is missing or unsafe: %s\n' "${asset}" >&2
@@ -60,6 +61,13 @@ if ! getent group summing >/dev/null; then
   printf '%s\n' 'The summing group is missing.' >&2
   exit 2
 fi
+self_project_provisioner=${release_root}/deploy/provision-self-project-worktree
+if [ ! -x "${self_project_provisioner}" ]; then
+  printf 'SUMMING self-project provisioner is not executable: %s\n' \
+    "${self_project_provisioner}" >&2
+  exit 2
+fi
+"${self_project_provisioner}"
 
 required_packages=(
   acl

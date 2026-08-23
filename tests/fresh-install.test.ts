@@ -75,6 +75,10 @@ test("fresh-install renderer validates one private manifest and never prints sec
     assert.match(assetFrom(env), /^SUMMING_OBJECT_STORE=s3$/m);
     assert.match(assetFrom(env), /^SUMMING_TELEGRAM_TERMS_REVIEWED=true$/m);
     assert.match(assetFrom(config), /\[knowledge_sync\][\s\S]*object_store = "s3"/);
+    assert.match(
+      assetFrom(config),
+      /\[projects\.summing\.workspaces\.repo\][\s\S]*path = "\/var\/lib\/summing\/data\/repositories\/summing\/repo"/,
+    );
     assert.match(assetFrom(caddy), /^assist\.example\.com \{/);
     assert.equal(statSync(env).mode & 0o777, 0o640);
     assert.equal(statSync(config).mode & 0o777, 0o600);

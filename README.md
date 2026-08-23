@@ -197,6 +197,7 @@ npm ci
 npm run build
 npm prune --omit=dev
 cp deploy/config.production.toml /var/lib/summing/data/config.toml
+sudo deploy/provision-self-project-worktree
 sudo install -d -m 0755 /etc/codex
 sudo install -m 0644 deploy/codex-requirements.toml /etc/codex/requirements.toml
 ```
@@ -399,7 +400,7 @@ $SUMMING_DATA_DIR/
 ├── projects/<id>/memory.md
 ├── run-artifacts/<conversation-id>/<run-id>/
 ├── attachments/<conversation-id>/   # pending private spool
-├── repositories/<id>/<repo>/
+├── repositories/<id>/<repo>/        # includes durable SUMMING integration master
 └── worktrees/<conversation-id>/
 ```
 
@@ -500,6 +501,10 @@ sudo /opt/summing/deploy/install-project-operations.sh
 Installer создаёт отдельного `summing-project-runner`, rootless Docker с лимитом build
 cache 8 ГБ, приватный AES-ключ для project env и HTTPS proxy. Project profiles
 регистрируются самим SUMMING и не создаются installer-ом по встроенному имени.
+Для managed Project `config.json` и `config.example.json` являются
+необязательными: если в выбранной revision нет ни одного файла, Release получает
+безопасный пустой `{}` config. Статические root-managed profiles остаются
+строгими и завершают job ошибкой при отсутствии указанного `configSourcePaths`.
 Имя, socket и state отделены от
 внешних runner-сервисов узла; существующий `summing-runner.service` не изменяется.
 Пользователь `summing` не получает
@@ -721,8 +726,16 @@ Migration отказывается работать при активных Code
 **Настройки SUMMING** Mini App **Управление**. Deployment API не требует Project или
 Conversation и возвращает `403` любому пользователю, кроме администратора.
 
-Worker никогда не делает `pull`, `reset` или checkout рабочего `/opt/summing`.
-Он экспортирует точный remote commit в `/opt/summing-releases/<sha>`, собирает и
+`/opt/summing` служит Git-источником deployment и после одноразовой миграции
+остаётся detached. Интеграционный `master`, который видит self-project agent,
+находится в постоянном linked worktree
+`/var/lib/summing/data/repositories/summing/repo`; deploy сначала ждёт завершения
+активных runs, затем fast-forward-ит этот worktree либо сохраняет локальные
+коммиты, а divergence отклоняет. Conversation worktrees используют тот же Git
+common directory, поэтому их ветки и commits переживают restart и смену release.
+
+Release worker не делает `pull`, `reset` или checkout для сборки. Он экспортирует
+точный remote commit в `/opt/summing-releases/<sha>`, собирает и
 тестирует snapshot от отдельного пользователя `summing-builder`, ждёт завершения
 активных Codex runs, атомарно переключает `/opt/summing-current` и проверяет
 SUMMING и runner. При неуспешном health check symlink и сервисы автоматически

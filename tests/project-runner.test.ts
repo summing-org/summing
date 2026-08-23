@@ -469,6 +469,77 @@ test("runner persists a constrained managed project registration and enforces it
   }
 });
 
+test("managed projects may omit snapshot config while static projects remain strict", async () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-runner-optional-config-"));
+  const repository = join(root, "repo");
+  const configRoot = join(root, "static-config");
+  const dataRoot = join(root, "data");
+  const managedDataRoot = join(root, "managed-data");
+  const socket = join(root, "runner.sock");
+  const fakeDocker = join(root, "docker");
+  mkdirSync(repository);
+  mkdirSync(configRoot);
+  execFileSync("git", ["init", "--initial-branch=main", repository]);
+  execFileSync("git", ["-C", repository, "config", "user.name", "Test"]);
+  execFileSync("git", ["-C", repository, "config", "user.email", "test@example.test"]);
+  writeFileSync(join(repository, "Dockerfile"), "FROM scratch\n");
+  execFileSync("git", ["-C", repository, "add", "."]);
+  execFileSync("git", ["-C", repository, "commit", "-m", "image"]);
+  writeFileSync(
+    fakeDocker,
+    `#!/bin/sh
+if [ "$1" = image ]; then
+  printf '%s\n' 'sha256:optional-config-test-image'
+fi
+exit 0
+`,
+    { mode: 0o700 },
+  );
+  const server = new ProjectRunnerServer(
+    socket,
+    dataRoot,
+    configRoot,
+    fakeDocker,
+    Buffer.alloc(32, 12),
+    true,
+    [],
+    join(root, "migration.sock"),
+    managedDataRoot,
+  );
+  try {
+    await server.start();
+    const client = new ProjectRunnerClient(socket);
+    await client.registerProject("managed-demo", ["repo"]);
+    const inspector = new GitInspector(repository);
+    const revision = await inspector.resolveRevision("HEAD");
+    const archive = await inspector.archive(revision);
+    const managedJob = await client.submit("managed-demo", "repo", "validate", revision, archive);
+    const managedCompleted = await completedJob(client, "managed-demo", "repo", managedJob.id);
+    assert.equal(managedCompleted.status, "completed");
+    assert.equal(
+      readFileSync(
+        join(dataRoot, "projects", "managed-demo", "runs", managedJob.id, "release-config.json"),
+        "utf8",
+      ),
+      "{}\n",
+    );
+
+    writeFileSync(join(configRoot, "static-demo.json"), JSON.stringify({
+      configSourcePaths: ["config.json"],
+      dataPath: join(root, "static-data"),
+      network: false,
+    }));
+    await client.registerProject("static-demo", ["repo"]);
+    const staticJob = await client.submit("static-demo", "repo", "validate", revision, archive);
+    const staticCompleted = await completedJob(client, "static-demo", "repo", staticJob.id);
+    assert.equal(staticCompleted.status, "failed");
+    assert.match(staticCompleted.error ?? "", /project config is missing from source snapshot/);
+  } finally {
+    await server.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("runner cancels queued jobs and force-removes a running job container", async () => {
   const root = mkdtempSync(join(tmpdir(), "summing-runner-cancel-"));
   const repository = join(root, "repo");

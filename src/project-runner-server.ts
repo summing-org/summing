@@ -96,7 +96,8 @@ const ARTIFACTS = new Map([
 
 type RunnerProjectConfigSource =
   | { kind: "host"; path: string }
-  | { kind: "snapshot"; paths: readonly string[] };
+  | { kind: "snapshot"; paths: readonly string[] }
+  | { kind: "optional-snapshot"; paths: readonly string[] };
 
 interface RunnerProjectConfig {
   config: RunnerProjectConfigSource;
@@ -1155,7 +1156,10 @@ export class ProjectRunnerServer {
     }
     return {
       config: hostConfig === null
-        ? { kind: "snapshot", paths: snapshotConfigs! }
+        ? {
+            kind: path === managedPath ? "optional-snapshot" : "snapshot",
+            paths: snapshotConfigs!,
+          }
         : { kind: "host", path: hostConfig },
       dataPath: safeAbsolutePath(raw.dataPath, "dataPath"),
       environmentBootstrap,
@@ -2220,8 +2224,12 @@ export class ProjectRunnerServer {
           }
         } else {
           const selectedConfig = this.runtimeConfigPath(project, source);
-          copyFileSync(selectedConfig, configPath);
-          chmodSync(configPath, 0o600);
+          if (selectedConfig === null) {
+            writeFileSync(configPath, "{}\n", { mode: 0o600 });
+          } else {
+            copyFileSync(selectedConfig, configPath);
+            chmodSync(configPath, 0o600);
+          }
           job.configSha256 = this.fileSha256(configPath);
         }
       }
@@ -2430,7 +2438,7 @@ export class ProjectRunnerServer {
     }
   }
 
-  private runtimeConfigPath(project: RunnerProjectConfig, source: string): string {
+  private runtimeConfigPath(project: RunnerProjectConfig, source: string): string | null {
     if (project.config.kind === "host") {
       if (!existsSync(project.config.path) || !lstatSync(project.config.path).isFile()) {
         throw new Error(`project config is missing or not a regular file: ${project.config.path}`);
@@ -2449,6 +2457,7 @@ export class ProjectRunnerServer {
       }
       return candidate;
     }
+    if (project.config.kind === "optional-snapshot") return null;
     throw new Error(
       `project config is missing from source snapshot: ${project.config.paths.join(", ")}`,
     );
