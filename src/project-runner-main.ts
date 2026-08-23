@@ -18,6 +18,10 @@ async function main(): Promise<void> {
   if (!Number.isSafeInteger(maxParallelJobs) || maxParallelJobs < 1 || maxParallelJobs > 16) {
     throw new Error("SUMMING_RUNNER_MAX_PARALLEL_JOBS must be an integer between 1 and 16");
   }
+  const runTimeoutHours = Number(process.env.SUMMING_RUNNER_RUN_TIMEOUT_HOURS ?? "12");
+  if (!Number.isSafeInteger(runTimeoutHours) || runTimeoutHours < 1 || runTimeoutHours > 168) {
+    throw new Error("SUMMING_RUNNER_RUN_TIMEOUT_HOURS must be an integer between 1 and 168");
+  }
   const configuredKeyPath = String(process.env.SUMMING_RUNNER_ENV_KEY ?? "").trim();
   const installedKeyPath = "/etc/summing-project-runner/environment.key";
   const keyPath = configuredKeyPath || (
@@ -39,6 +43,7 @@ async function main(): Promise<void> {
     process.env.SUMMING_SECRETS_RUNTIME_SOCKET || "/run/summing-secrets/runtime.sock",
     managedDataRoot,
     maxParallelJobs,
+    runTimeoutHours,
   );
   let resolveSignal!: () => void;
   const signal = new Promise<void>((resolveSignalPromise) => {

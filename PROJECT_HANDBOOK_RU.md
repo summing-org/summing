@@ -939,7 +939,7 @@ config или credential helper настраивается глобально д
 
 Production Mini App работает на `https://assist.summing.org`. Installer
 принимает `SUMMING_VIEWER_DOMAIN=assist.summing.org` и необязательный
-`SUMMING_VIEWER_REDIRECT_DOMAIN=ash.summing.org`: Caddy сначала валидирует
+`SUMMING_VIEWER_REDIRECT_DOMAIN=old-assist.example.org`: Caddy сначала валидирует
 временный конфиг, затем атомарно устанавливает основной reverse proxy и
 постоянный redirect старого адреса с сохранением URI. Runtime получает основной
 URL через `SUMMING_VIEWER_URL`. Runtime устанавливает для личного чата точного
@@ -969,11 +969,10 @@ Application config выбирается из того же распакован�
 runner повторяет регистрацию без потери Project. Профиль managed Project задаётся
 runner-ом, а не клиентом: фиксированные config paths, project-scoped data path,
 network policy и точный список Workspace. Root-managed JSON остаётся только для
-статических Project и имеет приоритет над динамическим профилем. Для `ash-seo`
-сначала используется `config.json`, а для старых pinned revisions допускается
-`config.example.json`; постоянная копия
-`/etc/summing-project-runner/projects/ash-seo.config.json`
-не является runtime source. Поэтому code SHA, config и env revision образуют один
+статических Project и имеет приоритет над динамическим профилем. Managed profile
+сначала использует `config.json`, а для старых pinned revisions допускает
+`config.example.json`; отдельная постоянная host-копия application config не
+является runtime source. Поэтому code SHA, config и env revision образуют один
 проверяемый job snapshot, а изменение Project config не требует ручной синхронизации
 дублирующего host-файла. Старый абсолютный `configPath` сохранён только как
 совместимый режим для других root-managed Project.
@@ -1019,18 +1018,27 @@ Dispatcher пропускает временно заблокированные 
 возвращает версию SUMMING, `running`, `queued` и `maxParallelJobs`; `runner.inspect`
 показывает агенту как локальное состояние Project/Workspace, так и загрузку всего
 runner node. Никаких новых action-specific network/data ограничений эта модель не
-добавляет.
+добавляет. `SUMMING_RUNNER_RUN_TIMEOUT_HOURS` задаёт предел Live run от 1 до 168
+часов; production default 12 часов рассчитан на многочасовые batch jobs.
 
 Source policy остаётся простой: `run` разрешён только из clean committed `HEAD`,
 `build`/`validate`/`dry-run` могут получить временный immutable snapshot, а
 schedule при каждом occurrence заново разрешает полный SHA текущего `master`.
-Сохранённый Release сам по себе не исполняем: replay production snapshot требует
-отдельной явной команды, потому что может повторить внешние side effects.
+`runner.replay` принимает точный job ID только по явной owner-команде, создаёт
+новый job с тем же `releaseId`, проверяет hashes source/config/encrypted-env и
+запускает сохранённый immutable image ID. Истёкший payload, несовпавший hash или
+удалённый image дают fail-closed; replay может повторить внешние side effects.
 
 Project-specific cron/systemd timers не являются частью нового control plane и
 не импортируются по догадке из имён unit-файлов. Перед созданием эквивалентного
 agent-managed расписания оператор явно отключает такой legacy timer; это
 предотвращает двойной запуск и не зашивает ID внешнего Project в SUMMING runtime.
+Installer принимает только необязательный точный basename
+`SUMMING_LEGACY_PROJECT_UNIT` и после health check отключает соответствующий
+`.timer`/останавливает `.service`; без параметра чужие units не трогаются.
+Environment cutover также не имеет default Project: оператор задаёт
+`SUMMING_ENV_MIGRATION_PROJECT` для конкретного VPS, иначе hook безопасно
+пропускает миграцию.
 
 Project Viewer разделяет два вида истории: **Правки агента** показывают patch
 между snapshot до и после Codex-задачи, а **Раннер** диагностирует изолированные
@@ -1961,11 +1969,10 @@ deploy/
 ├── cloud-init.yaml         # bootstrap чистого Ubuntu/Hetzner VPS
 ├── activate.sh             # сборка, установка unit и первый запуск
 ├── migrate-host-to-summing # guarded one-time 8.x host migration
-├── install-project-operations.sh # rootless Docker, Caddy, runner и timer
+├── install-project-operations.sh # rootless Docker, Caddy и generic runner
 ├── config.production.toml  # минимальный production config для SUMMING
 ├── summing.service         # основной Telegram runtime
-├── summing-project-runner.service # изолированный Docker runner
-└── summing-ash-seo.timer   # legacy external-Project compatibility; не agent scheduler
+└── summing-project-runner.service # изолированный generic Docker runner
 ```
 
 Локальные проверки:

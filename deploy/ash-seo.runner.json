@@ -1,8 +1,0 @@
-{
-  "configSourcePaths": ["config.json", "config.example.json"],
-  "dataPath": "/var/lib/summing-project-runs/ash-seo/data",
-  "environmentBootstrap": {
-    "repo": "/etc/summing-project-runner/projects/ash-seo.env"
-  },
-  "network": true
-}

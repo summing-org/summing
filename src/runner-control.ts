@@ -1019,6 +1019,45 @@ export class RunnerControlPlane {
     return job;
   }
 
+  async replayJob(
+    context: RunnerControlContext,
+    sourceJobId: string,
+    requestId: string,
+  ): Promise<RunnerJob> {
+    if (!(await this.runner.available())) throw new RunnerControlError("runner is unavailable");
+    const requestKey = idempotencyKey(
+      "replay",
+      context.projectId,
+      context.workspaceId,
+      context.conversationId,
+      requestId,
+    );
+    const existing = (await this.runner.jobs(context.projectId, context.workspaceId))
+      .find((job) => job.idempotencyKey === requestKey);
+    if (existing) {
+      if (existing.trigger !== "replay" || existing.replayOfJobId !== sourceJobId) {
+        throw new RunnerControlError("runner request id was reused for a different replay");
+      }
+      this.store.watchJob(context, existing, this.now());
+      return existing;
+    }
+    const job = await this.runner.replay(
+      context.projectId,
+      context.workspaceId,
+      sourceJobId,
+      requestKey,
+    );
+    this.store.watchJob(context, job, this.now());
+    this.store.audit(
+      context,
+      "runner.replay",
+      job.id,
+      { sourceJobId, releaseId: job.releaseId, action: job.action },
+      this.now(),
+    );
+    return job;
+  }
+
   async readJobLog(
     context: RunnerControlContext,
     jobId: string,

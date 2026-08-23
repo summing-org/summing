@@ -126,7 +126,7 @@ test("legacy raw Connections become one encrypted environment without logging va
         json(response, 201, {
           lease: {
             id: randomUUID(),
-            projectId: "ash-seo",
+            projectId: "legacy-demo",
             jobId: (payload as { jobId?: string }).jobId,
             environment: { OPENAI_API_KEY: secret },
             gatewayTokens: {},
@@ -146,7 +146,7 @@ test("legacy raw Connections become one encrypted environment without logging va
     await listen(broker, socket);
     const store = new ProjectEnvironmentStore(storeRoot, Buffer.alloc(32, 4));
     const first = await importLegacyConnections({
-      projectId: "ash-seo",
+      projectId: "legacy-demo",
       workspaceId: "repo",
       manifestPath,
       brokerSocket: socket,
@@ -158,18 +158,18 @@ test("legacy raw Connections become one encrypted environment without logging va
     assert.equal(first.status, "migrated");
     assert.deepEqual(first.marker.integrationIds, ["openai@production"]);
     assert.deepEqual(requestedActions, ["dry-run"]);
-    assert.equal(store.get("ash-seo", "repo").revision, 2);
+    assert.equal(store.get("legacy-demo", "repo").revision, 2);
     assert.equal(
-      store.get("ash-seo", "repo").text.includes("OPENAI_API_KEY="),
+      store.get("legacy-demo", "repo").text.includes("OPENAI_API_KEY="),
       true,
     );
     assert.equal(
-      store.get("ash-seo", "repo").text.includes("DRY_RUN="),
+      store.get("legacy-demo", "repo").text.includes("DRY_RUN="),
       false,
     );
     assert.equal(
       (await importLegacyConnections({
-        projectId: "ash-seo",
+        projectId: "legacy-demo",
         workspaceId: "repo",
         manifestPath,
         brokerSocket: join(root, "missing.sock"),
@@ -182,10 +182,10 @@ test("legacy raw Connections become one encrypted environment without logging va
     );
     assert.equal(leases, 1);
     assert.equal(releases, 1);
-    assert.doesNotMatch(readFileSync(join(storeRoot, "ash-seo--repo.json"), "utf8"), /secret value/);
+    assert.doesNotMatch(readFileSync(join(storeRoot, "legacy-demo--repo.json"), "utf8"), /secret value/);
     assert.doesNotMatch(readFileSync(markerPath, "utf8"), /secret value/);
     assert.equal(
-      parseProjectEnvironment(store.get("ash-seo", "repo").text).values.get("OPENAI_API_KEY"),
+      parseProjectEnvironment(store.get("legacy-demo", "repo").text).values.get("OPENAI_API_KEY"),
       secret,
     );
   } finally {
@@ -204,13 +204,13 @@ test("legacy schedules are discoverable until cutover is finalized", () => {
   mkdirSync(scheduleRoot);
   mkdirSync(dataRoot);
   mkdirSync(repo);
-  writeFileSync(join(configRoot, "ash-seo.json"), JSON.stringify({
+  writeFileSync(join(configRoot, "legacy-demo.json"), JSON.stringify({
     configPath: join(root, "config.json"),
     dataPath: join(root, "data"),
     envPath: join(root, "project.env"),
   }), { mode: 0o640 });
-  writeFileSync(join(scheduleRoot, "ash-seo.json"), JSON.stringify({
-    projectId: "ash-seo",
+  writeFileSync(join(scheduleRoot, "legacy-demo.json"), JSON.stringify({
+    projectId: "legacy-demo",
     workspaceId: "repo",
     repository: repo,
     revision: "a".repeat(40),
@@ -222,7 +222,7 @@ test("legacy schedules are discoverable until cutover is finalized", () => {
     mkdirSync(targets[0]!.stateRoot, { recursive: true, mode: 0o700 });
     writeFileSync(join(targets[0]!.stateRoot, "finalized.json"), JSON.stringify({
       version: 1,
-      projectId: "ash-seo",
+      projectId: "legacy-demo",
       workspaceId: "repo",
       legacyBrokerDataPreserved: true,
     }), { mode: 0o600 });
@@ -267,14 +267,14 @@ test("summing-owned coordinator hands pinned Git data to a repository-blind runn
   }).trim();
   mkdirSync(configRoot);
   mkdirSync(scheduleRoot);
-  writeFileSync(join(configRoot, "ash-seo.json"), JSON.stringify({
+  writeFileSync(join(configRoot, "legacy-demo.json"), JSON.stringify({
     configPath: join(root, "app.json"),
     dataPath: appData,
     envPath: bootstrapPath,
     network: true,
   }), { mode: 0o640 });
-  writeFileSync(join(scheduleRoot, "ash-seo.json"), JSON.stringify({
-    projectId: "ash-seo",
+  writeFileSync(join(scheduleRoot, "legacy-demo.json"), JSON.stringify({
+    projectId: "legacy-demo",
     workspaceId: "repo",
     repository: repo,
     revision,
@@ -346,7 +346,7 @@ exit 0
 
     assert.equal(await client.available(), true);
     assert.equal(
-      parseProjectEnvironment((await client.environment("ash-seo", "repo")).text)
+      parseProjectEnvironment((await client.environment("legacy-demo", "repo")).text)
         .values.get("OPENAI_API_KEY"),
       "coordinator-secret-value",
     );
@@ -354,7 +354,7 @@ exit 0
     assert.equal(existsSync(join(root, "runner-cannot-read-this-repository")), false);
     const marker = JSON.parse(readFileSync(join(
       dataRoot,
-      "migrations/connections-to-environment/ash-seo--repo/verified.json",
+      "migrations/connections-to-environment/legacy-demo--repo/verified.json",
     ), "utf8")) as { environmentRevision: number };
     assert.equal(marker.environmentRevision, 2);
   } finally {
@@ -370,11 +370,11 @@ test("migration verification requires completed jobs on one current environment 
   const markerPath = join(root, "state", "verified.json");
   const revision = repository(repo);
   const store = new ProjectEnvironmentStore(join(root, "environments"), Buffer.alloc(32, 5));
-  store.save("ash-seo", "repo", "LOG_LEVEL=info\n", 0);
-  store.save("ash-seo", "repo", "LOG_LEVEL=info\nOPENAI_API_KEY=hidden\n", 1);
+  store.save("legacy-demo", "repo", "LOG_LEVEL=info\n", 0);
+  store.save("legacy-demo", "repo", "LOG_LEVEL=info\nOPENAI_API_KEY=hidden\n", 1);
   const job = (action: RunnerAction, environmentRevision: number, status: RunnerJob["status"] = "completed") => ({
     id: randomUUID(),
-    projectId: "ash-seo",
+    projectId: "legacy-demo",
     workspaceId: "repo",
     action,
     revision,
@@ -384,7 +384,7 @@ test("migration verification requires completed jobs on one current environment 
   } satisfies RunnerJob);
   try {
     const result = recordEnvironmentMigrationVerification({
-      projectId: "ash-seo",
+      projectId: "legacy-demo",
       workspaceId: "repo",
       revision,
       markerPath,
@@ -395,12 +395,12 @@ test("migration verification requires completed jobs on one current environment 
     assert.equal(result.status, "verified");
     assert.equal(result.marker.environmentRevision, 2);
     assert.equal(existsSync(markerPath), true);
-    assert.ok(currentEnvironmentVerification(markerPath, "ash-seo", "repo", revision, store));
+    assert.ok(currentEnvironmentVerification(markerPath, "legacy-demo", "repo", revision, store));
 
-    store.save("ash-seo", "repo", "LOG_LEVEL=debug\nOPENAI_API_KEY=hidden\n", 2);
-    assert.equal(currentEnvironmentVerification(markerPath, "ash-seo", "repo", revision, store), null);
+    store.save("legacy-demo", "repo", "LOG_LEVEL=debug\nOPENAI_API_KEY=hidden\n", 2);
+    assert.equal(currentEnvironmentVerification(markerPath, "legacy-demo", "repo", revision, store), null);
     assert.throws(() => recordEnvironmentMigrationVerification({
-      projectId: "ash-seo",
+      projectId: "legacy-demo",
       workspaceId: "repo",
       revision,
       markerPath,
@@ -409,7 +409,7 @@ test("migration verification requires completed jobs on one current environment 
       dryRunJob: job("dry-run", 3),
     }), /validate job cannot verify/);
     const repeated = recordEnvironmentMigrationVerification({
-      projectId: "ash-seo",
+      projectId: "legacy-demo",
       workspaceId: "repo",
       revision,
       markerPath,

@@ -41,8 +41,13 @@ expected_remote=${SUMMING_MIGRATION_EXPECTED_REMOTE:-git@summing.github.com:summ
 mode=${1:---check}
 backup_confirmed=${SUMMING_BACKUP_CONFIRMED:-0}
 snapshot_waived=${SUMMING_SNAPSHOT_WAIVED:-0}
+legacy_project_unit=${SUMMING_LEGACY_PROJECT_UNIT:-}
 migration_started=0
 recovery_dir=
+legacy_project_units=()
+if [ -n "${legacy_project_unit}" ]; then
+  legacy_project_units=("${legacy_project_unit}.service" "${legacy_project_unit}.timer")
+fi
 
 recovery_instruction() {
   if [ "${backup_confirmed}" = 1 ]; then
@@ -326,6 +331,13 @@ esac
 
 case "${backup_confirmed}" in 0|1) ;; *) fail "SUMMING_BACKUP_CONFIRMED must be 0 or 1" ;; esac
 case "${snapshot_waived}" in 0|1) ;; *) fail "SUMMING_SNAPSHOT_WAIVED must be 0 or 1" ;; esac
+if [ -n "${legacy_project_unit}" ] && \
+  ! printf '%s' "${legacy_project_unit}" | grep -Eq '^[a-z0-9][a-z0-9@_.-]{0,127}$'; then
+  fail "SUMMING_LEGACY_PROJECT_UNIT must be an exact systemd unit basename"
+fi
+if [[ "${legacy_project_unit}" == *.service ]] || [[ "${legacy_project_unit}" == *.timer ]]; then
+  fail "SUMMING_LEGACY_PROJECT_UNIT must not include .service or .timer"
+fi
 if [ "${backup_confirmed}" = 1 ] && [ "${snapshot_waived}" = 1 ]; then
   fail "set only one of SUMMING_BACKUP_CONFIRMED or SUMMING_SNAPSHOT_WAIVED"
 fi
@@ -446,17 +458,17 @@ source_hostname=$(hostnamectl --static)
 target_hostname=${source_hostname//${retired_name}/${product_name}}
 app_enabled=0
 runner_enabled=0
-schedule_enabled=0
 unit_enabled "${retired_name}.service" && app_enabled=1
 unit_enabled "${retired_name}-runner.service" && runner_enabled=1
-unit_enabled "${retired_name}-ash-seo.timer" && schedule_enabled=1
 
 systemctl disable --now \
   "${retired_name}-deploy.path" \
   "${retired_name}-deploy.timer" >/dev/null 2>&1 || true
-systemctl disable --now "${retired_name}-ash-seo.timer" >/dev/null 2>&1 || true
+if [ -n "${legacy_project_unit}" ]; then
+  systemctl disable --now "${legacy_project_unit}.timer" >/dev/null 2>&1 || true
+  systemctl stop "${legacy_project_unit}.service" >/dev/null 2>&1 || true
+fi
 systemctl stop \
-  "${retired_name}-ash-seo.service" \
   "${retired_name}-runner.service" \
   "${retired_name}.service" >/dev/null 2>&1 || true
 systemctl disable \
@@ -623,12 +635,6 @@ if [ -n "${runner_uid}" ]; then
   install -o root -g root -m 0644 "${temporary_runner_unit}" \
     /etc/systemd/system/summing-project-runner.service
   rm -f "${temporary_runner_unit}"
-  install -o root -g root -m 0644 \
-    "${product_repo}/deploy/summing-ash-seo.service" \
-    /etc/systemd/system/summing-ash-seo.service
-  install -o root -g root -m 0644 \
-    "${product_repo}/deploy/summing-ash-seo.timer" \
-    /etc/systemd/system/summing-ash-seo.timer
   systemctl daemon-reload
   if [ "${runner_enabled}" = 1 ]; then
     systemctl enable summing-project-runner.service
@@ -638,8 +644,7 @@ fi
 for unit in \
   "${retired_name}.service" \
   "${retired_name}-runner.service" \
-  "${retired_name}-ash-seo.service" \
-  "${retired_name}-ash-seo.timer" \
+  "${legacy_project_units[@]}" \
   "${retired_name}-deploy.service" \
   "${retired_name}-deploy.path" \
   "${retired_name}-deploy.timer"; do
@@ -655,7 +660,6 @@ systemctl reset-failed \
 
 "${product_repo}/deploy/activate.sh"
 if [ "${app_enabled}" = 0 ]; then systemctl disable --now summing.service; fi
-if [ "${schedule_enabled}" = 1 ]; then systemctl enable --now summing-ash-seo.timer; fi
 
 id "${retired_app_user}" >/dev/null 2>&1 && fail "retired application user still exists"
 [ ! -e "${retired_repo}" ] || fail "retired repository path still exists"

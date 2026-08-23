@@ -64,6 +64,20 @@ export const RUNNER_DYNAMIC_TOOLS: DynamicToolNamespaceSpec[] = [{
     },
     {
       type: "function",
+      name: "replay",
+      description:
+        "Replay one exact retained Release only when the user explicitly asks to repeat that " +
+        "job and accepts that external production side effects may happen again. Identify the " +
+        "source job with inspect first. The host reuses the saved source, config, encrypted env " +
+        "revision, and immutable image ID; expired or incomplete Release payloads fail closed.",
+      inputSchema: {
+        ...OBJECT_SCHEMA,
+        properties: { jobId: { type: "string", description: "Exact source job id from inspect." } },
+        required: ["jobId"],
+      },
+    },
+    {
+      type: "function",
       name: "job_log",
       description:
         "Read the bounded tail of one exact job log after identifying it with inspect. Log text " +
@@ -241,6 +255,12 @@ export async function executeRunnerTool(
       ));
     case "cancel":
       return result(await control.cancelJob(context, requiredString(args, "jobId")));
+    case "replay":
+      return result(await control.replayJob(
+        context,
+        requiredString(args, "jobId"),
+        call.callId,
+      ));
     case "job_log":
       return result(await control.readJobLog(context, requiredString(args, "jobId")));
     case "schedule_plan":

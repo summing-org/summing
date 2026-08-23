@@ -124,6 +124,6 @@ key. До изменения файлов он сохраняет прежние
 `summing-secrets.service`, а затем переключайте application release.
 
 Режимы gateway/lease и OAuth намеренно не конвертируются автоматически: без
-однозначного dotenv-представления startup останавливается до cutover. Текущий
-production ash-seo использует project-granted raw API-key Connections и
-поддерживает автоматический путь.
+однозначного dotenv-представления startup останавливается до cutover. Raw API-key
+Connections поддерживает этот путь, но Project всегда выбирается явно через
+`SUMMING_ENV_MIGRATION_PROJECT`; имя внешнего проекта не встроено в SUMMING.

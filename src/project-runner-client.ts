@@ -5,7 +5,7 @@ import type {
 } from "./project-environment-migration.js";
 
 export type RunnerAction = "build" | "validate" | "dry-run" | "run";
-export type RunnerJobTrigger = "manual" | "schedule";
+export type RunnerJobTrigger = "manual" | "schedule" | "replay";
 
 export interface RunnerSubmissionMetadata {
   trigger?: RunnerJobTrigger;
@@ -32,7 +32,9 @@ export interface RunnerJob {
   revision: string;
   archiveSha256?: string;
   configSha256?: string;
+  environmentSha256?: string;
   imageId?: string;
+  replayOfJobId?: string;
   trigger?: RunnerJobTrigger;
   scheduleId?: string;
   scheduledFor?: string;
@@ -101,6 +103,7 @@ export interface RunnerHealth {
   queued: number;
   running: number;
   maxParallelJobs: number;
+  runTimeoutHours: number;
 }
 
 export class ProjectRunnerClientError extends Error {
@@ -235,6 +238,21 @@ export class ProjectRunnerClient {
       `/jobs?${query.toString()}`,
     );
     return result.jobs;
+  }
+
+  async replay(
+    projectId: string,
+    workspaceId: string,
+    jobId: string,
+    idempotencyKey: string,
+  ): Promise<RunnerJob> {
+    const query = new URLSearchParams({ project: projectId, workspace: workspaceId, job: jobId });
+    query.set("idempotency_key", idempotencyKey);
+    const result = await this.call<{ job: RunnerJob }>(
+      "POST",
+      `/jobs/replay?${query.toString()}`,
+    );
+    return result.job;
   }
 
   async cancel(projectId: string, workspaceId: string, jobId: string): Promise<RunnerJob> {

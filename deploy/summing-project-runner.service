@@ -21,6 +21,7 @@ Environment=SUMMING_RUNNER_SCHEDULES=/etc/summing-project-runner/schedules
 Environment=SUMMING_RUNNER_ENV_KEY=/etc/summing-project-runner/environment.key
 Environment=SUMMING_RUNNER_MANAGED_DATA=/var/lib/summing-project-runs
 Environment=SUMMING_RUNNER_MAX_PARALLEL_JOBS=2
+Environment=SUMMING_RUNNER_RUN_TIMEOUT_HOURS=12
 ExecStartPre=/usr/bin/test -S /run/user/PROJECT_RUNNER_UID/docker.sock
 ExecStart=/usr/local/bin/node --enable-source-maps /opt/summing-current/dist/src/project-runner-main.js
 Restart=on-failure

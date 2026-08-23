@@ -6,7 +6,7 @@ if [ "${EUID}" -ne 0 ]; then
   exit 2
 fi
 
-project_id=${SUMMING_ENV_MIGRATION_PROJECT:-ash-seo}
+project_id=${SUMMING_ENV_MIGRATION_PROJECT:-}
 workspace_id=${SUMMING_ENV_MIGRATION_WORKSPACE:-repo}
 runner_user=${SUMMING_ENV_MIGRATION_RUNNER_USER:-summing-project-runner}
 runner_data=${SUMMING_RUNNER_DATA:-/var/lib/summing-project-runner/jobs}
@@ -20,6 +20,15 @@ runner_unit=/etc/systemd/system/summing-project-runner.service
 caddy_file=/etc/caddy/Caddyfile
 release_root=${SUMMING_ENV_MIGRATION_RELEASE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 environment_envelope=${runner_data}/environments/${project_id}--${workspace_id}.json
+
+if [ -z "${project_id}" ]; then
+  systemd_sync=${release_root}/deploy/sync-systemd-units
+  if [ -x "${systemd_sync}" ]; then
+    SUMMING_SYSTEMD_RELEASE="${release_root}" "${systemd_sync}"
+  fi
+  printf '%s\n' 'No explicit SUMMING_ENV_MIGRATION_PROJECT; legacy environment cutover skipped.'
+  exit 0
+fi
 
 if [[ ! "${project_id}" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ ]] || \
   [[ ! "${workspace_id}" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ ]]; then

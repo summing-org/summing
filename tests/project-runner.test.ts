@@ -176,6 +176,7 @@ exit 0
       queued: 0,
       running: 0,
       maxParallelJobs: 2,
+      runTimeoutHours: 12,
     });
 
     const imported = await client.environment("demo", "repo");
@@ -235,6 +236,7 @@ exit 0
     assert.equal(dryRunCompleted.releaseId, dryRun.id);
     assert.match(dryRunCompleted.archiveSha256 ?? "", /^[0-9a-f]{64}$/);
     assert.match(dryRunCompleted.configSha256 ?? "", /^[0-9a-f]{64}$/);
+    assert.match(dryRunCompleted.environmentSha256 ?? "", /^[0-9a-f]{64}$/);
     assert.equal(dryRunCompleted.imageId, "sha256:runner-test-image");
     assert.equal(dryRunCompleted.artifactCount, 3);
     assert.equal(dryRunCompleted.portalMessageCount, 1);
@@ -253,6 +255,7 @@ exit 0
       text: "Informational dry-run report is ready.",
       artifact: "report.html",
     }]);
+
     await assert.rejects(
       client.deleteArtifact("demo", "another-workspace", dryRun.id, "manifest.json"),
       /not available for this workspace/,
@@ -297,6 +300,38 @@ exit 0
     assert.equal(existsSync(join(releaseDirectory, "source.tar")), true);
     assert.equal(existsSync(join(releaseDirectory, "environment.json")), true);
     assert.equal(existsSync(join(releaseDirectory, "release-config.json")), true);
+
+    const replayKey = "c".repeat(64);
+    const replay = await client.replay("demo", "repo", dryRun.id, replayKey);
+    const replayCompleted = await completedJob(client, "demo", "repo", replay.id);
+    assert.equal(replayCompleted.status, "completed");
+    assert.equal(replayCompleted.trigger, "replay");
+    assert.equal(replayCompleted.replayOfJobId, dryRun.id);
+    assert.equal(replayCompleted.releaseId, dryRun.id);
+    assert.equal(replayCompleted.environmentRevision, dryRunCompleted.environmentRevision);
+    assert.equal(replayCompleted.archiveSha256, dryRunCompleted.archiveSha256);
+    assert.equal(replayCompleted.configSha256, dryRunCompleted.configSha256);
+    assert.equal(replayCompleted.environmentSha256, dryRunCompleted.environmentSha256);
+    assert.equal(replayCompleted.imageId, dryRunCompleted.imageId);
+    assert.equal((await client.replay("demo", "repo", dryRun.id, replayKey)).id, replay.id);
+    assert.match(await client.log("demo", replay.id), new RegExp(`replay-of=${dryRun.id}`));
+    assert.equal(
+      readFileSync(
+        join(dataRoot, "projects", "demo", "runs", replay.id, "release-config.json"),
+        "utf8",
+      ),
+      "{}\n",
+    );
+    await assert.rejects(
+      client.replay("demo", "another-workspace", dryRun.id, "d".repeat(64)),
+      /workspace|configured/,
+    );
+    writeFileSync(join(releaseDirectory, "release-config.json"), "{\"tampered\":true}\n");
+    await assert.rejects(
+      client.replay("demo", "repo", dryRun.id, "e".repeat(64)),
+      /integrity check failed/,
+    );
+    writeFileSync(join(releaseDirectory, "release-config.json"), "{}\n", { mode: 0o600 });
 
     const runs = join(dataRoot, "projects", "demo", "runs");
     const {

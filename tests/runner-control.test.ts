@@ -102,6 +102,7 @@ test("schedule changes require a later-turn confirmation and execute each occurr
       queued: 1,
       running: 1,
       maxParallelJobs: 2,
+      runTimeoutHours: 12,
     }),
     jobs: async () => jobs,
     submit: async (
@@ -215,6 +216,7 @@ test("manual tool calls deduplicate jobs, expose an overview, and notify their c
       queued: 1,
       running: 1,
       maxParallelJobs: 2,
+      runTimeoutHours: 12,
     }),
     jobs: async () => jobs,
     submit: async (
@@ -380,9 +382,34 @@ test("runner tools expose only conversation-scoped arguments and treat artifacts
     completedAt: "2026-08-17T05:01:00.000Z",
     artifactCount: 1,
   };
+  const jobs = [job];
+  let replayCalls = 0;
   const runner = {
     available: async () => true,
-    jobs: async () => [job],
+    jobs: async () => jobs,
+    replay: async (
+      projectId: string,
+      workspaceId: string,
+      sourceJobId: string,
+      idempotencyKey: string,
+    ) => {
+      replayCalls += 1;
+      const replay: RunnerJob = {
+        id: "342f0836-b79b-44e4-8e0a-b437d368bd33",
+        releaseId: sourceJobId,
+        replayOfJobId: sourceJobId,
+        projectId,
+        workspaceId,
+        action: job.action,
+        revision: job.revision,
+        trigger: "replay",
+        idempotencyKey,
+        status: "queued",
+        createdAt: "2026-08-17T05:03:00.000Z",
+      };
+      jobs.push(replay);
+      return replay;
+    },
     log: async () => `old-prefix-${"l".repeat(70_000)}`,
     artifacts: async () => availableArtifacts,
     artifact: async () => ({
@@ -416,6 +443,19 @@ test("runner tools expose only conversation-scoped arguments and treat artifacts
       assert.equal(Object.hasOwn(properties ?? {}, "workspaceId"), false);
       assert.equal(Object.hasOwn(properties ?? {}, "actorUserId"), false);
     }
+    const replayCall = {
+      threadId: "thread",
+      turnId: "turn-replay",
+      callId: "call-replay",
+      namespace: "runner",
+      tool: "replay",
+      arguments: { jobId: job.id },
+    } as const;
+    const replayed = await executeRunnerTool(control, context("turn-replay"), replayCall);
+    const replayedAgain = await executeRunnerTool(control, context("turn-replay"), replayCall);
+    assert.equal(JSON.parse(replayed.contentItems[0]!.text).replayOfJobId, job.id);
+    assert.equal(JSON.parse(replayedAgain.contentItems[0]!.text).replayOfJobId, job.id);
+    assert.equal(replayCalls, 1);
     const listed = await executeRunnerTool(control, context("turn-artifacts"), {
       threadId: "thread",
       turnId: "turn-artifacts",

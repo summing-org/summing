@@ -487,20 +487,18 @@ Project `.env`, шифрование и runtime injection: [ENVIRONMENTS_RU.md](
 
 Viewer всегда слушает только `127.0.0.1:8766`. Без публичного URL его можно
 открыть через SSH tunnel; Telegram Mini App требует HTTPS reverse proxy. После
-установки Docker/Caddy вызовите отдельный installer с доменом и закреплённой
-ревизией проекта:
+установки Docker/Caddy вызовите отдельный generic installer с доменом:
 
 ```bash
 SUMMING_VIEWER_DOMAIN=assist.summing.org \
-SUMMING_VIEWER_REDIRECT_DOMAIN=ash.summing.org \
-ASH_SEO_REVISION=<full-commit-sha> \
-ENABLE_ASH_SEO_TIMER=0 \
+SUMMING_VIEWER_REDIRECT_DOMAIN=old-assist.example.org \
 sudo /opt/summing/deploy/install-project-operations.sh
 ```
 
 Installer создаёт отдельного `summing-project-runner`, rootless Docker с лимитом build
-cache 8 ГБ, приватный AES-ключ для project env, HTTPS proxy, project runtime
-policy/data и совместимый legacy timer unit. Имя, socket и state отделены от
+cache 8 ГБ, приватный AES-ключ для project env и HTTPS proxy. Project profiles
+регистрируются самим SUMMING и не создаются installer-ом по встроенному имени.
+Имя, socket и state отделены от
 внешних runner-сервисов узла; существующий `summing-runner.service` не изменяется.
 Пользователь `summing` не получает
 Docker socket. При первом
@@ -510,9 +508,17 @@ Docker socket. При первом
 убрать Connections route и отключить broker. Legacy vault и recovery-копии
 config/unit/Caddyfile сохраняются для rollback. После cutover редактируйте
 значения во вкладке **Энвы**. Полный протокол: [ENVIRONMENTS_RU.md](ENVIRONMENTS_RU.md).
-Основной production URL Mini App — `https://assist.summing.org`; прежний
-`https://ash.summing.org` остаётся только постоянным HTTPS-редиректом с
-сохранением URI для уже отправленных Telegram-кнопок.
+Необязательный redirect-domain остаётся постоянным HTTPS-редиректом с сохранением
+URI для уже отправленных Telegram-кнопок.
+
+Project-specific timer никогда не выбирается по имени автоматически. Если на
+конкретном VPS остался старый unit, передайте его точный basename явно, без
+`.service`/`.timer`: `SUMMING_LEGACY_PROJECT_UNIT=summing-project-a`. Installer
+сначала поднимет и проверит generic runner, затем отключит только
+`summing-project-a.timer` и остановит `summing-project-a.service`. Legacy
+environment cutover аналогично выполняется только с явно заданным
+`SUMMING_ENV_MIGRATION_PROJECT`; без него deploy ничего не угадывает и пропускает
+миграцию.
 
 Запуском теперь управляет сам агент через закрытый namespace раннера. На вопросы
 вроде «что сейчас крутится?», «что с раннером?» или «что запланировано?» он
@@ -532,9 +538,11 @@ Job одновременно служит минимальным Release без 
 `releaseId` равен job ID, а запись фиксирует полный Git SHA, SHA-256 переданного
 source archive и выбранного config, revision зашифрованного env и immutable Docker
 image ID. Payload последних 20 завершённых Release сохраняется для проверки и
-точного восстановления; metadata и логи — для последних 100. Автоматического
-повторного исполнения старого Release нет, поэтому сохранённый production job не
-может незаметно повторить внешние side effects.
+точного восстановления; metadata и логи — для последних 100. Повтор выполняется
+только явным `runner.replay` для точного job ID. Runner заново проверяет hashes
+сохранённых payload и наличие immutable image ID; истёкший или повреждённый
+Release отклоняется. Команда может повторить внешние production side effects,
+поэтому агент вызывает её лишь по прямому указанию owner.
 
 Runner выполняет до `SUMMING_RUNNER_MAX_PARALLEL_JOBS` независимых Project
 одновременно (по умолчанию 2). Jobs одного Project сериализуются, поскольку
@@ -542,7 +550,9 @@ Runner выполняет до `SUMMING_RUNNER_MAX_PARALLEL_JOBS` независ
 следующему независимому Project. `/health` публикует версию SUMMING и runner
 protocol, глобальные `running`/`queued` и лимит параллельности; те же данные
 доступны агенту через `runner.inspect`. Viewer показывает short release ID и env
-revision рядом с каждым job.
+revision рядом с каждым job. Live run имеет настраиваемый
+`SUMMING_RUNNER_RUN_TIMEOUT_HOURS` (по умолчанию 12 часов, допустимо 1–168),
+поэтому многочасовой batch не обрывается прежним четырёхчасовым пределом.
 
 Артефакты можно перечислить и безопасно прочитать как недоверенные данные с
 лимитом ответа. Удаление одного файла и очистка job/workspace также составляют

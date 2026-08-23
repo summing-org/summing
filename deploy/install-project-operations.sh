@@ -8,14 +8,11 @@ fi
 
 viewer_domain=${SUMMING_VIEWER_DOMAIN:-}
 viewer_redirect_domain=${SUMMING_VIEWER_REDIRECT_DOMAIN:-}
-ash_seo_revision=${ASH_SEO_REVISION:-}
-enable_timer=${ENABLE_ASH_SEO_TIMER:-0}
+legacy_project_unit=${SUMMING_LEGACY_PROJECT_UNIT:-}
 repo_dir=/opt/summing
-runner_user=summing-project-runner
-runner_config_root=/etc/summing-project-runner
 
-if [ -z "${viewer_domain}" ] || [ -z "${ash_seo_revision}" ]; then
-  printf '%s\n' 'Set SUMMING_VIEWER_DOMAIN and ASH_SEO_REVISION.' >&2
+if [ -z "${viewer_domain}" ]; then
+  printf '%s\n' 'Set SUMMING_VIEWER_DOMAIN.' >&2
   exit 2
 fi
 if ! printf '%s' "${viewer_domain}" | grep -Eq '^[a-z0-9.-]+$'; then
@@ -32,43 +29,24 @@ if [ -n "${viewer_redirect_domain}" ] && \
   printf '%s\n' 'SUMMING_VIEWER_REDIRECT_DOMAIN must differ from SUMMING_VIEWER_DOMAIN.' >&2
   exit 2
 fi
-if ! printf '%s' "${ash_seo_revision}" | grep -Eq '^[0-9a-f]{40}$'; then
-  printf '%s\n' 'ASH_SEO_REVISION must be a full commit SHA.' >&2
+if [ -n "${legacy_project_unit}" ] && \
+  ! printf '%s' "${legacy_project_unit}" | grep -Eq '^[a-z0-9][a-z0-9@_.-]{0,127}$'; then
+  printf '%s\n' 'SUMMING_LEGACY_PROJECT_UNIT must be an exact systemd unit basename.' >&2
+  exit 2
+fi
+if [[ "${legacy_project_unit}" == *.service ]] || [[ "${legacy_project_unit}" == *.timer ]]; then
+  printf '%s\n' 'SUMMING_LEGACY_PROJECT_UNIT must not include .service or .timer.' >&2
   exit 2
 fi
 
 SUMMING_PROJECT_RUNNER_RELEASE="${repo_dir}" \
   "${repo_dir}/deploy/install-project-runner-host"
 
-runner_project_config=${runner_config_root}/projects/ash-seo.json
-legacy_env_path=
-if [ -f "${runner_project_config}" ]; then
-  legacy_env_path=$(jq -r '.envPath // empty' "${runner_project_config}")
+preserve_legacy_connections=0
+if [ -f /etc/caddy/Caddyfile ] && \
+  grep -Fq 'handle /connections* {' /etc/caddy/Caddyfile; then
+  preserve_legacy_connections=1
 fi
-if [ -n "${legacy_env_path}" ]; then
-  compatible_runner_config=$(mktemp /run/ash-seo-runner.XXXXXX)
-  jq --arg envPath "${legacy_env_path}" '. + {envPath: $envPath}' \
-    "${repo_dir}/deploy/ash-seo.runner.json" > "${compatible_runner_config}"
-  install -o root -g "${runner_user}" -m 0640 \
-    "${compatible_runner_config}" "${runner_project_config}"
-  rm -f "${compatible_runner_config}"
-else
-  install -o root -g "${runner_user}" -m 0640 \
-    "${repo_dir}/deploy/ash-seo.runner.json" "${runner_project_config}"
-fi
-if [ ! -f "${runner_config_root}/projects/ash-seo.env" ]; then
-  install -o root -g "${runner_user}" -m 0640 \
-    "${repo_dir}/deploy/ash-seo.env.example" \
-    "${runner_config_root}/projects/ash-seo.env"
-fi
-
-sed "s/replace_me/${ash_seo_revision}/" "${repo_dir}/deploy/ash-seo.schedule.json" \
-  > "${runner_config_root}/schedules/ash-seo.json"
-chown root:"${runner_user}" "${runner_config_root}/schedules/ash-seo.json"
-chmod 0640 "${runner_config_root}/schedules/ash-seo.json"
-
-install -o root -g root -m 0644 "${repo_dir}/deploy/summing-ash-seo.service" /etc/systemd/system/summing-ash-seo.service
-install -o root -g root -m 0644 "${repo_dir}/deploy/summing-ash-seo.timer" /etc/systemd/system/summing-ash-seo.timer
 
 if ! command -v caddy >/dev/null 2>&1; then
   curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/gpg.key -o /etc/apt/keyrings/caddy-stable.key
@@ -80,7 +58,7 @@ if ! command -v caddy >/dev/null 2>&1; then
   apt-get update
   DEBIAN_FRONTEND=noninteractive apt-get install -y caddy
 fi
-if [ -z "${legacy_env_path}" ] || [ ! -f /etc/caddy/Caddyfile ]; then
+if [ "${preserve_legacy_connections}" != 1 ] || [ ! -f /etc/caddy/Caddyfile ]; then
   temporary_caddy=$(mktemp /etc/caddy/Caddyfile.XXXXXX)
   trap 'rm -f "${temporary_caddy}"' EXIT
   sed "s/VIEWER_DOMAIN/${viewer_domain}/g" \
@@ -129,11 +107,6 @@ systemctl enable summing-project-runner.service
 systemctl restart summing-project-runner.service
 systemctl enable caddy.service
 systemctl restart caddy.service
-if [ "${enable_timer}" = 1 ]; then
-  systemctl enable --now summing-ash-seo.timer
-else
-  systemctl disable --now summing-ash-seo.timer >/dev/null 2>&1 || true
-fi
 
 runner_healthy=0
 for attempt in $(seq 1 30); do
@@ -148,4 +121,9 @@ if [ "${runner_healthy}" != 1 ]; then
   printf '%s\n' 'Project runner did not become healthy within 30 seconds.' >&2
   exit 1
 fi
-printf '%s\n' 'Project Viewer and isolated runner with encrypted project environments are installed.'
+if [ -n "${legacy_project_unit}" ]; then
+  systemctl disable --now "${legacy_project_unit}.timer" >/dev/null 2>&1 || true
+  systemctl stop "${legacy_project_unit}.service" >/dev/null 2>&1 || true
+  printf 'Disabled explicitly selected legacy Project unit: %s.\n' "${legacy_project_unit}"
+fi
+printf '%s\n' 'Project Viewer and the generic isolated project runner are installed.'

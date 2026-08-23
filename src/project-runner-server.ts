@@ -285,6 +285,7 @@ export class ProjectRunnerServer {
       "/run/summing-secrets/runtime.sock",
     readonly managedDataRoot = resolve(dataRoot, "..", "managed-data"),
     readonly maxParallelJobs = 2,
+    readonly runTimeoutHours = 12,
   ) {
     if (!isAbsolute(socketPath) || basename(socketPath) !== "runner.sock") {
       throw new Error("runner socket must be an absolute runner.sock path");
@@ -295,6 +296,9 @@ export class ProjectRunnerServer {
     }
     if (!Number.isSafeInteger(maxParallelJobs) || maxParallelJobs < 1 || maxParallelJobs > 16) {
       throw new Error("runner max parallel jobs must be an integer between 1 and 16");
+    }
+    if (!Number.isSafeInteger(runTimeoutHours) || runTimeoutHours < 1 || runTimeoutHours > 168) {
+      throw new Error("runner run timeout must be an integer between 1 and 168 hours");
     }
     mkdirSync(this.managedConfigRoot(), { recursive: true, mode: 0o700 });
     this.environments = new ProjectEnvironmentStore(resolve(dataRoot, "environments"), environmentKey);
@@ -362,6 +366,7 @@ export class ProjectRunnerServer {
         queued: this.queue.length,
         running: this.activeJobs.size,
         maxParallelJobs: this.maxParallelJobs,
+        runTimeoutHours: this.runTimeoutHours,
       });
       return;
     }
@@ -540,6 +545,35 @@ export class ProjectRunnerServer {
       }
       return;
     }
+    if (request.method === "POST" && url.pathname === "/jobs/replay") {
+      const projectId = url.searchParams.get("project") ?? "";
+      const workspaceId = url.searchParams.get("workspace") ?? "";
+      const sourceJobId = url.searchParams.get("job") ?? "";
+      const idempotencyKey = url.searchParams.get("idempotency_key") ?? "";
+      if (
+        !PROJECT_ID.test(projectId) ||
+        !WORKSPACE_ID.test(workspaceId) ||
+        !JOB_ID.test(sourceJobId) ||
+        !IDEMPOTENCY_KEY.test(idempotencyKey)
+      ) {
+        throw new RunnerHttpError(400, "invalid runner replay scope");
+      }
+      this.projectConfig(projectId, workspaceId);
+      const source = this.storedJob(projectId, sourceJobId);
+      if ((source.workspaceId ?? "repo") !== workspaceId) {
+        throw new RunnerHttpError(404, "runner release was not found in this workspace");
+      }
+      const existing = this.idempotentJob(projectId, workspaceId, idempotencyKey);
+      if (existing) {
+        if (existing.trigger !== "replay" || existing.replayOfJobId !== sourceJobId) {
+          throw new RunnerHttpError(409, "idempotency key was reused for a different runner job");
+        }
+        json(response, 200, { job: existing, deduplicated: true });
+        return;
+      }
+      json(response, 202, { job: this.replayJob(source, idempotencyKey) });
+      return;
+    }
     if (request.method === "POST" && url.pathname === "/jobs/cancel") {
       const projectId = url.searchParams.get("project") ?? "";
       const workspaceId = url.searchParams.get("workspace") ?? "";
@@ -702,6 +736,8 @@ export class ProjectRunnerServer {
           resolve(directory, "environment.json"),
           project.environmentBootstrap.get(job.workspaceId),
         );
+        const environmentPath = resolve(directory, "environment.json");
+        if (existsSync(environmentPath)) job.environmentSha256 = this.fileSha256(environmentPath);
       }
       this.saveJob(job);
       this.queue.push(job);
@@ -739,6 +775,101 @@ export class ProjectRunnerServer {
       }
     }
     return null;
+  }
+
+  private fileSha256(path: string): string {
+    return createHash("sha256").update(readFileSync(path)).digest("hex");
+  }
+
+  private assertReleaseFile(path: string, expectedSha256?: string): void {
+    if (!existsSync(path)) throw new RunnerHttpError(409, "release payload has expired");
+    const metadata = lstatSync(path);
+    if (!metadata.isFile() || metadata.isSymbolicLink()) {
+      throw new RunnerHttpError(409, "release payload is unsafe");
+    }
+    if (expectedSha256 && this.fileSha256(path) !== expectedSha256) {
+      throw new RunnerHttpError(409, "release payload integrity check failed");
+    }
+  }
+
+  private replayJob(
+    source: RunnerJob,
+    idempotencyKey: string,
+  ): RunnerJob {
+    if (source.status === "queued" || source.status === "running" || source.status === "cancelling") {
+      throw new RunnerHttpError(409, "an active runner job cannot be replayed");
+    }
+    if (source.action === "build") {
+      throw new RunnerHttpError(409, "build-only jobs are not replayable releases");
+    }
+    if (
+      !source.releaseId ||
+      !source.archiveSha256 ||
+      !source.configSha256 ||
+      !Number.isSafeInteger(source.environmentRevision) ||
+      Number(source.environmentRevision) < 0 ||
+      !source.imageId
+    ) {
+      throw new RunnerHttpError(409, "runner job does not contain a complete release snapshot");
+    }
+    const environmentRevision = Number(source.environmentRevision);
+    const sourceDirectory = this.jobDirectory(source.projectId, source.id);
+    const sourceArchive = resolve(sourceDirectory, "source.tar");
+    const sourceConfig = resolve(sourceDirectory, "release-config.json");
+    const sourceEnvironment = resolve(sourceDirectory, "environment.json");
+    this.assertReleaseFile(sourceArchive, source.archiveSha256);
+    this.assertReleaseFile(sourceConfig, source.configSha256);
+    if (source.environmentSha256) {
+      this.assertReleaseFile(sourceEnvironment, source.environmentSha256);
+    } else if (existsSync(sourceEnvironment)) {
+      throw new RunnerHttpError(409, "release environment integrity metadata is missing");
+    }
+
+    const job: RunnerJob = {
+      id: randomUUID(),
+      releaseId: source.releaseId,
+      replayOfJobId: source.id,
+      projectId: source.projectId,
+      workspaceId: source.workspaceId,
+      action: source.action,
+      revision: source.revision,
+      archiveSha256: source.archiveSha256,
+      configSha256: source.configSha256,
+      imageId: source.imageId,
+      environmentRevision,
+      trigger: "replay",
+      idempotencyKey,
+      status: "queued",
+      createdAt: new Date().toISOString(),
+      ...(source.environmentSha256 ? { environmentSha256: source.environmentSha256 } : {}),
+    };
+    const directory = this.jobDirectory(job.projectId, job.id);
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    try {
+      copyFileSync(sourceArchive, resolve(directory, "source.tar"), constants.COPYFILE_EXCL);
+      copyFileSync(sourceConfig, resolve(directory, "release-config.json"), constants.COPYFILE_EXCL);
+      if (source.environmentSha256) {
+        copyFileSync(
+          sourceEnvironment,
+          resolve(directory, "environment.json"),
+          constants.COPYFILE_EXCL,
+        );
+      }
+      for (const file of [
+        "source.tar",
+        "release-config.json",
+        ...(source.environmentSha256 ? ["environment.json"] : []),
+      ]) {
+        chmodSync(resolve(directory, file), 0o600);
+      }
+      this.saveJob(job);
+      this.queue.push(job);
+      this.processQueue();
+      return job;
+    } catch (error) {
+      rmSync(directory, { recursive: true, force: true });
+      throw error;
+    }
   }
 
   private assertSameSubmission(
@@ -1239,7 +1370,8 @@ export class ProjectRunnerServer {
     this.saveJob(job);
     writeFileSync(
       logPath,
-      `[${job.startedAt}] ${job.action} ${job.projectId}/${job.workspaceId}@${job.revision}\n`,
+      `[${job.startedAt}] ${job.action} ${job.projectId}/${job.workspaceId}@${job.revision}` +
+        `${job.replayOfJobId ? ` replay-of=${job.replayOfJobId} release=${job.releaseId}` : ""}\n`,
       { mode: 0o600 },
     );
     try {
@@ -1266,12 +1398,26 @@ export class ProjectRunnerServer {
       let configPath: string | null = null;
       if (job.action !== "build") {
         configPath = resolve(directory, "release-config.json");
-        const selectedConfig = this.runtimeConfigPath(project, source);
-        copyFileSync(selectedConfig, configPath);
-        chmodSync(configPath, 0o600);
-        job.configSha256 = createHash("sha256").update(readFileSync(configPath)).digest("hex");
+        if (job.replayOfJobId) {
+          this.assertReleaseFile(configPath, job.configSha256);
+          const environmentPath = resolve(directory, "environment.json");
+          if (job.environmentSha256) {
+            this.assertReleaseFile(environmentPath, job.environmentSha256);
+          } else if (existsSync(environmentPath)) {
+            throw new Error("release environment integrity metadata is missing");
+          }
+        } else {
+          const selectedConfig = this.runtimeConfigPath(project, source);
+          copyFileSync(selectedConfig, configPath);
+          chmodSync(configPath, 0o600);
+          job.configSha256 = this.fileSha256(configPath);
+        }
       }
-      job.imageId = await this.ensureImage(job, source, logPath, signal);
+      if (job.replayOfJobId) {
+        await this.ensureReleaseImage(job, source, logPath, signal);
+      } else {
+        job.imageId = await this.ensureImage(job, source, logPath, signal);
+      }
       this.saveJob(job);
       if (signal.aborted) throw new RunnerCommandCancelledError("runner job cancelled");
       const result = job.action === "build"
@@ -1360,6 +1506,25 @@ export class ProjectRunnerServer {
     return inspected.output.trim() || image;
   }
 
+  private async ensureReleaseImage(
+    job: RunnerJob,
+    source: string,
+    logPath: string,
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (!job.imageId) throw new Error("release image id is missing");
+    const inspected = await run(
+      this.dockerBinary,
+      ["image", "inspect", "--format", "{{.Id}}", job.imageId],
+      { cwd: source, logPath, signal, timeoutMs: 30_000 },
+    );
+    if (inspected.code !== 0) throw new Error("release image is no longer available");
+    const actualImageId = inspected.output.trim();
+    if (actualImageId && actualImageId !== job.imageId) {
+      throw new Error("release image integrity check failed");
+    }
+  }
+
   private async runImage(
     job: RunnerJob,
     project: RunnerProjectConfig,
@@ -1422,7 +1587,7 @@ export class ProjectRunnerServer {
       const result = await run(this.dockerBinary, args, {
         cwd: this.dataRoot,
         logPath,
-        timeoutMs: job.action === "run" ? 14_400_000 : 900_000,
+        timeoutMs: job.action === "run" ? this.runTimeoutHours * 3_600_000 : 900_000,
         redactions: access.redactions,
         signal,
       });

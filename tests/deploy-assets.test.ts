@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
@@ -196,6 +196,9 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
   assert.match(cutover, /project-config\.before\.json/);
   assert.match(cutover, /Caddyfile\.before/);
   assert.match(cutover, /trap rollback ERR/);
+  assert.match(cutover, /project_id=\$\{SUMMING_ENV_MIGRATION_PROJECT:-\}/);
+  assert.match(cutover, /No explicit SUMMING_ENV_MIGRATION_PROJECT/);
+  assert.doesNotMatch(cutover, /ash-seo/);
   assert.match(runnerInstaller, /runner_user=summing-project-runner/);
   assert.match(runnerInstaller, /usermod --append --groups "\$\{runner_user\}" summing/);
   assert.doesNotMatch(
@@ -239,7 +242,6 @@ test("all production processes execute through the current release symlink", () 
   for (const path of [
     "deploy/summing.service",
     "deploy/summing-project-runner.service",
-    "deploy/summing-ash-seo.service",
   ]) {
     assert.match(asset(path), /\/opt\/summing-current\/dist\/src\//, path);
   }
@@ -268,16 +270,24 @@ test("runner environment deployment keeps its encryption key private and one HTT
   assert.doesNotMatch(caddy, /connections|8767/);
   assert.match(caddy, /reverse_proxy 127\.0\.0\.1:8766/);
   assert.match(installer, /Keeping the legacy Connections route until environment verification succeeds/);
-  assert.match(installer, /\. \+ \{envPath: \$envPath\}/);
-  assert.doesNotMatch(installer, /ash-seo\.config\.json/);
-  assert.deepEqual(
-    JSON.parse(asset("deploy/ash-seo.runner.json")).configSourcePaths,
-    ["config.json", "config.example.json"],
-  );
+  assert.match(installer, /SUMMING_LEGACY_PROJECT_UNIT/);
+  assert.match(installer, /systemctl disable --now "\$\{legacy_project_unit\}\.timer"/);
+  assert.doesNotMatch(installer, /ash-seo|ASH_SEO|summing-ash/);
+  for (const removed of [
+    "deploy/ash-seo.runner.json",
+    "deploy/ash-seo.env.example",
+    "deploy/ash-seo.schedule.json",
+    "deploy/summing-ash-seo.service",
+    "deploy/summing-ash-seo.timer",
+  ]) {
+    assert.equal(existsSync(join(root, removed)), false, removed);
+  }
   assert.match(
     service,
     /SUMMING_RUNNER_SCHEDULES=\/etc\/summing-project-runner\/schedules/,
   );
+  assert.match(service, /SUMMING_RUNNER_MAX_PARALLEL_JOBS=2/);
+  assert.match(service, /SUMMING_RUNNER_RUN_TIMEOUT_HOURS=12/);
 });
 
 test("host identity migration is guarded, recoverable, and preserves worktrees", () => {
@@ -308,6 +318,8 @@ test("host identity migration is guarded, recoverable, and preserves worktrees",
   assert.match(migration, /hostnamectl set-hostname "\$\{target_hostname\}"/);
   assert.match(migration, /systemctl disable \\\n+  "\$\{retired_name\}-runner\.service"/);
   assert.match(migration, /systemctl reset-failed/);
+  assert.match(migration, /SUMMING_LEGACY_PROJECT_UNIT/);
+  assert.doesNotMatch(migration, /ash-seo|summing-ash/);
   assert.match(migration, /pre-9-releases/);
   assert.match(migration, /source_version=.*VERSION/);
   assert.match(migration, /9\.\*\)/);
