@@ -172,11 +172,12 @@ exit 0
     assert.deepEqual(await client.health(), {
       ok: true,
       version: readFileSync(join(process.cwd(), "VERSION"), "utf8").trim(),
-      protocolVersion: 2,
+      protocolVersion: 3,
       queued: 0,
       running: 0,
       maxParallelJobs: 2,
       runTimeoutHours: 12,
+      servicePortRange: [20_000, 29_999],
     });
 
     const imported = await client.environment("demo", "repo");
@@ -731,6 +732,229 @@ test("runner marks unfinished jobs interrupted on startup and retains recovery e
     assert.ok(recovered.completedAt);
     assert.match(readFileSync(join(runs, queuedId, "job.log"), "utf8"), /not restarted automatically/);
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runner deploys retained Releases as persistent services with restart and rollback", async () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-runner-service-"));
+  const repository = join(root, "repo");
+  const configRoot = join(root, "config");
+  const dataRoot = join(root, "data");
+  const appData = join(root, "app-data");
+  const socket = join(root, "runner.sock");
+  const dockerState = join(root, "docker-state");
+  const fakeDocker = join(root, "docker");
+  mkdirSync(repository, { recursive: true });
+  mkdirSync(configRoot);
+  mkdirSync(dockerState);
+  mkdirSync(join(repository, ".summing"));
+  writeFileSync(join(repository, "Dockerfile"), "FROM scratch\n");
+  writeFileSync(join(repository, "config.json"), "{}\n");
+  writeFileSync(join(repository, ".summing", "services.json"), JSON.stringify({
+    version: 1,
+    services: {
+      api: { command: ["node", "dist/src/api.js"], containerPort: 3_000 },
+      worker: { command: ["node", "dist/src/worker.js"], startupTimeoutSeconds: 5 },
+    },
+  }));
+  execFileSync("git", ["init", "--initial-branch=master", repository]);
+  execFileSync("git", ["-C", repository, "config", "user.name", "Test"]);
+  execFileSync("git", ["-C", repository, "config", "user.email", "test@example.test"]);
+  execFileSync("git", ["-C", repository, "add", "."]);
+  execFileSync("git", ["-C", repository, "commit", "-m", "service v1"]);
+  writeFileSync(join(configRoot, "demo.json"), JSON.stringify({
+    configSourcePaths: ["config.json"],
+    dataPath: appData,
+    network: true,
+  }));
+  writeFileSync(fakeDocker, `#!/bin/sh
+set -eu
+state='${dockerState}'
+command="$1"
+shift
+printf '%s\n' "$command" "$@" >> "$state/docker-args"
+case "$command" in
+  image)
+    if [ "$1" = inspect ] && [ -f "$state/image-built" ]; then
+      printf '%s\n' 'sha256:service-test-image'
+      exit 0
+    fi
+    exit 1
+    ;;
+  build)
+    : > "$state/image-built"
+    exit 0
+    ;;
+  run)
+    detached=false
+    name=''
+    previous=''
+    for argument in "$@"; do
+      if [ "$argument" = '--detach' ]; then detached=true; fi
+      if [ "$previous" = '--name' ]; then name="$argument"; fi
+      previous="$argument"
+    done
+    if [ "$detached" = true ]; then
+      if [ -f "$state/fail-next-service" ]; then
+        rm -f "$state/fail-next-service"
+        exit 17
+      fi
+      : > "$state/$name.exists"
+      : > "$state/$name.running"
+      printf '%s\n' "$name"
+    fi
+    exit 0
+    ;;
+  container)
+    name=''
+    for argument in "$@"; do name="$argument"; done
+    if [ ! -f "$state/$name.exists" ]; then exit 1; fi
+    if [ -f "$state/$name.running" ]; then printf '%s\n' true; else printf '%s\n' false; fi
+    ;;
+  stop)
+    name=''
+    for argument in "$@"; do name="$argument"; done
+    rm -f "$state/$name.running"
+    ;;
+  start|restart)
+    name=''
+    for argument in "$@"; do name="$argument"; done
+    if [ ! -f "$state/$name.exists" ]; then exit 1; fi
+    : > "$state/$name.running"
+    ;;
+  rm)
+    name=''
+    for argument in "$@"; do name="$argument"; done
+    rm -f "$state/$name.exists" "$state/$name.running"
+    ;;
+  logs)
+    printf '%s\n' 'persistent worker log'
+    ;;
+  *) exit 1 ;;
+esac
+`);
+  chmodSync(fakeDocker, 0o700);
+  let server = new ProjectRunnerServer(
+    socket,
+    dataRoot,
+    configRoot,
+    fakeDocker,
+    Buffer.alloc(32, 17),
+  );
+  try {
+    await server.start();
+    let client = new ProjectRunnerClient(socket);
+    const inspector = new GitInspector(repository);
+    const firstRevision = await inspector.resolveRevision("HEAD");
+    const firstReleaseJob = await client.submit(
+      "demo",
+      "repo",
+      "validate",
+      firstRevision,
+      await inspector.archive(firstRevision),
+    );
+    const firstRelease = await completedJob(client, "demo", "repo", firstReleaseJob.id);
+    assert.equal(firstRelease.status, "completed");
+    const deployed = await client.deployService(
+      "demo",
+      "repo",
+      "worker",
+      firstRelease.id,
+      "a".repeat(64),
+    );
+    assert.equal(deployed.status, "running");
+    assert.equal(deployed.desiredState, "running");
+    assert.equal(deployed.current?.releaseId, firstRelease.releaseId);
+    assert.equal(deployed.localEndpoint, null);
+    const api = await client.deployService(
+      "demo",
+      "repo",
+      "api",
+      firstRelease.id,
+      "1".repeat(64),
+    );
+    assert.match(api.localEndpoint ?? "", /^http:\/\/127\.0\.0\.1:\d+$/);
+    const apiPort = new URL(api.localEndpoint!).port;
+    assert.match(readFileSync(join(dockerState, "docker-args"), "utf8"), new RegExp(
+      `127\\.0\\.0\\.1:${apiPort}:3000`,
+    ));
+    assert.deepEqual((await client.services("demo", "repo")).map((item) => item.name).sort(), [
+      "api",
+      "worker",
+    ]);
+    assert.match(await client.serviceLog("demo", "repo", "worker"), /persistent worker log/);
+    assert.equal((await client.serviceAction(
+      "demo", "repo", "worker", "restart", "b".repeat(64),
+    )).status, "running");
+    assert.equal((await client.serviceAction(
+      "demo", "repo", "worker", "stop", "c".repeat(64),
+    )).status, "stopped");
+    assert.equal((await client.serviceAction(
+      "demo", "repo", "worker", "start", "d".repeat(64),
+    )).status, "running");
+
+    writeFileSync(join(repository, "VERSION.txt"), "v2\n");
+    execFileSync("git", ["-C", repository, "add", "."]);
+    execFileSync("git", ["-C", repository, "commit", "-m", "service v2"]);
+    const secondRevision = await inspector.resolveRevision("HEAD");
+    const secondReleaseJob = await client.submit(
+      "demo",
+      "repo",
+      "validate",
+      secondRevision,
+      await inspector.archive(secondRevision),
+    );
+    const secondRelease = await completedJob(client, "demo", "repo", secondReleaseJob.id);
+    const upgraded = await client.deployService(
+      "demo",
+      "repo",
+      "worker",
+      secondRelease.id,
+      "e".repeat(64),
+    );
+    assert.equal(upgraded.current?.revision, secondRevision);
+    assert.equal(upgraded.previous?.revision, firstRevision);
+    const rolledBack = await client.serviceAction(
+      "demo",
+      "repo",
+      "worker",
+      "rollback",
+      "f".repeat(64),
+    );
+    assert.equal(rolledBack.current?.revision, firstRevision);
+    assert.equal(rolledBack.previous?.revision, secondRevision);
+    writeFileSync(join(dockerState, "fail-next-service"), "1\n");
+    await assert.rejects(
+      client.deployService(
+        "demo",
+        "repo",
+        "worker",
+        secondRelease.id,
+        "9".repeat(64),
+      ),
+      /service deployment failed/,
+    );
+    const restored = (await client.services("demo", "repo")).find((item) => item.name === "worker");
+    assert.equal(restored?.status, "running");
+    assert.equal(restored?.current?.revision, firstRevision);
+    assert.match(restored?.error ?? "", /start exited with code 17/);
+
+    await server.close();
+    server = new ProjectRunnerServer(
+      socket,
+      dataRoot,
+      configRoot,
+      fakeDocker,
+      Buffer.alloc(32, 17),
+    );
+    await server.start();
+    client = new ProjectRunnerClient(socket);
+    const recovered = await client.services("demo", "repo");
+    assert.equal(recovered.find((item) => item.name === "worker")?.status, "running");
+    assert.equal(recovered.find((item) => item.name === "worker")?.current?.revision, firstRevision);
+  } finally {
+    await server.close();
     rmSync(root, { recursive: true, force: true });
   }
 });

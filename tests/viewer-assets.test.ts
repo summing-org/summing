@@ -24,8 +24,9 @@ test("Project Viewer bounds Telegram authorization and network waits", () => {
   assert.match(VIEWER_HTML, /data-tab="runs">Правки агента</);
   assert.match(VIEWER_HTML, /data-tab="launch">Раннер</);
   assert.match(VIEWER_HTML, /ДИАГНОСТИКА/);
-  assert.match(VIEWER_HTML, /Очередь раннера/);
-  assert.match(VIEWER_HTML, /Запусками и расписаниями управляет агент/);
+  assert.match(VIEWER_HTML, /Jobs и сервисы/);
+  assert.match(VIEWER_HTML, /DESIRED STATE/);
+  assert.match(VIEWER_HTML, /FINITE EXECUTIONS/);
   assert.doesNotMatch(VIEWER_HTML, /data-action=/);
   assert.doesNotMatch(VIEWER_JS, /function enqueue/);
   assert.match(VIEWER_HTML, /id="cancelJob"[^>]*>Остановить</);
@@ -37,6 +38,8 @@ test("Project Viewer bounds Telegram authorization and network waits", () => {
   assert.match(VIEWER_CSS, /data-theme="light"/);
   assert.match(VIEWER_JS, /\/api\/viewer\/job-artifacts/);
   assert.match(VIEWER_JS, /\/api\/viewer\/jobs\/cancel/);
+  assert.match(VIEWER_JS, /\/api\/viewer\/services/);
+  assert.match(VIEWER_JS, /\/api\/viewer\/service-log/);
   assert.match(VIEWER_JS, /cancelling:"останавливается"/);
   assert.match(VIEWER_JS, /release \"\+job\.releaseId\.slice/);
   assert.match(VIEWER_JS, /replay \"\+job\.replayOfJobId\.slice/);

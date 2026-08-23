@@ -8,6 +8,7 @@ import type { ProjectCatalog } from "../src/project-catalog.js";
 import type {
   ProjectRunnerClient,
   RunnerJob,
+  RunnerService,
   RunnerSubmissionMetadata,
 } from "../src/project-runner-client.js";
 import {
@@ -436,12 +437,13 @@ test("runner tools expose only conversation-scoped arguments and treat artifacts
     runner,
   );
   try {
-    const namespace = RUNNER_DYNAMIC_TOOLS[0]!;
-    for (const tool of namespace.tools) {
-      const properties = tool.inputSchema.properties as Record<string, unknown> | undefined;
-      assert.equal(Object.hasOwn(properties ?? {}, "projectId"), false);
-      assert.equal(Object.hasOwn(properties ?? {}, "workspaceId"), false);
-      assert.equal(Object.hasOwn(properties ?? {}, "actorUserId"), false);
+    for (const namespace of RUNNER_DYNAMIC_TOOLS) {
+      for (const tool of namespace.tools) {
+        const properties = tool.inputSchema.properties as Record<string, unknown> | undefined;
+        assert.equal(Object.hasOwn(properties ?? {}, "projectId"), false);
+        assert.equal(Object.hasOwn(properties ?? {}, "workspaceId"), false);
+        assert.equal(Object.hasOwn(properties ?? {}, "actorUserId"), false);
+      }
     }
     const replayCall = {
       threadId: "thread",
@@ -558,6 +560,124 @@ test("runner tools expose only conversation-scoped arguments and treat artifacts
       arguments: { token: clearPlan.token },
     });
     assert.deepEqual(availableArtifacts.map((artifact) => artifact.name), ["errors.json"]);
+  } finally {
+    control.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("service tools deploy an exact Release and keep restart separate from jobs", async () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-service-control-"));
+  const release: RunnerJob = {
+    id: "cfd3dd5d-96f8-4bd2-805d-aa4f13cceca0",
+    releaseId: "cfd3dd5d-96f8-4bd2-805d-aa4f13cceca0",
+    projectId: "demo",
+    workspaceId: "repo",
+    action: "validate",
+    revision: "a".repeat(40),
+    status: "completed",
+    createdAt: "2026-08-17T05:00:00.000Z",
+    completedAt: "2026-08-17T05:01:00.000Z",
+  };
+  let service: RunnerService | null = null;
+  const deployKeys: string[] = [];
+  const actions: string[] = [];
+  const runner = {
+    available: async () => true,
+    health: async () => ({
+      ok: true,
+      version: "9.20.0",
+      protocolVersion: 3,
+      queued: 0,
+      running: 0,
+      maxParallelJobs: 2,
+      runTimeoutHours: 12,
+      servicePortRange: [20_000, 29_999] as [number, number],
+    }),
+    jobs: async () => [release],
+    services: async () => service ? [service] : [],
+    deployService: async (
+      projectId: string,
+      workspaceId: string,
+      name: string,
+      releaseId: string,
+      idempotencyKey: string,
+    ) => {
+      deployKeys.push(idempotencyKey);
+      service = {
+        projectId,
+        workspaceId,
+        name,
+        desiredState: "running",
+        status: "running",
+        current: {
+          deploymentId: "dd705c36-0725-45a3-ae50-e87a2df2d807",
+          releaseId,
+          revision: release.revision,
+          imageId: "sha256:image",
+          environmentRevision: 2,
+          deployedAt: "2026-08-17T05:02:00.000Z",
+        },
+        previous: null,
+        localEndpoint: "http://127.0.0.1:23000",
+        updatedAt: "2026-08-17T05:02:00.000Z",
+      };
+      return service;
+    },
+    serviceAction: async (
+      _projectId: string,
+      _workspaceId: string,
+      _name: string,
+      action: string,
+    ) => {
+      actions.push(action);
+      return service!;
+    },
+    serviceLog: async () => "service log\n",
+  } as unknown as ProjectRunnerClient;
+  const control = new RunnerControlPlane(
+    join(root, "control.sqlite3"),
+    {} as ProjectCatalog,
+    runner,
+  );
+  try {
+    const inspected = await executeRunnerTool(control, context("turn-service-inspect"), {
+      threadId: "thread",
+      turnId: "turn-service-inspect",
+      callId: "service-inspect",
+      namespace: "service",
+      tool: "inspect",
+      arguments: {},
+    });
+    assert.match(inspected.contentItems[0]!.text, /deployableReleases/);
+    const deployed = await executeRunnerTool(control, context("turn-service-deploy"), {
+      threadId: "thread",
+      turnId: "turn-service-deploy",
+      callId: "service-deploy",
+      namespace: "service",
+      tool: "deploy",
+      arguments: { name: "api", releaseId: release.id },
+    });
+    assert.match(deployed.contentItems[0]!.text, /127\.0\.0\.1:23000/);
+    assert.match(deployKeys[0] ?? "", /^[0-9a-f]{64}$/);
+    await executeRunnerTool(control, context("turn-service-restart"), {
+      threadId: "thread",
+      turnId: "turn-service-restart",
+      callId: "service-restart",
+      namespace: "service",
+      tool: "restart",
+      arguments: { name: "api" },
+    });
+    assert.deepEqual(actions, ["restart"]);
+    const log = await executeRunnerTool(control, context("turn-service-log"), {
+      threadId: "thread",
+      turnId: "turn-service-log",
+      callId: "service-log",
+      namespace: "service",
+      tool: "log",
+      arguments: { name: "api" },
+    });
+    assert.match(log.contentItems[0]!.text, /service log/);
   } finally {
     control.close();
     rmSync(root, { recursive: true, force: true });

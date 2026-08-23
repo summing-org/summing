@@ -124,6 +124,31 @@ test("viewer edits one environment while job launch stays agent-only and cancell
         completedAt: "2026-08-14T00:01:00Z",
       };
     },
+    services: async (projectId: string, workspaceId: string) => {
+      assert.deepEqual([projectId, workspaceId], ["demo", "repo"]);
+      return [{
+        projectId,
+        workspaceId,
+        name: "api",
+        desiredState: "running",
+        status: "running",
+        current: {
+          deploymentId: "00000000-0000-4000-8000-000000000002",
+          releaseId: "00000000-0000-4000-8000-000000000003",
+          revision: "a".repeat(40),
+          imageId: "sha256:image",
+          environmentRevision: 4,
+          deployedAt: "2026-08-14T00:02:00Z",
+        },
+        previous: null,
+        localEndpoint: "http://127.0.0.1:23000",
+        updatedAt: "2026-08-14T00:02:00Z",
+      }];
+    },
+    serviceLog: async (projectId: string, workspaceId: string, name: string) => {
+      assert.deepEqual([projectId, workspaceId, name], ["demo", "repo", "api"]);
+      return "api ready\n";
+    },
   });
   const endpoint = `http://127.0.0.1:${port}`;
   const headers = { "x-telegram-init-data": signedInitData("bot-token", 42) };
@@ -170,6 +195,25 @@ test("viewer edits one environment while job launch stays agent-only and cancell
       "repo",
       "00000000-0000-4000-8000-000000000001",
     ]);
+
+    const services = await fetch(
+      `${endpoint}/api/viewer/services?conversation=${conversation.id}`,
+      { headers },
+    );
+    assert.equal(services.status, 200);
+    assert.equal((await services.json() as { services: Array<{ name: string }> }).services[0]?.name, "api");
+    const serviceLog = await fetch(
+      `${endpoint}/api/viewer/service-log?conversation=${conversation.id}&name=api`,
+      { headers },
+    );
+    assert.equal(serviceLog.status, 200);
+    assert.equal((await serviceLog.json() as { log: string }).log, "api ready\n");
+    const serviceAction = await fetch(`${endpoint}/api/viewer/services/action`, {
+      method: "POST",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({ conversation: conversation.id, name: "api", action: "restart" }),
+    });
+    assert.equal(serviceAction.status, 404);
   } finally {
     await viewer.close();
     state.close();

@@ -3,6 +3,15 @@ import type { ProjectEnvironmentDocument } from "./project-environment.js";
 import type {
   EnvironmentVerificationMarker,
 } from "./project-environment-migration.js";
+import type { RunnerService, RunnerServiceAction } from "./project-service.js";
+
+export type {
+  RunnerService,
+  RunnerServiceAction,
+  RunnerServiceDesiredState,
+  RunnerServiceRevision,
+  RunnerServiceStatus,
+} from "./project-service.js";
 
 export type RunnerAction = "build" | "validate" | "dry-run" | "run";
 export type RunnerJobTrigger = "manual" | "schedule" | "replay";
@@ -104,6 +113,7 @@ export interface RunnerHealth {
   running: number;
   maxParallelJobs: number;
   runTimeoutHours: number;
+  servicePortRange: [number, number];
 }
 
 export class ProjectRunnerClientError extends Error {
@@ -262,6 +272,58 @@ export class ProjectRunnerClient {
       `/jobs/cancel?${query.toString()}`,
     );
     return result.job;
+  }
+
+  async services(projectId: string, workspaceId: string): Promise<RunnerService[]> {
+    const query = new URLSearchParams({ project: projectId, workspace: workspaceId });
+    const result = await this.call<{ services: RunnerService[] }>(
+      "GET",
+      `/services?${query.toString()}`,
+    );
+    return result.services;
+  }
+
+  async deployService(
+    projectId: string,
+    workspaceId: string,
+    name: string,
+    releaseId: string,
+    idempotencyKey: string,
+  ): Promise<RunnerService> {
+    const body = Buffer.from(JSON.stringify({ name, releaseId, idempotencyKey }), "utf8");
+    const query = new URLSearchParams({ project: projectId, workspace: workspaceId });
+    const result = await this.call<{ service: RunnerService }>(
+      "POST",
+      `/services/deploy?${query.toString()}`,
+      body,
+    );
+    return result.service;
+  }
+
+  async serviceAction(
+    projectId: string,
+    workspaceId: string,
+    name: string,
+    action: RunnerServiceAction,
+    idempotencyKey: string,
+  ): Promise<RunnerService> {
+    const body = Buffer.from(JSON.stringify({ name, action, idempotencyKey }), "utf8");
+    const query = new URLSearchParams({ project: projectId, workspace: workspaceId });
+    const result = await this.call<{ service: RunnerService }>(
+      "POST",
+      `/services/action?${query.toString()}`,
+      body,
+    );
+    return result.service;
+  }
+
+  async serviceLog(projectId: string, workspaceId: string, name: string): Promise<string> {
+    const query = new URLSearchParams({ project: projectId, workspace: workspaceId, name });
+    const result = await this.call<{ log: string }>(
+      "GET",
+      `/service-log?${query.toString()}`,
+    );
+    return result.log;
   }
 
   async log(projectId: string, jobId: string): Promise<string> {

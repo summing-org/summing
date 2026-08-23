@@ -669,7 +669,7 @@ test("owners control projects while group participants get read-only Q&A", async
     assert.ok(Array.isArray(writeOptions.dynamicTools));
     assert.deepEqual(
       (writeOptions.dynamicTools as Array<{ name: string }>).map((tool) => tool.name),
-      ["runner", "repository", "project_context", "project_portal"],
+      ["runner", "service", "repository", "project_context", "project_portal"],
     );
     assert.equal(typeof writeOptions.dynamicToolHandler, "function");
     assert.equal(

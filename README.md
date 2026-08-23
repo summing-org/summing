@@ -1,4 +1,4 @@
-# SUMMING 9.19
+# SUMMING 9.20
 
 SUMMING — один постоянно живущий агент с одним администратором и назначаемыми
 владельцами проектов. Он работает на Linux VPS, принимает команды из Telegram
@@ -86,9 +86,10 @@ Team Space: создаётся при подключении командног�
 - Project Viewer открывается как Telegram Mini App: показывает дерево, безопасный
   текст файлов, working/commit/run diff, состояние `origin`, безопасные Pull/Push
   текущей ветки и явную fast-forward публикацию её `HEAD` в `origin/master`,
-  runner jobs, их остановку, логи и простой dotenv-editor; вкладка **Правки
+  отдельно desired-state services и конечные runner jobs, их логи, аварийную
+  остановку job и простой dotenv-editor; вкладка **Правки
   агента** показывает Codex diff, а **Раннер** остаётся диагностическим экраном
-  jobs/logs/artifacts с аварийной остановкой, без зашитых кнопок запуска и расписания;
+  services/jobs/logs/artifacts без зашитых кнопок deployment, запуска и расписания;
 - отдельный администраторский Mini App открывается постоянной кнопкой
   **Управление** в личном чате: показывает проекты и обнаруженные Telegram-топики,
   сводит наблюдаемых пользователей по группе и топикам с Telegram ID и активностью,
@@ -97,10 +98,11 @@ Team Space: создаётся при подключении командног�
   фазу и историю deployment, упавшие тесты и безопасный хвост журнала, а также
   позволяет запросить обновление SUMMING; после новой привязки
   бот упоминает владельца проекта в выбранном топике и сообщает Project/Repository;
-- отдельный rootless Docker runner собирает неизменяемые Git snapshots и
-  выполняет только фиксированные действия `build`, `validate`, `dry-run`, `run`;
-- owner управляет runner jobs, расписаниями и артефактами обычными сообщениями
-  агенту. Host-scoped инструменты дают агенту live-state только текущего
+- отдельный rootless Docker runner собирает неизменяемые Git snapshots и явно
+  разделяет конечные jobs (`build`, `validate`, `dry-run`, `run`) и долгоживущие
+  именованные services, активируемые из точного завершённого Release;
+- owner управляет runner jobs, расписаниями, services и артефактами обычными сообщениями
+  агенту. Раздельные host-scoped namespaces `runner` и `service` дают live-state только текущего
   Project/Workspace: запуск и остановка требуют явной команды, расписания хранят
   timezone/дни/время и не допускают overlap, а изменение/удаление расписания и
   удаление/очистка артефактов используют отдельное подтверждение в следующем
@@ -553,6 +555,55 @@ protocol, глобальные `running`/`queued` и лимит параллел
 revision рядом с каждым job. Live run имеет настраиваемый
 `SUMMING_RUNNER_RUN_TIMEOUT_HOURS` (по умолчанию 12 часов, допустимо 1–168),
 поэтому многочасовой batch не обрывается прежним четырёхчасовым пределом.
+
+### Jobs и services
+
+Runner намеренно поддерживает два разных lifecycle. **Job** — конечный запуск:
+он находится в очереди, получает exit code и ограничен timeout. Расписание создаёт
+новый независимый job на каждое occurrence. **Service** — desired state: выбранный
+Release должен продолжать работать после завершения deployment-операции и после
+рестарта host/rootless Docker. Service не занимает job slot и не наследует
+12-часовой `run` timeout.
+
+Именованные services объявляются в immutable source snapshot файла
+`.summing/services.json`:
+
+```json
+{
+  "version": 1,
+  "services": {
+    "api": {
+      "command": ["node", "dist/src/api.js"],
+      "containerPort": 3000,
+      "healthPath": "/health",
+      "startupTimeoutSeconds": 60
+    },
+    "worker": {
+      "command": ["node", "dist/src/worker.js"]
+    }
+  }
+}
+```
+
+`command` необязателен и тогда используется `ENTRYPOINT`/`CMD` image. Для API/web
+runner закрепляет свободный host port из диапазона
+`SUMMING_RUNNER_SERVICE_PORT_START..SUMMING_RUNNER_SERVICE_PORT_END` (по умолчанию
+`20000..29999`) и публикует его исключительно на `127.0.0.1`. `service.inspect`
+возвращает `localEndpoint`; внешний домен по-прежнему является отдельным явным
+маршрутом Caddy и автоматически из Project manifest не создаётся.
+
+`service.deploy` принимает имя и точный ID завершённого non-build Release. Runner
+проверяет source/config/environment hashes и immutable image ID, копирует необходимые
+runtime snapshots в service storage, запускает контейнер с `restart=unless-stopped`
+и ждёт startup/HTTP health check. При неуспешном обновлении новый контейнер удаляется,
+а прежний запускается обратно. Текущий и предыдущий deployments сохраняются для
+явного `service.rollback`; более старый удаляется после успешного обновления.
+
+`service.restart` перезапускает тот же Release без сборки, `service.stop` меняет
+desired state на stopped, `service.start` возвращает уже развёрнутый Release в
+running. `service.log` отдаёт ограниченный secret-redacted tail. Все изменяющие
+операции выполняются только по явной owner-команде; Viewer разделяет карточки
+services и finite jobs, но остаётся диагностическим экраном без кнопок deployment.
 
 Артефакты можно перечислить и безопасно прочитать как недоверенные данные с
 лимитом ответа. Удаление одного файла и очистка job/workspace также составляют

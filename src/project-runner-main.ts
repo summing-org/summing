@@ -22,6 +22,13 @@ async function main(): Promise<void> {
   if (!Number.isSafeInteger(runTimeoutHours) || runTimeoutHours < 1 || runTimeoutHours > 168) {
     throw new Error("SUMMING_RUNNER_RUN_TIMEOUT_HOURS must be an integer between 1 and 168");
   }
+  const servicePortStart = Number(process.env.SUMMING_RUNNER_SERVICE_PORT_START ?? "20000");
+  const servicePortEnd = Number(process.env.SUMMING_RUNNER_SERVICE_PORT_END ?? "29999");
+  if (!Number.isSafeInteger(servicePortStart) || !Number.isSafeInteger(servicePortEnd) ||
+    servicePortStart < 1_024 || servicePortEnd > 65_535 || servicePortStart > servicePortEnd ||
+    servicePortEnd - servicePortStart > 20_000) {
+    throw new Error("SUMMING_RUNNER_SERVICE_PORT_START/END must define at most 20001 ports between 1024 and 65535");
+  }
   const configuredKeyPath = String(process.env.SUMMING_RUNNER_ENV_KEY ?? "").trim();
   const installedKeyPath = "/etc/summing-project-runner/environment.key";
   const keyPath = configuredKeyPath || (
@@ -44,6 +51,8 @@ async function main(): Promise<void> {
     managedDataRoot,
     maxParallelJobs,
     runTimeoutHours,
+    servicePortStart,
+    servicePortEnd,
   );
   let resolveSignal!: () => void;
   const signal = new Promise<void>((resolveSignalPromise) => {

@@ -11,6 +11,8 @@ import {
   type RunnerArtifactDeletion,
   type RunnerHealth,
   type RunnerJob,
+  type RunnerService,
+  type RunnerServiceAction,
 } from "./project-runner-client.js";
 
 const ACTIVE_JOB_STATUSES = new Set(["queued", "running", "cancelling"]);
@@ -132,6 +134,8 @@ export interface RunnerInspection {
     summary: string;
     activeCount: number;
     queuedCount: number;
+    runningServiceCount: number;
+    unhealthyServiceCount: number;
     enabledScheduleCount: number;
     nextScheduledAt: string | null;
     lastResult: RunnerJob | null;
@@ -139,6 +143,7 @@ export interface RunnerInspection {
   active: RunnerJob[];
   queued: RunnerJob[];
   recent: RunnerJob[];
+  services: RunnerService[];
   schedules: RunnerScheduleView[];
   artifacts: Array<{ jobId: string; action: RunnerAction; count: number; createdAt: string }>;
   capabilities: RunnerAction[];
@@ -904,6 +909,9 @@ export class RunnerControlPlane {
     const jobs = available
       ? await this.runner.jobs(context.projectId, context.workspaceId)
       : [];
+    const services = available && typeof this.runner.services === "function"
+      ? await this.runner.services(context.projectId, context.workspaceId)
+      : [];
     const active = jobs.filter((job) => job.status === "running" || job.status === "cancelling");
     const queued = jobs.filter((job) => job.status === "queued");
     const schedules = this.store.schedules(context.projectId, context.workspaceId).map((schedule) => ({
@@ -913,6 +921,10 @@ export class RunnerControlPlane {
     }));
     const recent = jobs.filter((job) => !ACTIVE_JOB_STATUSES.has(job.status)).slice(0, 10);
     const enabledScheduleCount = schedules.filter((schedule) => schedule.enabled).length;
+    const runningServiceCount = services.filter((service) => service.status === "running").length;
+    const unhealthyServiceCount = services.filter(
+      (service) => service.status === "unhealthy" || service.status === "failed",
+    ).length;
     const nextScheduledAt = schedules
       .flatMap((schedule) => schedule.nextRunAt ? [schedule.nextRunAt] : [])
       .sort()[0] ?? null;
@@ -926,7 +938,13 @@ export class RunnerControlPlane {
     const capacity = health
       ? ` На узле выполняется ${health.running}/${health.maxParallelJobs}, в общей очереди ${health.queued}.`
       : "";
-    const summary = state === "unavailable"
+    const serviceSummary = !available
+      ? ""
+      : services.length === 0
+      ? " Сервисы не развёрнуты."
+      : ` Сервисы: ${runningServiceCount} работает, ${unhealthyServiceCount} требует внимания, ` +
+        `${services.filter((service) => service.status === "stopped").length} остановлено.`;
+    const summary = (state === "unavailable"
       ? "Раннер недоступен."
       : state === "running"
         ? `Сейчас выполняется ${active.length} запуск(ов); в очереди ${queued.length}.${capacity}`
@@ -934,7 +952,7 @@ export class RunnerControlPlane {
           ? `Активного запуска нет; в очереди ${queued.length}.${capacity}`
           : nextScheduledAt
             ? `Сейчас ничего не запущено; ближайший запуск по расписанию ${nextScheduledAt}.${capacity}`
-            : `Сейчас ничего не запущено и активных расписаний нет.${capacity}`;
+            : `Сейчас ничего не запущено из jobs и активных расписаний нет.${capacity}`) + serviceSummary;
     return {
       available,
       health,
@@ -943,6 +961,8 @@ export class RunnerControlPlane {
         summary,
         activeCount: active.length,
         queuedCount: queued.length,
+        runningServiceCount,
+        unhealthyServiceCount,
         enabledScheduleCount,
         nextScheduledAt,
         lastResult: recent[0] ?? null,
@@ -950,6 +970,7 @@ export class RunnerControlPlane {
       active,
       queued,
       recent,
+      services,
       schedules,
       artifacts: jobs
         .filter((job) => Number(job.artifactCount ?? 0) > 0)
@@ -1017,6 +1038,95 @@ export class RunnerControlPlane {
     const job = await this.runner.cancel(context.projectId, context.workspaceId, jobId);
     this.store.audit(context, "runner.cancel", job.id, { status: job.status }, this.now());
     return job;
+  }
+
+  async deployService(
+    context: RunnerControlContext,
+    name: string,
+    releaseId: string,
+    requestId: string,
+  ): Promise<RunnerService> {
+    if (!(await this.runner.available())) throw new RunnerControlError("runner is unavailable");
+    const jobs = await this.runner.jobs(context.projectId, context.workspaceId);
+    const release = jobs.find((job) => job.id === releaseId);
+    if (!release) throw new RunnerControlError("Release was not found in this project");
+    if (release.status !== "completed" || release.action === "build") {
+      throw new RunnerControlError("service deployment requires a completed non-build Release");
+    }
+    const requestKey = idempotencyKey(
+      "service.deploy",
+      context.projectId,
+      context.workspaceId,
+      context.conversationId,
+      requestId,
+    );
+    const service = await this.runner.deployService(
+      context.projectId,
+      context.workspaceId,
+      name,
+      releaseId,
+      requestKey,
+    );
+    this.store.audit(
+      context,
+      "service.deploy",
+      `${name}/${service.current?.deploymentId ?? "unknown"}`,
+      { name, releaseId, revision: service.current?.revision },
+      this.now(),
+    );
+    return service;
+  }
+
+  async changeService(
+    context: RunnerControlContext,
+    name: string,
+    action: RunnerServiceAction,
+    requestId: string,
+  ): Promise<RunnerService> {
+    if (!(new Set<RunnerServiceAction>(["start", "stop", "restart", "rollback"])).has(action)) {
+      throw new RunnerControlError("service action is invalid");
+    }
+    if (!(await this.runner.available())) throw new RunnerControlError("runner is unavailable");
+    const requestKey = idempotencyKey(
+      `service.${action}`,
+      context.projectId,
+      context.workspaceId,
+      context.conversationId,
+      requestId,
+    );
+    const service = await this.runner.serviceAction(
+      context.projectId,
+      context.workspaceId,
+      name,
+      action,
+      requestKey,
+    );
+    this.store.audit(
+      context,
+      `service.${action}`,
+      name,
+      { status: service.status, releaseId: service.current?.releaseId },
+      this.now(),
+    );
+    return service;
+  }
+
+  async readServiceLog(
+    context: RunnerControlContext,
+    name: string,
+  ): Promise<{ name: string; log: string; truncated: boolean }> {
+    const services = typeof this.runner.services === "function"
+      ? await this.runner.services(context.projectId, context.workspaceId)
+      : [];
+    if (!services.some((service) => service.name === name)) {
+      throw new RunnerControlError("service was not found in this project");
+    }
+    const raw = await this.runner.serviceLog(context.projectId, context.workspaceId, name);
+    const characters = Array.from(raw);
+    const truncated = characters.length > MAXIMUM_LOG_TOOL_CHARACTERS;
+    const log = truncated ? characters.slice(-MAXIMUM_LOG_TOOL_CHARACTERS).join("") : raw;
+    this.store.audit(context, "service.log.read", name, { truncated }, this.now());
+    return { name, log, truncated };
   }
 
   async replayJob(

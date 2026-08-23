@@ -18,7 +18,14 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import {
+  createServer,
+  request as httpRequest,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+} from "node:http";
+import { createServer as createNetServer } from "node:net";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import {
   environmentRedactions,
@@ -44,6 +51,16 @@ import type {
   RunnerProjectRegistration,
 } from "./project-runner-client.js";
 import {
+  SERVICE_NAME,
+  serviceDefinition,
+  type RunnerService,
+  type RunnerServiceAction,
+  type RunnerServiceDefinition,
+  type RunnerServiceDesiredState,
+  type RunnerServiceRevision,
+  type RunnerServiceStatus,
+} from "./project-service.js";
+import {
   RunnerPortalMessageError,
   RunnerPortalMessageStore,
 } from "./runner-portal-messages.js";
@@ -63,6 +80,9 @@ const RELEASE_PAYLOAD_RETENTION = 20;
 const JOB_RETENTION = 100;
 const RUNNER_ACTIONS = new Set<RunnerAction>(["build", "validate", "dry-run", "run"]);
 const RUNNER_TRIGGERS = new Set<RunnerJobTrigger>(["manual", "schedule"]);
+const SERVICE_ACTIONS = new Set<RunnerServiceAction>(["start", "stop", "restart", "rollback"]);
+const SERVICE_MANIFEST_PATH = ".summing/services.json";
+const SERVICE_DEPLOYMENT_RETENTION = 2;
 const ARTIFACTS = new Map([
   ["manifest.json", "application/json"],
   ["sources.jsonl", "application/x-ndjson"],
@@ -93,6 +113,33 @@ interface CommandResult {
 interface RuntimeAccess {
   envPath: string | null;
   redactions: string[];
+}
+
+interface StoredServiceDeployment extends RunnerServiceRevision, RunnerServiceDefinition {
+  containerName: string;
+  hostPort: number | null;
+  configSha256: string;
+  environmentSha256?: string;
+}
+
+interface StoredServiceOperation {
+  idempotencyKey: string;
+  action: "deploy" | RunnerServiceAction;
+  releaseId?: string;
+}
+
+interface StoredRunnerService {
+  version: 1;
+  projectId: string;
+  workspaceId: string;
+  name: string;
+  desiredState: RunnerServiceDesiredState;
+  status: RunnerServiceStatus;
+  activeDeploymentId: string | null;
+  deployments: StoredServiceDeployment[];
+  lastOperation?: StoredServiceOperation;
+  error?: string;
+  updatedAt: string;
 }
 
 class RunnerHttpError extends Error {
@@ -272,6 +319,7 @@ export class ProjectRunnerServer {
   private readonly importedMigrations = new Set<string>();
   private readonly migrationImports = new Map<string, Promise<EnvironmentMigrationMarker>>();
   private readonly pendingSubmissions = new Map<string, Promise<RunnerJob>>();
+  private readonly activeServiceOperations = new Set<string>();
 
   constructor(
     readonly socketPath: string,
@@ -286,6 +334,8 @@ export class ProjectRunnerServer {
     readonly managedDataRoot = resolve(dataRoot, "..", "managed-data"),
     readonly maxParallelJobs = 2,
     readonly runTimeoutHours = 12,
+    readonly servicePortStart = 20_000,
+    readonly servicePortEnd = 29_999,
   ) {
     if (!isAbsolute(socketPath) || basename(socketPath) !== "runner.sock") {
       throw new Error("runner socket must be an absolute runner.sock path");
@@ -299,6 +349,11 @@ export class ProjectRunnerServer {
     }
     if (!Number.isSafeInteger(runTimeoutHours) || runTimeoutHours < 1 || runTimeoutHours > 168) {
       throw new Error("runner run timeout must be an integer between 1 and 168 hours");
+    }
+    if (!Number.isSafeInteger(servicePortStart) || !Number.isSafeInteger(servicePortEnd) ||
+      servicePortStart < 1_024 || servicePortEnd > 65_535 || servicePortStart > servicePortEnd ||
+      servicePortEnd - servicePortStart > 20_000) {
+      throw new Error("runner service port range must contain at most 20001 ports between 1024 and 65535");
     }
     mkdirSync(this.managedConfigRoot(), { recursive: true, mode: 0o700 });
     this.environments = new ProjectEnvironmentStore(resolve(dataRoot, "environments"), environmentKey);
@@ -362,11 +417,12 @@ export class ProjectRunnerServer {
       json(response, this.ready ? 200 : 503, {
         ok: this.ready,
         version: SUMMING_VERSION,
-        protocolVersion: 2,
+        protocolVersion: 3,
         queued: this.queue.length,
         running: this.activeJobs.size,
         maxParallelJobs: this.maxParallelJobs,
         runTimeoutHours: this.runTimeoutHours,
+        servicePortRange: [this.servicePortStart, this.servicePortEnd],
       });
       return;
     }
@@ -468,6 +524,59 @@ export class ProjectRunnerServer {
       json(response, 200, {
         environment: this.environments.save(projectId, workspaceId, text, expectedRevision),
       });
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/services") {
+      const { projectId, workspaceId } = this.serviceScope(url);
+      json(response, 200, { services: await this.listServices(projectId, workspaceId) });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/services/deploy") {
+      const { projectId, workspaceId } = this.serviceScope(url);
+      const body = await jsonBody(request);
+      if (Object.keys(body).some((key) => !["name", "releaseId", "idempotencyKey"].includes(key))) {
+        throw new RunnerHttpError(400, "service deployment contains unsupported fields");
+      }
+      const name = String(body.name ?? "");
+      const releaseId = String(body.releaseId ?? "");
+      const idempotencyKey = String(body.idempotencyKey ?? "");
+      if (!SERVICE_NAME.test(name) || !JOB_ID.test(releaseId) || !IDEMPOTENCY_KEY.test(idempotencyKey)) {
+        throw new RunnerHttpError(400, "invalid service deployment request");
+      }
+      json(response, 200, {
+        service: await this.deployService(projectId, workspaceId, name, releaseId, idempotencyKey),
+      });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/services/action") {
+      const { projectId, workspaceId } = this.serviceScope(url);
+      const body = await jsonBody(request);
+      if (Object.keys(body).some((key) => !["name", "action", "idempotencyKey"].includes(key))) {
+        throw new RunnerHttpError(400, "service action contains unsupported fields");
+      }
+      const name = String(body.name ?? "");
+      const action = String(body.action ?? "") as RunnerServiceAction;
+      const idempotencyKey = String(body.idempotencyKey ?? "");
+      if (!SERVICE_NAME.test(name) || !SERVICE_ACTIONS.has(action) ||
+        !IDEMPOTENCY_KEY.test(idempotencyKey)) {
+        throw new RunnerHttpError(400, "invalid service action request");
+      }
+      json(response, 200, {
+        service: await this.changeService(
+          projectId,
+          workspaceId,
+          name,
+          action,
+          idempotencyKey,
+        ),
+      });
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/service-log") {
+      const { projectId, workspaceId } = this.serviceScope(url);
+      const name = url.searchParams.get("name") ?? "";
+      if (!SERVICE_NAME.test(name)) throw new RunnerHttpError(400, "invalid service name");
+      json(response, 200, { log: await this.readServiceLog(projectId, workspaceId, name) });
       return;
     }
     if (request.method === "POST" && url.pathname === "/jobs") {
@@ -1052,6 +1161,695 @@ export class ProjectRunnerServer {
       network: raw.network === true,
       workspaceIds,
     };
+  }
+
+  private serviceScope(url: URL): { projectId: string; workspaceId: string } {
+    const projectId = url.searchParams.get("project") ?? "";
+    const workspaceId = url.searchParams.get("workspace") ?? "";
+    if (!PROJECT_ID.test(projectId) || !WORKSPACE_ID.test(workspaceId)) {
+      throw new RunnerHttpError(400, "invalid service scope");
+    }
+    this.projectConfig(projectId, workspaceId);
+    return { projectId, workspaceId };
+  }
+
+  private servicesRoot(projectId: string, workspaceId: string): string {
+    return resolve(this.dataRoot, "projects", projectId, "services", workspaceId);
+  }
+
+  private serviceRoot(projectId: string, workspaceId: string, name: string): string {
+    return resolve(this.servicesRoot(projectId, workspaceId), name);
+  }
+
+  private serviceStatePath(projectId: string, workspaceId: string, name: string): string {
+    return resolve(this.serviceRoot(projectId, workspaceId, name), "service.json");
+  }
+
+  private serviceDeploymentDirectory(
+    projectId: string,
+    workspaceId: string,
+    name: string,
+    deploymentId: string,
+  ): string {
+    return resolve(this.serviceRoot(projectId, workspaceId, name), "deployments", deploymentId);
+  }
+
+  private storedService(
+    projectId: string,
+    workspaceId: string,
+    name: string,
+    required = true,
+  ): StoredRunnerService | null {
+    const path = this.serviceStatePath(projectId, workspaceId, name);
+    if (!existsSync(path)) {
+      if (required) throw new RunnerHttpError(404, "runner service is not configured");
+      return null;
+    }
+    const metadata = lstatSync(path);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o077) !== 0) {
+      throw new RunnerHttpError(409, "runner service state is unsafe");
+    }
+    let state: StoredRunnerService;
+    try {
+      state = JSON.parse(readFileSync(path, "utf8")) as StoredRunnerService;
+    } catch {
+      throw new RunnerHttpError(409, "runner service state is malformed");
+    }
+    const desiredStates = new Set<RunnerServiceDesiredState>(["running", "stopped"]);
+    const statuses = new Set<RunnerServiceStatus>([
+      "deploying", "running", "stopped", "unhealthy", "failed",
+    ]);
+    const deploymentsValid = Array.isArray(state.deployments) &&
+      state.deployments.length <= SERVICE_DEPLOYMENT_RETENTION &&
+      state.deployments.every((deployment) => {
+        if (!deployment || typeof deployment !== "object" || Array.isArray(deployment)) return false;
+        const deploymentId = String(deployment.deploymentId ?? "");
+        const expectedContainerName =
+          `summing-svc-${projectId}-${workspaceId}-${name}-${deploymentId.slice(0, 8)}`;
+        return JOB_ID.test(deployment.deploymentId) && JOB_ID.test(deployment.releaseId) &&
+          REVISION.test(deployment.revision) &&
+          typeof deployment.imageId === "string" && deployment.imageId.length <= 255 &&
+          /^[A-Za-z0-9:_.@/-]+$/.test(deployment.imageId) &&
+          Number.isSafeInteger(deployment.environmentRevision) && deployment.environmentRevision >= 0 &&
+          Number.isFinite(Date.parse(deployment.deployedAt)) &&
+          deployment.containerName === expectedContainerName &&
+          (deployment.hostPort === null ||
+            (Number.isSafeInteger(deployment.hostPort) && deployment.hostPort >= 1_024 &&
+              deployment.hostPort <= 65_535)) &&
+          /^[0-9a-f]{64}$/.test(deployment.configSha256) &&
+          (deployment.environmentSha256 === undefined ||
+            /^[0-9a-f]{64}$/.test(deployment.environmentSha256)) &&
+          Array.isArray(deployment.command) && deployment.command.length <= 32 &&
+          deployment.command.every((part) => typeof part === "string" && part.length > 0 &&
+            part.length <= 1_024) &&
+          (deployment.containerPort === null ||
+            (Number.isSafeInteger(deployment.containerPort) && deployment.containerPort >= 1 &&
+              deployment.containerPort <= 65_535)) &&
+          (deployment.healthPath === null ||
+            (deployment.containerPort !== null &&
+              /^\/[A-Za-z0-9._~!$&'()*+,;=:@%/-]{0,255}$/.test(deployment.healthPath))) &&
+          Number.isSafeInteger(deployment.startupTimeoutSeconds) &&
+          deployment.startupTimeoutSeconds >= 5 && deployment.startupTimeoutSeconds <= 300;
+      });
+    const operationValid = state.lastOperation === undefined ||
+      (state.lastOperation !== null && typeof state.lastOperation === "object" &&
+        IDEMPOTENCY_KEY.test(state.lastOperation.idempotencyKey) &&
+        (state.lastOperation.action === "deploy" || SERVICE_ACTIONS.has(state.lastOperation.action)) &&
+        (state.lastOperation.releaseId === undefined || JOB_ID.test(state.lastOperation.releaseId)));
+    if (state.version !== 1 || state.projectId !== projectId || state.workspaceId !== workspaceId ||
+      state.name !== name || !SERVICE_NAME.test(state.name) ||
+      !desiredStates.has(state.desiredState) || !statuses.has(state.status) ||
+      !deploymentsValid ||
+      new Set(state.deployments.map((deployment) => deployment.deploymentId)).size !==
+        state.deployments.length ||
+      !operationValid || !Number.isFinite(Date.parse(state.updatedAt)) ||
+      (state.error !== undefined && typeof state.error !== "string") ||
+      (state.activeDeploymentId !== null &&
+        !state.deployments.some((deployment) => deployment.deploymentId === state.activeDeploymentId))) {
+      throw new RunnerHttpError(409, "runner service state is invalid");
+    }
+    return state;
+  }
+
+  private saveService(state: StoredRunnerService): void {
+    const path = this.serviceStatePath(state.projectId, state.workspaceId, state.name);
+    const directory = dirname(path);
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const temporaryPath = resolve(directory, `.service-${process.pid}-${randomUUID()}.tmp`);
+    try {
+      const descriptor = openSync(
+        temporaryPath,
+        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL,
+        0o600,
+      );
+      try {
+        writeFileSync(descriptor, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+        fsyncSync(descriptor);
+      } finally {
+        closeSync(descriptor);
+      }
+      renameSync(temporaryPath, path);
+      const directoryDescriptor = openSync(directory, constants.O_RDONLY);
+      try {
+        fsyncSync(directoryDescriptor);
+      } finally {
+        closeSync(directoryDescriptor);
+      }
+    } catch (error) {
+      rmSync(temporaryPath, { force: true });
+      throw error;
+    }
+  }
+
+  private activeServiceDeployment(state: StoredRunnerService): StoredServiceDeployment | null {
+    return state.activeDeploymentId
+      ? state.deployments.find((deployment) => deployment.deploymentId === state.activeDeploymentId) ?? null
+      : null;
+  }
+
+  private serviceRevision(deployment: StoredServiceDeployment | null): RunnerServiceRevision | null {
+    if (!deployment) return null;
+    return {
+      deploymentId: deployment.deploymentId,
+      releaseId: deployment.releaseId,
+      revision: deployment.revision,
+      imageId: deployment.imageId,
+      environmentRevision: deployment.environmentRevision,
+      deployedAt: deployment.deployedAt,
+    };
+  }
+
+  private async serviceView(state: StoredRunnerService): Promise<RunnerService> {
+    const current = this.activeServiceDeployment(state);
+    const previous = state.deployments.find(
+      (deployment) => deployment.deploymentId !== state.activeDeploymentId,
+    ) ?? null;
+    let status = state.status;
+    if (current) {
+      const running = await this.containerRunning(current.containerName);
+      if (state.desiredState === "stopped") {
+        status = running ? "failed" : "stopped";
+      } else if (!running) {
+        status = "failed";
+      } else if (current.healthPath && current.hostPort &&
+        !(await this.httpServiceHealthy(current.hostPort, current.healthPath))) {
+        status = "unhealthy";
+      } else {
+        status = "running";
+      }
+    }
+    return {
+      projectId: state.projectId,
+      workspaceId: state.workspaceId,
+      name: state.name,
+      desiredState: state.desiredState,
+      status,
+      current: this.serviceRevision(current),
+      previous: this.serviceRevision(previous),
+      localEndpoint: current?.hostPort ? `http://127.0.0.1:${current.hostPort}` : null,
+      ...(state.error ? { error: state.error } : {}),
+      updatedAt: state.updatedAt,
+    };
+  }
+
+  private async listServices(projectId: string, workspaceId: string): Promise<RunnerService[]> {
+    const root = this.servicesRoot(projectId, workspaceId);
+    if (!existsSync(root)) return [];
+    const states = readdirSync(root)
+      .filter((name) => SERVICE_NAME.test(name))
+      .map((name) => this.storedService(projectId, workspaceId, name, false))
+      .filter((state): state is StoredRunnerService => state !== null);
+    return await Promise.all(states.map((state) => this.serviceView(state)));
+  }
+
+  private serviceOperationScope(projectId: string, workspaceId: string, name: string): string {
+    return `${projectId}\0${workspaceId}\0${name}`;
+  }
+
+  private assertServiceOperation(
+    state: StoredRunnerService,
+    operation: StoredServiceOperation,
+  ): boolean {
+    if (state.lastOperation?.idempotencyKey !== operation.idempotencyKey) return false;
+    if (state.lastOperation.action !== operation.action ||
+      (state.lastOperation.releaseId ?? "") !== (operation.releaseId ?? "")) {
+      throw new RunnerHttpError(409, "idempotency key was reused for a different service operation");
+    }
+    return true;
+  }
+
+  private async serviceManifest(
+    release: RunnerJob,
+    archivePath: string,
+    name: string,
+  ): Promise<RunnerServiceDefinition> {
+    this.assertReleaseFile(archivePath, release.archiveSha256);
+    for (const manifestPath of [SERVICE_MANIFEST_PATH, `./${SERVICE_MANIFEST_PATH}`]) {
+      const extracted = await run(
+        "/usr/bin/tar",
+        ["--extract", "--to-stdout", "--file", archivePath, manifestPath],
+        { cwd: dirname(archivePath), timeoutMs: 30_000 },
+      );
+      if (extracted.code !== 0) continue;
+      if (Buffer.byteLength(extracted.output) > 100_000) {
+        throw new RunnerHttpError(413, "service manifest exceeds 100 KB");
+      }
+      try {
+        return serviceDefinition(extracted.output, name);
+      } catch (error) {
+        throw new RunnerHttpError(409, error instanceof Error ? error.message : String(error));
+      }
+    }
+    throw new RunnerHttpError(409, `${SERVICE_MANIFEST_PATH} is missing from the Release`);
+  }
+
+  private servicePorts(): Set<number> {
+    const ports = new Set<number>();
+    const projects = resolve(this.dataRoot, "projects");
+    if (!existsSync(projects)) return ports;
+    for (const projectId of readdirSync(projects).filter((name) => PROJECT_ID.test(name))) {
+      const services = resolve(projects, projectId, "services");
+      if (!existsSync(services)) continue;
+      for (const workspaceId of readdirSync(services).filter((name) => WORKSPACE_ID.test(name))) {
+        const workspace = resolve(services, workspaceId);
+        for (const name of readdirSync(workspace).filter((entry) => SERVICE_NAME.test(entry))) {
+          try {
+            const state = this.storedService(projectId, workspaceId, name, false);
+            for (const deployment of state?.deployments ?? []) {
+              if (deployment.hostPort) ports.add(deployment.hostPort);
+            }
+          } catch {
+            // Invalid operator-recovery state cannot reserve a network port.
+          }
+        }
+      }
+    }
+    return ports;
+  }
+
+  private portAvailable(port: number): Promise<boolean> {
+    return new Promise((resolvePort) => {
+      const server = createNetServer();
+      server.unref();
+      server.once("error", () => resolvePort(false));
+      server.listen({ host: "127.0.0.1", port, exclusive: true }, () => {
+        server.close(() => resolvePort(true));
+      });
+    });
+  }
+
+  private async allocateServicePort(scope: string): Promise<number> {
+    const used = this.servicePorts();
+    const size = this.servicePortEnd - this.servicePortStart + 1;
+    const seed = Number.parseInt(createHash("sha256").update(scope).digest("hex").slice(0, 8), 16);
+    for (let offset = 0; offset < size; offset += 1) {
+      const port = this.servicePortStart + ((seed + offset) % size);
+      if (!used.has(port) && await this.portAvailable(port)) return port;
+    }
+    throw new RunnerHttpError(503, "no local service port is available");
+  }
+
+  private async containerRunning(containerName: string): Promise<boolean> {
+    const result = await run(
+      this.dockerBinary,
+      ["container", "inspect", "--format", "{{.State.Running}}", containerName],
+      { cwd: this.dataRoot, timeoutMs: 30_000 },
+    );
+    return result.code === 0 && result.output.trim() === "true";
+  }
+
+  private httpServiceHealthy(port: number, path: string): Promise<boolean> {
+    return new Promise((resolveHealth) => {
+      const requestHandle = httpRequest(
+        { host: "127.0.0.1", port, path, method: "GET", timeout: 2_000 },
+        (response) => {
+          response.resume();
+          resolveHealth((response.statusCode ?? 500) >= 200 && (response.statusCode ?? 500) < 400);
+        },
+      );
+      requestHandle.once("timeout", () => requestHandle.destroy());
+      requestHandle.once("error", () => resolveHealth(false));
+      requestHandle.end();
+    });
+  }
+
+  private async waitForService(deployment: StoredServiceDeployment): Promise<void> {
+    const deadline = Date.now() + deployment.startupTimeoutSeconds * 1_000;
+    for (;;) {
+      if (await this.containerRunning(deployment.containerName)) {
+        if (!deployment.healthPath || !deployment.hostPort ||
+          await this.httpServiceHealthy(deployment.hostPort, deployment.healthPath)) return;
+      }
+      if (Date.now() >= deadline) throw new Error("service did not become healthy before startup timeout");
+      await new Promise((resolveWait) => setTimeout(resolveWait, 500));
+    }
+  }
+
+  private serviceRuntimeAccess(
+    state: StoredRunnerService,
+    deployment: StoredServiceDeployment,
+  ): RuntimeAccess {
+    const directory = this.serviceDeploymentDirectory(
+      state.projectId,
+      state.workspaceId,
+      state.name,
+      deployment.deploymentId,
+    );
+    const snapshotPath = resolve(directory, "environment.json");
+    if (deployment.environmentSha256) {
+      this.assertReleaseFile(snapshotPath, deployment.environmentSha256);
+    } else if (existsSync(snapshotPath)) {
+      throw new RunnerHttpError(409, "service environment integrity metadata is missing");
+    } else {
+      return { envPath: null, redactions: [] };
+    }
+    const parsed = this.environments.readJobSnapshot(
+      state.projectId,
+      state.workspaceId,
+      deployment.releaseId,
+      snapshotPath,
+    );
+    const envPath = resolve(this.runtimeEnvironmentRoot, `service-${deployment.deploymentId}.env`);
+    const redactions = environmentRedactions(parsed.values);
+    writeFileSync(envPath, runtimeEnvironmentText(parsed.values), { flag: "wx", mode: 0o600 });
+    return { envPath, redactions };
+  }
+
+  private async launchServiceContainer(
+    state: StoredRunnerService,
+    deployment: StoredServiceDeployment,
+    project: RunnerProjectConfig,
+  ): Promise<void> {
+    const directory = this.serviceDeploymentDirectory(
+      state.projectId,
+      state.workspaceId,
+      state.name,
+      deployment.deploymentId,
+    );
+    const configPath = resolve(directory, "release-config.json");
+    this.assertReleaseFile(configPath, deployment.configSha256);
+    const access = this.serviceRuntimeAccess(state, deployment);
+    const dataPath = resolve(project.dataPath, "services", state.workspaceId, state.name);
+    mkdirSync(dataPath, { recursive: true, mode: 0o700 });
+    const args = [
+      "run", "--detach", "--init",
+      "--name", deployment.containerName,
+      "--restart", "unless-stopped",
+      "--read-only",
+      "--user", "0:0",
+      "--cap-drop", "ALL",
+      "--security-opt", "no-new-privileges:true",
+      "--pids-limit", "256",
+      "--memory", "1536m",
+      "--cpus", "1.5",
+      "--tmpfs", "/tmp:rw,noexec,nosuid,size=134217728",
+      "--env", "CONFIG_PATH=/run/config.json",
+      "--env", "HISTORY_PATH=/app/data/history.json",
+      "--env", "DRY_RUN=false",
+      "--env", "SUMMING_PROJECT_DATA_PATH=/app/data",
+      "--env", `SUMMING_SERVICE_NAME=${state.name}`,
+      "--label", `summing.project=${state.projectId}`,
+      "--label", `summing.workspace=${state.workspaceId}`,
+      "--label", `summing.service=${state.name}`,
+      "--label", `summing.release=${deployment.releaseId}`,
+      "--volume", `${configPath}:/run/config.json:ro`,
+      "--volume", `${dataPath}:/app/data`,
+    ];
+    try {
+      if (access.envPath) args.push("--env-file", access.envPath);
+      if (deployment.containerPort && deployment.hostPort) {
+        if (!project.network) throw new Error("a network-disabled project cannot publish a service port");
+        args.push("--publish", `127.0.0.1:${deployment.hostPort}:${deployment.containerPort}`);
+      } else if (!project.network) {
+        args.push("--network", "none");
+      }
+      args.push(deployment.imageId, ...deployment.command);
+      const launched = await run(this.dockerBinary, args, {
+        cwd: this.dataRoot,
+        timeoutMs: 120_000,
+        redactions: access.redactions,
+      });
+      if (launched.code !== 0) throw new Error(`service container start exited with code ${launched.code}`);
+      await this.waitForService(deployment);
+    } finally {
+      if (access.envPath) rmSync(access.envPath, { force: true });
+      access.redactions.fill("");
+    }
+  }
+
+  private async stopServiceContainer(containerName: string): Promise<void> {
+    if (!(await this.containerRunning(containerName))) return;
+    const stopped = await run(this.dockerBinary, ["stop", "--time", "30", containerName], {
+      cwd: this.dataRoot,
+      timeoutMs: 45_000,
+    });
+    if (stopped.code !== 0) throw new Error(`service container stop exited with code ${stopped.code}`);
+  }
+
+  private async restoreServiceContainer(deployment: StoredServiceDeployment | null): Promise<void> {
+    if (!deployment) return;
+    const started = await run(this.dockerBinary, ["start", deployment.containerName], {
+      cwd: this.dataRoot,
+      timeoutMs: 45_000,
+    });
+    if (started.code !== 0) throw new Error("previous service container could not be restored");
+    await this.waitForService(deployment);
+  }
+
+  private async deployService(
+    projectId: string,
+    workspaceId: string,
+    name: string,
+    sourceJobId: string,
+    idempotencyKey: string,
+  ): Promise<RunnerService> {
+    const scope = this.serviceOperationScope(projectId, workspaceId, name);
+    const operation: StoredServiceOperation = { idempotencyKey, action: "deploy", releaseId: sourceJobId };
+    const existing = this.storedService(projectId, workspaceId, name, false);
+    if (existing && this.assertServiceOperation(existing, operation)) return await this.serviceView(existing);
+    if (this.activeServiceOperations.has(scope)) {
+      throw new RunnerHttpError(409, "another service operation is already running");
+    }
+    this.activeServiceOperations.add(scope);
+    try {
+      const project = this.projectConfig(projectId, workspaceId);
+      const release = this.storedJob(projectId, sourceJobId);
+      if (release.workspaceId !== workspaceId || release.status !== "completed" ||
+        release.action === "build" || !release.releaseId || !release.archiveSha256 ||
+        !release.configSha256 || !release.imageId ||
+        !Number.isSafeInteger(release.environmentRevision) || Number(release.environmentRevision) < 0) {
+        throw new RunnerHttpError(409, "service deployment requires a completed non-build Release");
+      }
+      const releaseDirectory = this.jobDirectory(projectId, sourceJobId);
+      const archivePath = resolve(releaseDirectory, "source.tar");
+      const configPath = resolve(releaseDirectory, "release-config.json");
+      const environmentPath = resolve(releaseDirectory, "environment.json");
+      this.assertReleaseFile(configPath, release.configSha256);
+      if (release.environmentSha256) {
+        this.assertReleaseFile(environmentPath, release.environmentSha256);
+      } else if (existsSync(environmentPath)) {
+        throw new RunnerHttpError(409, "release environment integrity metadata is missing");
+      }
+      await this.ensureReleaseImage(release, releaseDirectory, resolve(releaseDirectory, "job.log"), new AbortController().signal);
+      const definition = await this.serviceManifest(release, archivePath, name);
+      if (definition.containerPort && !project.network) {
+        throw new RunnerHttpError(409, "a network-disabled project cannot publish a service port");
+      }
+      const state = existing ?? {
+        version: 1,
+        projectId,
+        workspaceId,
+        name,
+        desiredState: "running",
+        status: "deploying",
+        activeDeploymentId: null,
+        deployments: [],
+        updatedAt: new Date().toISOString(),
+      } satisfies StoredRunnerService;
+      const current = this.activeServiceDeployment(state);
+      const hostPort = definition.containerPort
+        ? current?.hostPort ?? await this.allocateServicePort(scope)
+        : null;
+      const deploymentId = randomUUID();
+      const deployedAt = new Date().toISOString();
+      const deployment: StoredServiceDeployment = {
+        deploymentId,
+        releaseId: release.releaseId,
+        revision: release.revision,
+        imageId: release.imageId,
+        environmentRevision: Number(release.environmentRevision),
+        deployedAt,
+        containerName: `summing-svc-${projectId}-${workspaceId}-${name}-${deploymentId.slice(0, 8)}`,
+        hostPort,
+        configSha256: release.configSha256,
+        ...(release.environmentSha256 ? { environmentSha256: release.environmentSha256 } : {}),
+        ...definition,
+      };
+      const deploymentDirectory = this.serviceDeploymentDirectory(
+        projectId,
+        workspaceId,
+        name,
+        deploymentId,
+      );
+      mkdirSync(deploymentDirectory, { recursive: true, mode: 0o700 });
+      copyFileSync(configPath, resolve(deploymentDirectory, "release-config.json"), constants.COPYFILE_EXCL);
+      chmodSync(resolve(deploymentDirectory, "release-config.json"), 0o600);
+      if (release.environmentSha256) {
+        copyFileSync(environmentPath, resolve(deploymentDirectory, "environment.json"), constants.COPYFILE_EXCL);
+        chmodSync(resolve(deploymentDirectory, "environment.json"), 0o600);
+      }
+      const previousDeployments = [...state.deployments];
+      const retained = [deployment, ...previousDeployments]
+        .filter((item, index, all) =>
+          all.findIndex((candidate) => candidate.deploymentId === item.deploymentId) === index)
+        .slice(0, SERVICE_DEPLOYMENT_RETENTION);
+      const removed = previousDeployments.filter(
+        (item) => !retained.some((candidate) => candidate.deploymentId === item.deploymentId),
+      );
+      state.activeDeploymentId = deploymentId;
+      state.deployments = retained;
+      state.desiredState = "running";
+      state.status = "deploying";
+      delete state.error;
+      state.updatedAt = deployedAt;
+      this.saveService(state);
+      try {
+        if (current) await this.stopServiceContainer(current.containerName);
+        await this.launchServiceContainer(state, deployment, project);
+      } catch (error) {
+        await run(this.dockerBinary, ["rm", "--force", deployment.containerName], {
+          cwd: this.dataRoot,
+          timeoutMs: 30_000,
+        }).catch(() => ({ code: 1, output: "" }));
+        rmSync(deploymentDirectory, { recursive: true, force: true });
+        let restored = false;
+        try {
+          await this.restoreServiceContainer(current);
+          restored = current !== null;
+        } catch {
+          restored = false;
+        }
+        state.activeDeploymentId = current?.deploymentId ?? null;
+        state.deployments = previousDeployments;
+        state.status = restored ? "running" : "failed";
+        state.error = error instanceof Error ? error.message : String(error);
+        state.updatedAt = new Date().toISOString();
+        this.saveService(state);
+        throw new RunnerHttpError(409, `service deployment failed: ${state.error}`);
+      }
+      state.desiredState = "running";
+      state.status = "running";
+      state.lastOperation = operation;
+      delete state.error;
+      state.updatedAt = new Date().toISOString();
+      this.saveService(state);
+      for (const stale of removed) {
+        await run(this.dockerBinary, ["rm", "--force", stale.containerName], {
+          cwd: this.dataRoot,
+          timeoutMs: 30_000,
+        }).catch(() => ({ code: 1, output: "" }));
+        rmSync(
+          this.serviceDeploymentDirectory(projectId, workspaceId, name, stale.deploymentId),
+          { recursive: true, force: true },
+        );
+      }
+      return await this.serviceView(state);
+    } finally {
+      this.activeServiceOperations.delete(scope);
+    }
+  }
+
+  private async changeService(
+    projectId: string,
+    workspaceId: string,
+    name: string,
+    action: RunnerServiceAction,
+    idempotencyKey: string,
+  ): Promise<RunnerService> {
+    const scope = this.serviceOperationScope(projectId, workspaceId, name);
+    const operation: StoredServiceOperation = { idempotencyKey, action };
+    const state = this.storedService(projectId, workspaceId, name)!;
+    if (this.assertServiceOperation(state, operation)) return await this.serviceView(state);
+    if (this.activeServiceOperations.has(scope)) {
+      throw new RunnerHttpError(409, "another service operation is already running");
+    }
+    this.activeServiceOperations.add(scope);
+    try {
+      const current = this.activeServiceDeployment(state);
+      if (!current) throw new RunnerHttpError(409, "runner service has no deployed Release");
+      state.desiredState = action === "stop" ? "stopped" : "running";
+      if (action === "stop") {
+        await this.stopServiceContainer(current.containerName);
+        state.status = "stopped";
+      } else if (action === "start") {
+        if (!(await this.containerRunning(current.containerName))) {
+          const started = await run(this.dockerBinary, ["start", current.containerName], {
+            cwd: this.dataRoot,
+            timeoutMs: 45_000,
+          });
+          if (started.code !== 0) throw new RunnerHttpError(409, "service container could not be started");
+        }
+        await this.waitForService(current);
+        state.status = "running";
+      } else if (action === "restart") {
+        const restarted = await run(this.dockerBinary, ["restart", "--time", "30", current.containerName], {
+          cwd: this.dataRoot,
+          timeoutMs: 60_000,
+        });
+        if (restarted.code !== 0) throw new RunnerHttpError(409, "service container could not be restarted");
+        await this.waitForService(current);
+        state.status = "running";
+      } else {
+        const previous = state.deployments.find(
+          (deployment) => deployment.deploymentId !== state.activeDeploymentId,
+        );
+        if (!previous) throw new RunnerHttpError(409, "runner service has no previous Release");
+        await this.stopServiceContainer(current.containerName);
+        try {
+          await this.restoreServiceContainer(previous);
+        } catch (error) {
+          await this.restoreServiceContainer(current).catch(() => undefined);
+          throw error;
+        }
+        state.activeDeploymentId = previous.deploymentId;
+        state.deployments = [previous, current];
+        state.status = "running";
+      }
+      state.lastOperation = operation;
+      delete state.error;
+      state.updatedAt = new Date().toISOString();
+      this.saveService(state);
+      return await this.serviceView(state);
+    } catch (error) {
+      state.status = "failed";
+      state.error = error instanceof Error ? error.message : String(error);
+      state.updatedAt = new Date().toISOString();
+      this.saveService(state);
+      throw error;
+    } finally {
+      this.activeServiceOperations.delete(scope);
+    }
+  }
+
+  private async readServiceLog(
+    projectId: string,
+    workspaceId: string,
+    name: string,
+  ): Promise<string> {
+    const state = this.storedService(projectId, workspaceId, name)!;
+    const current = this.activeServiceDeployment(state);
+    if (!current) throw new RunnerHttpError(409, "runner service has no deployed Release");
+    const directory = this.serviceDeploymentDirectory(
+      projectId,
+      workspaceId,
+      name,
+      current.deploymentId,
+    );
+    const environmentPath = resolve(directory, "environment.json");
+    let redactions: string[] = [];
+    if (current.environmentSha256) {
+      this.assertReleaseFile(environmentPath, current.environmentSha256);
+      const parsed = this.environments.readJobSnapshot(
+        projectId,
+        workspaceId,
+        current.releaseId,
+        environmentPath,
+      );
+      redactions = environmentRedactions(parsed.values);
+    } else if (existsSync(environmentPath)) {
+      throw new RunnerHttpError(409, "service environment integrity metadata is missing");
+    }
+    try {
+      const result = await run(this.dockerBinary, ["logs", "--tail", "1000", current.containerName], {
+        cwd: this.dataRoot,
+        timeoutMs: 30_000,
+        redactions,
+      });
+      if (result.code !== 0) throw new RunnerHttpError(409, "service log is unavailable");
+      return result.output;
+    } finally {
+      redactions.fill("");
+    }
   }
 
   private migrationKey(projectId: string, workspaceId: string): string {

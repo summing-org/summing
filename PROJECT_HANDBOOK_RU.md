@@ -1,6 +1,6 @@
-# SUMMING 9.19: архитектура, эксплуатация и разработка
+# SUMMING 9.20: архитектура, эксплуатация и разработка
 
-> Версия: **9.19.0**
+> Версия: **9.20.0**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
 > Последняя сверка с кодом: **23 августа 2026 года**.
 
@@ -959,9 +959,11 @@ untracked, но соблюдает `.gitignore`.
 
 Runner работает отдельным Unix user `summing-project-runner` и использует собственный
 rootless Docker daemon. Пользователь `summing` не получает Docker socket. Через
-Unix socket принимаются только project id, одна из четырёх фиксированных
-операций и Git archive до 50 МБ. Runner не читает conversation worktree: SUMMING
-сам создаёт immutable archive выбранной ревизии и передаёт его в запросе.
+Unix socket jobs принимают только project id, одну из четырёх фиксированных
+операций и Git archive до 50 МБ; отдельный service API принимает только точный
+retained Release, имя из его manifest и фиксированное lifecycle-действие. Runner
+не читает conversation worktree: SUMMING сам создаёт immutable archive выбранной
+ревизии и передаёт его в job-запросе.
 Application config выбирается из того же распакованного archive по разрешённому
 списку `configSourcePaths` и монтируется в контейнер read-only. Managed Project
 регистрируется автоматически сразу после create/clone. При старте SUMMING
@@ -1029,6 +1031,36 @@ schedule при каждом occurrence заново разрешает полн
 запускает сохранённый immutable image ID. Истёкший payload, несовпавший hash или
 удалённый image дают fail-closed; replay может повторить внешние side effects.
 
+Долгоживущие workloads не моделируются как `run` с бесконечным timeout. Project
+объявляет 1–20 именованных services в `.summing/services.json` версии 1. Для каждого
+имени разрешены только bounded `command`, необязательный `containerPort`, связанный
+с ним safe absolute `healthPath` и startup timeout 5–300 секунд. Отсутствующий
+`command` оставляет Docker image `ENTRYPOINT`/`CMD`. Ports разрешены только project
+profile с network и привязываются к свободному `127.0.0.1` host port из
+`SUMMING_RUNNER_SERVICE_PORT_START..SUMMING_RUNNER_SERVICE_PORT_END`; runner не
+создаёт внешний Caddy route неявно.
+
+Namespace `service` отделён от job namespace `runner`. `service.deploy` принимает
+имя и exact completed non-build job ID, повторно проверяет source/config/encrypted-env
+hashes и immutable image ID, копирует runtime payload в service-scoped storage и
+запускает отдельный контейнер с `restart=unless-stopped`. Container получает те же
+read-only filesystem, dropped capabilities, `no-new-privileges`, PID/CPU/memory
+limits, но отдельный persistent data path
+`<project-data>/services/<workspace>/<service>`. Deployment-операция конечна и
+имеет startup/health timeout; после неё process работает без job timeout и не
+занимает `SUMMING_RUNNER_MAX_PARALLEL_JOBS` slot.
+
+Update использует stop/start на закреплённом loopback port. До переключения
+crash-safe state фиксирует новый deployment и прежний как rollback target. Если
+новый container не стартовал или не прошёл health check, он удаляется и прежний
+container запускается обратно. Хранятся current и previous deployment вместе с
+проверяемыми config/env snapshots; `service.rollback` меняет их местами,
+`service.restart` перезапускает точный текущий Release без rebuild, а
+`service.stop`/`service.start` меняют desired state. Docker restart policy
+восстанавливает running service после перезапуска daemon/host. `service.inspect`
+сверяет desired state с фактическим container/HTTP health, а `service.log` отдаёт
+bounded secret-redacted tail.
+
 Project-specific cron/systemd timers не являются частью нового control plane и
 не импортируются по догадке из имён unit-файлов. Перед созданием эквивалентного
 agent-managed расписания оператор явно отключает такой legacy timer; это
@@ -1041,8 +1073,9 @@ Environment cutover также не имеет default Project: оператор
 пропускает миграцию.
 
 Project Viewer разделяет два вида истории: **Правки агента** показывают patch
-между snapshot до и после Codex-задачи, а **Раннер** диагностирует изолированные
-Build / Validate / Dry run / Live run jobs. Queued job можно удалить из очереди,
+между snapshot до и после Codex-задачи, а **Раннер** отдельно диагностирует
+desired-state services и изолированные Build / Validate / Dry run / Live run jobs.
+Изменяющие service-действия остаются только у агента. Queued job можно удалить из очереди,
 running job проходит через `cancelling` в `cancelled`: runner прерывает текущую
 команду, затем точечно выполняет `docker rm --force` только для контейнера с
 именем, полученным из project id и UUID job. Завершённые и упавшие jobs отменять
@@ -1699,7 +1732,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "9.19.0",
+  "version": "9.20.0",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",

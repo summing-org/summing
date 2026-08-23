@@ -946,6 +946,28 @@ export class ProjectViewerServer {
       });
       return;
     }
+    if (request.method === "GET" && url.pathname === "/api/viewer/services") {
+      const scope = await this.scope(conversationId, telegramUser);
+      const available = await this.runner.available();
+      json(response, 200, {
+        available,
+        services: available
+          ? await this.runner.services(scope.project.id, scope.project.workspace)
+          : [],
+      });
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/api/viewer/service-log") {
+      const scope = await this.scope(conversationId, telegramUser);
+      const name = queryValue(url, "name");
+      if (!/^[a-z0-9][a-z0-9-]{0,47}$/.test(name)) {
+        throw new ViewerHttpError(400, "invalid service name");
+      }
+      json(response, 200, {
+        log: await this.runner.serviceLog(scope.project.id, scope.project.workspace, name),
+      });
+      return;
+    }
     if (request.method === "GET" && url.pathname === "/api/viewer/job-log") {
       const scope = await this.scope(conversationId, telegramUser);
       const jobId = queryValue(url, "job");
