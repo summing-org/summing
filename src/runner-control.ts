@@ -9,6 +9,7 @@ import {
   type RunnerAction,
   type RunnerArtifact,
   type RunnerArtifactDeletion,
+  type RunnerHealth,
   type RunnerJob,
 } from "./project-runner-client.js";
 
@@ -125,6 +126,7 @@ export interface RunnerScheduleView extends RunnerSchedule {
 
 export interface RunnerInspection {
   available: boolean;
+  health: RunnerHealth | null;
   overview: {
     state: "unavailable" | "idle" | "queued" | "running";
     summary: string;
@@ -895,7 +897,10 @@ export class RunnerControlPlane {
   }
 
   async inspect(context: RunnerControlContext): Promise<RunnerInspection> {
-    const available = await this.runner.available();
+    const health = typeof this.runner.health === "function"
+      ? await this.runner.health().catch(() => null)
+      : null;
+    const available = health?.ok === true || (health === null && await this.runner.available());
     const jobs = available
       ? await this.runner.jobs(context.projectId, context.workspaceId)
       : [];
@@ -918,17 +923,21 @@ export class RunnerControlPlane {
         : queued.length > 0
           ? "queued"
           : "idle";
+    const capacity = health
+      ? ` На узле выполняется ${health.running}/${health.maxParallelJobs}, в общей очереди ${health.queued}.`
+      : "";
     const summary = state === "unavailable"
       ? "Раннер недоступен."
       : state === "running"
-        ? `Сейчас выполняется ${active.length} запуск(ов); в очереди ${queued.length}.`
+        ? `Сейчас выполняется ${active.length} запуск(ов); в очереди ${queued.length}.${capacity}`
         : state === "queued"
-          ? `Активного запуска нет; в очереди ${queued.length}.`
+          ? `Активного запуска нет; в очереди ${queued.length}.${capacity}`
           : nextScheduledAt
-            ? `Сейчас ничего не запущено; ближайший запуск по расписанию ${nextScheduledAt}.`
-            : "Сейчас ничего не запущено и активных расписаний нет.";
+            ? `Сейчас ничего не запущено; ближайший запуск по расписанию ${nextScheduledAt}.${capacity}`
+            : `Сейчас ничего не запущено и активных расписаний нет.${capacity}`;
     return {
       available,
+      health,
       overview: {
         state,
         summary,

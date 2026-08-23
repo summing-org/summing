@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   chmodSync,
   closeSync,
+  copyFileSync,
   constants,
   createWriteStream,
   existsSync,
@@ -46,6 +47,7 @@ import {
   RunnerPortalMessageError,
   RunnerPortalMessageStore,
 } from "./runner-portal-messages.js";
+import { SUMMING_VERSION } from "./version.js";
 
 const PROJECT_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const WORKSPACE_ID = PROJECT_ID;
@@ -57,6 +59,7 @@ const MAX_ARCHIVE_BYTES = 50_000_000;
 const MAX_ARTIFACT_BYTES = 8_000_000;
 const MAX_JSON_BYTES = 1_100_000;
 const DRY_RUN_RETENTION = 30;
+const RELEASE_PAYLOAD_RETENTION = 20;
 const JOB_RETENTION = 100;
 const RUNNER_ACTIONS = new Set<RunnerAction>(["build", "validate", "dry-run", "run"]);
 const RUNNER_TRIGGERS = new Set<RunnerJobTrigger>(["manual", "schedule"]);
@@ -257,8 +260,10 @@ function run(
 export class ProjectRunnerServer {
   private server: Server | null = null;
   private readonly queue: RunnerJob[] = [];
-  private processing = false;
-  private activeJob: { job: RunnerJob; controller: AbortController } | null = null;
+  private readonly activeJobs = new Map<
+    string,
+    { job: RunnerJob; controller: AbortController }
+  >();
   private readonly environments: ProjectEnvironmentStore;
   private readonly portalMessages: RunnerPortalMessageStore;
   private readonly runtimeEnvironmentRoot: string;
@@ -279,6 +284,7 @@ export class ProjectRunnerServer {
     readonly migrationBrokerSocket = process.env.SUMMING_SECRETS_RUNTIME_SOCKET ||
       "/run/summing-secrets/runtime.sock",
     readonly managedDataRoot = resolve(dataRoot, "..", "managed-data"),
+    readonly maxParallelJobs = 2,
   ) {
     if (!isAbsolute(socketPath) || basename(socketPath) !== "runner.sock") {
       throw new Error("runner socket must be an absolute runner.sock path");
@@ -286,6 +292,9 @@ export class ProjectRunnerServer {
     mkdirSync(dataRoot, { recursive: true, mode: 0o700 });
     if (!isAbsolute(managedDataRoot)) {
       throw new Error("managed project data root must be an absolute path");
+    }
+    if (!Number.isSafeInteger(maxParallelJobs) || maxParallelJobs < 1 || maxParallelJobs > 16) {
+      throw new Error("runner max parallel jobs must be an integer between 1 and 16");
     }
     mkdirSync(this.managedConfigRoot(), { recursive: true, mode: 0o700 });
     this.environments = new ProjectEnvironmentStore(resolve(dataRoot, "environments"), environmentKey);
@@ -348,8 +357,11 @@ export class ProjectRunnerServer {
     if (request.method === "GET" && url.pathname === "/health") {
       json(response, this.ready ? 200 : 503, {
         ok: this.ready,
+        version: SUMMING_VERSION,
+        protocolVersion: 2,
         queued: this.queue.length,
-        running: this.processing,
+        running: this.activeJobs.size,
+        maxParallelJobs: this.maxParallelJobs,
       });
       return;
     }
@@ -626,18 +638,20 @@ export class ProjectRunnerServer {
     throw new RunnerHttpError(404, "not found");
   }
 
-  private async receiveArchive(request: IncomingMessage, path: string): Promise<void> {
+  private async receiveArchive(request: IncomingMessage, path: string): Promise<string> {
     const announced = Number(request.headers["content-length"] ?? 0);
     if (!Number.isSafeInteger(announced) || announced <= 0 || announced > MAX_ARCHIVE_BYTES) {
       throw new RunnerHttpError(413, "invalid source archive size");
     }
     const output = createWriteStream(path, { flags: "wx", mode: 0o600 });
+    const digest = createHash("sha256");
     let bytes = 0;
     try {
       for await (const chunk of request) {
         const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
         bytes += buffer.length;
         if (bytes > MAX_ARCHIVE_BYTES) throw new RunnerHttpError(413, "source archive is too large");
+        digest.update(buffer);
         if (!output.write(buffer)) {
           await new Promise<void>((resolveDrain) => output.once("drain", resolveDrain));
         }
@@ -646,6 +660,7 @@ export class ProjectRunnerServer {
       await new Promise<void>((resolveEnd) => output.end(resolveEnd));
     }
     if (bytes !== announced) throw new RunnerHttpError(400, "source archive is incomplete");
+    return digest.digest("hex");
   }
 
   private async discardArchive(request: IncomingMessage): Promise<void> {
@@ -674,15 +689,16 @@ export class ProjectRunnerServer {
       status: "queued",
       createdAt: new Date().toISOString(),
     };
+    job.releaseId = job.id;
     const directory = this.jobDirectory(job.projectId, job.id);
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     try {
-      await this.receiveArchive(request, resolve(directory, "source.tar"));
+      job.archiveSha256 = await this.receiveArchive(request, resolve(directory, "source.tar"));
       if (job.action !== "build") {
         job.environmentRevision = this.environments.writeJobSnapshot(
           job.projectId,
           job.workspaceId,
-          job.id,
+          job.releaseId,
           resolve(directory, "environment.json"),
           project.environmentBootstrap.get(job.workspaceId),
         );
@@ -977,8 +993,8 @@ export class ProjectRunnerServer {
     workspaceId: string,
     jobId: string,
   ): Promise<RunnerJob> {
-    const active = this.activeJob;
-    if (active?.job.id === jobId && active.job.projectId === projectId) {
+    const active = this.activeJobs.get(jobId);
+    if (active?.job.projectId === projectId) {
       if (active.job.workspaceId !== workspaceId) {
         throw new RunnerHttpError(404, "runner job not found in this workspace");
       }
@@ -1059,8 +1075,6 @@ export class ProjectRunnerServer {
     );
     this.saveJob(job);
     rmSync(resolve(directory, "source"), { recursive: true, force: true });
-    rmSync(resolve(directory, "source.tar"), { force: true });
-    rmSync(resolve(directory, "environment.json"), { force: true });
     this.pruneJobDirectories(job.projectId);
     return job;
   }
@@ -1193,22 +1207,27 @@ export class ProjectRunnerServer {
     return directory;
   }
 
-  private async processQueue(): Promise<void> {
-    if (this.processing) return;
-    this.processing = true;
-    try {
-      for (let job = this.queue.shift(); job; job = this.queue.shift()) {
-        const controller = new AbortController();
-        this.activeJob = { job, controller };
-        try {
-          await this.execute(job, controller.signal);
-        } finally {
-          if (this.activeJob?.job.id === job.id) this.activeJob = null;
-        }
-      }
-    } finally {
-      this.processing = false;
+  private processQueue(): void {
+    const activeScopes = new Set(
+      [...this.activeJobs.values()].map(({ job }) => this.jobScope(job)),
+    );
+    while (this.activeJobs.size < this.maxParallelJobs) {
+      const index = this.queue.findIndex((job) => !activeScopes.has(this.jobScope(job)));
+      if (index < 0) return;
+      const [job] = this.queue.splice(index, 1);
+      if (!job) return;
+      const controller = new AbortController();
+      this.activeJobs.set(job.id, { job, controller });
+      activeScopes.add(this.jobScope(job));
+      void this.execute(job, controller.signal).finally(() => {
+        this.activeJobs.delete(job.id);
+        this.processQueue();
+      });
     }
+  }
+
+  private jobScope(job: Pick<RunnerJob, "projectId">): string {
+    return job.projectId;
   }
 
   private async execute(job: RunnerJob, signal: AbortSignal): Promise<void> {
@@ -1243,11 +1262,21 @@ export class ProjectRunnerServer {
         { cwd: directory, logPath, signal, timeoutMs: 60_000 },
       );
       if (extracted.code !== 0) throw new Error("source archive extraction failed");
-      await this.ensureImage(job, source, logPath, signal);
+      const project = this.projectConfig(job.projectId, job.workspaceId);
+      let configPath: string | null = null;
+      if (job.action !== "build") {
+        configPath = resolve(directory, "release-config.json");
+        const selectedConfig = this.runtimeConfigPath(project, source);
+        copyFileSync(selectedConfig, configPath);
+        chmodSync(configPath, 0o600);
+        job.configSha256 = createHash("sha256").update(readFileSync(configPath)).digest("hex");
+      }
+      job.imageId = await this.ensureImage(job, source, logPath, signal);
+      this.saveJob(job);
       if (signal.aborted) throw new RunnerCommandCancelledError("runner job cancelled");
       const result = job.action === "build"
         ? { code: 0 }
-        : await this.runImage(job, this.projectConfig(job.projectId), source, logPath, signal);
+        : await this.runImage(job, project, configPath!, logPath, signal);
       job.exitCode = result.code;
       if (result.code !== 0) throw new Error(`${job.action} exited with code ${result.code}`);
       if (signal.aborted) throw new RunnerCommandCancelledError("runner job cancelled");
@@ -1287,8 +1316,6 @@ export class ProjectRunnerServer {
       job.completedAt = new Date().toISOString();
       this.saveJob(job);
       rmSync(resolve(directory, "source"), { recursive: true, force: true });
-      rmSync(resolve(directory, "source.tar"), { force: true });
-      rmSync(resolve(directory, "environment.json"), { force: true });
       this.pruneJobDirectories(job.projectId);
     }
   }
@@ -1302,15 +1329,15 @@ export class ProjectRunnerServer {
     source: string,
     logPath: string,
     signal: AbortSignal,
-  ): Promise<void> {
+  ): Promise<string> {
     const image = this.image(job);
-    const existing = await run(this.dockerBinary, ["image", "inspect", image], {
+    const existing = await run(this.dockerBinary, ["image", "inspect", "--format", "{{.Id}}", image], {
       cwd: source,
       logPath,
       signal,
       timeoutMs: 30_000,
     });
-    if (existing.code === 0) return;
+    if (existing.code === 0) return existing.output.trim() || image;
     const built = await run(
       this.dockerBinary,
       [
@@ -1324,16 +1351,22 @@ export class ProjectRunnerServer {
       { cwd: source, logPath, signal, timeoutMs: 900_000 },
     );
     if (built.code !== 0) throw new Error(`docker build exited with code ${built.code}`);
+    const inspected = await run(
+      this.dockerBinary,
+      ["image", "inspect", "--format", "{{.Id}}", image],
+      { cwd: source, logPath, signal, timeoutMs: 30_000 },
+    );
+    if (inspected.code !== 0) throw new Error("built image could not be inspected");
+    return inspected.output.trim() || image;
   }
 
   private async runImage(
     job: RunnerJob,
     project: RunnerProjectConfig,
-    source: string,
+    configPath: string,
     logPath: string,
     signal: AbortSignal,
   ): Promise<{ code: number }> {
-    const configPath = this.runtimeConfigPath(project, source);
     mkdirSync(project.dataPath, { recursive: true, mode: 0o700 });
     if (job.action === "dry-run") {
       const root = resolve(project.dataPath, "dry-runs");
@@ -1384,7 +1417,7 @@ export class ProjectRunnerServer {
           "--env", "SUMMING_PROJECT_DATA_PATH=/app/data",
         );
       }
-      args.push(this.image(job));
+      args.push(job.imageId || this.image(job));
       if (job.action === "validate") args.push("node", "dist/src/main.js", "--validate");
       const result = await run(this.dockerBinary, args, {
         cwd: this.dataRoot,
@@ -1441,7 +1474,7 @@ export class ProjectRunnerServer {
     const parsed: ParsedEnvironment = this.environments.readJobSnapshot(
       job.projectId,
       job.workspaceId,
-      job.id,
+      job.releaseId ?? job.id,
       snapshotPath,
     );
     const envPath = resolve(this.runtimeEnvironmentRoot, `${job.id}.env`);
@@ -1517,6 +1550,11 @@ export class ProjectRunnerServer {
       })
       .sort((left, right) =>
         right.retentionAt.localeCompare(left.retentionAt) || right.id.localeCompare(left.id));
+    for (const job of terminal.slice(RELEASE_PAYLOAD_RETENTION)) {
+      for (const file of ["source.tar", "environment.json", "release-config.json"]) {
+        rmSync(resolve(root, job.id, file), { force: true });
+      }
+    }
     for (const job of terminal.slice(JOB_RETENTION)) {
       rmSync(resolve(root, job.id), { recursive: true, force: true });
     }
@@ -1561,8 +1599,6 @@ export class ProjectRunnerServer {
             { flag: "a", mode: 0o600 },
           );
           rmSync(resolve(directory, "source"), { recursive: true, force: true });
-          rmSync(resolve(directory, "source.tar"), { force: true });
-          rmSync(resolve(directory, "environment.json"), { force: true });
         } catch {
           // Preserve malformed operator-recovery state for manual inspection.
         }

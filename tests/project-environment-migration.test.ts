@@ -282,7 +282,7 @@ test("summing-owned coordinator hands pinned Git data to a repository-blind runn
   writeFileSync(bootstrapPath, "DRY_RUN=true\nLOG_LEVEL=info\n", { mode: 0o640 });
   writeFileSync(join(root, "app.json"), "{}\n", { mode: 0o640 });
   writeFileSync(fakeDocker, `#!/bin/sh
-if [ "$1" = image ]; then exit 1; fi
+if [ "$1" = image ]; then printf '%s\n' 'sha256:migration-test-image'; exit 0; fi
 exit 0
 `, { mode: 0o700 });
 

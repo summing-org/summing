@@ -95,6 +95,14 @@ test("schedule changes require a later-turn confirmation and execute each occurr
   const submissions: RunnerSubmissionMetadata[] = [];
   const runner = {
     available: async () => true,
+    health: async () => ({
+      ok: true,
+      version: "9.19.0",
+      protocolVersion: 2,
+      queued: 1,
+      running: 1,
+      maxParallelJobs: 2,
+    }),
     jobs: async () => jobs,
     submit: async (
       projectId: string,
@@ -200,6 +208,14 @@ test("manual tool calls deduplicate jobs, expose an overview, and notify their c
   const notifications: Array<{ projectId: string; message: string; conversationId?: string }> = [];
   const runner = {
     available: async () => true,
+    health: async () => ({
+      ok: true,
+      version: "9.19.0",
+      protocolVersion: 2,
+      queued: 1,
+      running: 1,
+      maxParallelJobs: 2,
+    }),
     jobs: async () => jobs,
     submit: async (
       projectId: string,
@@ -263,6 +279,8 @@ test("manual tool calls deduplicate jobs, expose an overview, and notify their c
     assert.equal(queuedInspection.overview.state, "queued");
     assert.equal(queuedInspection.overview.queuedCount, 1);
     assert.match(queuedInspection.overview.summary, /в очереди 1/);
+    assert.equal(queuedInspection.health?.maxParallelJobs, 2);
+    assert.match(queuedInspection.overview.summary, /1\/2/);
 
     jobs[0]!.status = "completed";
     jobs[0]!.completedAt = new Date(now + 10_000).toISOString();

@@ -42,9 +42,16 @@ async function completedJob(
 function seedTerminalJobHistory(
   runs: string,
   revision: string,
-): { malformedId: string; queuedId: string } {
+): {
+  malformedId: string;
+  queuedId: string;
+  payloadRetainedId: string;
+  payloadPrunedId: string;
+} {
   const malformedId = randomUUID();
   const queuedId = randomUUID();
+  let payloadRetainedId = "";
+  let payloadPrunedId = "";
   mkdirSync(join(runs, malformedId));
   writeFileSync(join(runs, malformedId, "job.json"), "operator recovery note\n");
   mkdirSync(join(runs, queuedId));
@@ -63,6 +70,8 @@ function seedTerminalJobHistory(
   );
   for (let index = 0; index < 105; index += 1) {
     const id = randomUUID();
+    if (index === 104) payloadRetainedId = id;
+    if (index === 80) payloadPrunedId = id;
     const directory = join(runs, id);
     mkdirSync(directory);
     writeFileSync(join(directory, "job.json"), JSON.stringify({
@@ -76,8 +85,11 @@ function seedTerminalJobHistory(
       createdAt: new Date(index).toISOString(),
       completedAt: new Date(index + 1).toISOString(),
     }));
+    for (const file of ["source.tar", "environment.json", "release-config.json"]) {
+      writeFileSync(join(directory, file), `${file}\n`, { mode: 0o600 });
+    }
   }
-  return { malformedId, queuedId };
+  return { malformedId, queuedId, payloadRetainedId, payloadPrunedId };
 }
 
 test("runner snapshots an encrypted workspace environment and injects one temporary env-file", async () => {
@@ -88,6 +100,7 @@ test("runner snapshots an encrypted workspace environment and injects one tempor
   const socket = join(root, "runner.sock");
   const fakeDocker = join(root, "docker");
   const dockerArgs = join(root, "docker.args");
+  const imageBuilt = join(root, "image-built");
   const appData = join(root, "app-data");
   mkdirSync(repository);
   mkdirSync(configRoot);
@@ -115,7 +128,11 @@ test("runner snapshots an encrypted workspace environment and injects one tempor
   writeFileSync(
     fakeDocker,
     `#!/bin/sh
-if [ "$1" = image ]; then exit 1; fi
+if [ "$1" = image ]; then
+  if [ -f "${imageBuilt}" ]; then printf '%s\n' 'sha256:runner-test-image'; exit 0; fi
+  exit 1
+fi
+if [ "$1" = build ]; then : > "${imageBuilt}"; exit 0; fi
 if [ "$1" = run ]; then
   printf '%s\n' "$@" > "${dockerArgs}"
   job=""
@@ -152,6 +169,14 @@ exit 0
     const revision = await inspector.resolveRevision("HEAD");
     const archive = await inspector.archive(revision);
     const client = new ProjectRunnerClient(socket);
+    assert.deepEqual(await client.health(), {
+      ok: true,
+      version: readFileSync(join(process.cwd(), "VERSION"), "utf8").trim(),
+      protocolVersion: 2,
+      queued: 0,
+      running: 0,
+      maxParallelJobs: 2,
+    });
 
     const imported = await client.environment("demo", "repo");
     assert.equal(imported.revision, 1);
@@ -207,6 +232,10 @@ exit 0
     assert.equal(dryRunCompleted.scheduleId, scheduleId);
     assert.equal(dryRunCompleted.scheduledFor, scheduledFor);
     assert.equal(dryRunCompleted.environmentRevision, 2);
+    assert.equal(dryRunCompleted.releaseId, dryRun.id);
+    assert.match(dryRunCompleted.archiveSha256 ?? "", /^[0-9a-f]{64}$/);
+    assert.match(dryRunCompleted.configSha256 ?? "", /^[0-9a-f]{64}$/);
+    assert.equal(dryRunCompleted.imageId, "sha256:runner-test-image");
     assert.equal(dryRunCompleted.artifactCount, 3);
     assert.equal(dryRunCompleted.portalMessageCount, 1);
     assert.deepEqual(
@@ -258,16 +287,24 @@ exit 0
     assert.match(args, /SUMMING_PROJECT_DATA_PATH=\/app\/data/);
     assert.match(
       args,
-      new RegExp(`/projects/demo/runs/${dryRun.id}/source/app\\.json:/run/config\\.json:ro`),
+      new RegExp(`/projects/demo/runs/${dryRun.id}/release-config\\.json:/run/config\\.json:ro`),
     );
     assert.doesNotMatch(args, /missing\.json:\/run\/config\.json/);
     const envFiles = args.split("\n").filter((value, index, all) => all[index - 1] === "--env-file");
     assert.equal(envFiles.length, 1);
     assert.equal(existsSync(envFiles[0]!), false);
-    assert.equal(existsSync(join(dataRoot, "projects", "demo", "runs", dryRun.id, "environment.json")), false);
+    const releaseDirectory = join(dataRoot, "projects", "demo", "runs", dryRun.id);
+    assert.equal(existsSync(join(releaseDirectory, "source.tar")), true);
+    assert.equal(existsSync(join(releaseDirectory, "environment.json")), true);
+    assert.equal(existsSync(join(releaseDirectory, "release-config.json")), true);
 
     const runs = join(dataRoot, "projects", "demo", "runs");
-    const { malformedId, queuedId } = seedTerminalJobHistory(runs, revision);
+    const {
+      malformedId,
+      queuedId,
+      payloadRetainedId,
+      payloadPrunedId,
+    } = seedTerminalJobHistory(runs, revision);
 
     const validate = await client.submit("demo", "repo", "validate", revision, archive);
     assert.equal((await completedJob(client, "demo", "repo", validate.id)).status, "completed");
@@ -277,6 +314,10 @@ exit 0
     assert.equal(existsSync(join(runs, dryRun.id)), true);
     assert.equal(existsSync(join(runs, malformedId)), true);
     assert.equal(existsSync(join(runs, queuedId)), true);
+    assert.equal(existsSync(join(releaseDirectory, "source.tar")), true);
+    assert.equal(existsSync(join(runs, payloadRetainedId, "source.tar")), true);
+    assert.equal(existsSync(join(runs, payloadPrunedId)), true);
+    assert.equal(existsSync(join(runs, payloadPrunedId, "source.tar")), false);
   } finally {
     await server.close();
     rmSync(root, { recursive: true, force: true });
@@ -474,6 +515,105 @@ exit 0
   }
 });
 
+test("runner executes independent projects in parallel and serializes each project", async () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-runner-parallel-"));
+  const repository = join(root, "repo");
+  const configRoot = join(root, "config");
+  const dataRoot = join(root, "data");
+  const socket = join(root, "runner.sock");
+  const fakeDocker = join(root, "docker");
+  const markers = join(root, "markers");
+  const appConfig = join(root, "app.json");
+  mkdirSync(repository);
+  mkdirSync(configRoot);
+  mkdirSync(markers);
+  execFileSync("git", ["init", "--initial-branch=main", repository]);
+  execFileSync("git", ["-C", repository, "config", "user.name", "Test"]);
+  execFileSync("git", ["-C", repository, "config", "user.email", "test@example.test"]);
+  writeFileSync(join(repository, "Dockerfile"), "FROM scratch\n");
+  execFileSync("git", ["-C", repository, "add", "."]);
+  execFileSync("git", ["-C", repository, "commit", "-m", "image"]);
+  writeFileSync(appConfig, "{}\n");
+  for (const project of ["alpha", "beta"]) {
+    writeFileSync(join(configRoot, `${project}.json`), JSON.stringify({
+      configPath: appConfig,
+      dataPath: join(root, `${project}-data`),
+      network: false,
+    }));
+  }
+  writeFileSync(fakeDocker, `#!/bin/sh
+if [ "$1" = image ]; then printf '%s\n' 'sha256:parallel-test-image'; exit 0; fi
+if [ "$1" = run ]; then
+  name=""
+  previous=""
+  for value in "$@"; do
+    if [ "$previous" = "--name" ]; then name="$value"; fi
+    previous="$value"
+  done
+  : > "${markers}/$name"
+  sleep 1
+fi
+exit 0
+`, { mode: 0o700 });
+  const server = new ProjectRunnerServer(
+    socket,
+    dataRoot,
+    configRoot,
+    fakeDocker,
+    Buffer.alloc(32, 10),
+  );
+  try {
+    await server.start();
+    const inspector = new GitInspector(repository);
+    const revision = await inspector.resolveRevision("HEAD");
+    const archive = await inspector.archive(revision);
+    const client = new ProjectRunnerClient(socket);
+    const alpha = await client.submit("alpha", "repo", "run", revision, archive);
+    const alphaMarker = join(markers, `summing-alpha-${alpha.id.slice(0, 8)}`);
+    const alphaDeadline = Date.now() + 5_000;
+    while (!existsSync(alphaMarker)) {
+      if (Date.now() > alphaDeadline) throw new Error("first project did not start");
+      await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+    }
+
+    const alphaQueued = await client.submit("alpha", "repo", "run", revision, archive);
+    const beta = await client.submit("beta", "repo", "run", revision, archive);
+    const betaMarker = join(markers, `summing-beta-${beta.id.slice(0, 8)}`);
+    const betaDeadline = Date.now() + 5_000;
+    while (!existsSync(betaMarker)) {
+      if (Date.now() > betaDeadline) throw new Error("independent project did not start");
+      await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+    }
+
+    assert.equal(
+      existsSync(join(markers, `summing-alpha-${alphaQueued.id.slice(0, 8)}`)),
+      false,
+    );
+    assert.equal(
+      (await client.jobs("alpha", "repo")).find((job) => job.id === alphaQueued.id)?.status,
+      "queued",
+    );
+    assert.deepEqual(
+      (({ running, queued, maxParallelJobs }) => ({ running, queued, maxParallelJobs }))(
+        await client.health(),
+      ),
+      { running: 2, queued: 1, maxParallelJobs: 2 },
+    );
+
+    await Promise.all([
+      completedJob(client, "alpha", "repo", alpha.id),
+      completedJob(client, "beta", "repo", beta.id),
+    ]);
+    assert.equal(
+      (await completedJob(client, "alpha", "repo", alphaQueued.id)).status,
+      "completed",
+    );
+  } finally {
+    await server.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("runner rejects unsafe or ambiguous project config sources", async () => {
   const root = mkdtempSync(join(tmpdir(), "summing-runner-config-source-"));
   const configRoot = join(root, "config");
@@ -524,7 +664,12 @@ test("runner marks unfinished jobs interrupted on startup and retains recovery e
   const revision = "a".repeat(40);
   mkdirSync(runs, { recursive: true });
   try {
-    const { malformedId, queuedId } = seedTerminalJobHistory(runs, revision);
+    const {
+      malformedId,
+      queuedId,
+      payloadRetainedId,
+      payloadPrunedId,
+    } = seedTerminalJobHistory(runs, revision);
     const queuedMetadata = join(runs, queuedId, "job.json");
     const queuedMetadataInode = lstatSync(queuedMetadata).ino;
 
@@ -539,6 +684,9 @@ test("runner marks unfinished jobs interrupted on startup and retains recovery e
     assert.equal(readdirSync(runs).length, 101);
     assert.equal(existsSync(join(runs, queuedId)), true);
     assert.equal(existsSync(join(runs, malformedId)), true);
+    assert.equal(existsSync(join(runs, payloadRetainedId, "source.tar")), true);
+    assert.equal(existsSync(join(runs, payloadPrunedId)), true);
+    assert.equal(existsSync(join(runs, payloadPrunedId, "source.tar")), false);
     assert.notEqual(lstatSync(queuedMetadata).ino, queuedMetadataInode);
     const recovered = JSON.parse(
       readFileSync(queuedMetadata, "utf8"),

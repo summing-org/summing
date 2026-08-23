@@ -1,6 +1,6 @@
-# SUMMING 9.18: архитектура, эксплуатация и разработка
+# SUMMING 9.19: архитектура, эксплуатация и разработка
 
-> Версия: **9.18.0**
+> Версия: **9.19.0**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
 > Последняя сверка с кодом: **23 августа 2026 года**.
 
@@ -980,6 +980,14 @@ network policy и точный список Workspace. Root-managed JSON ост�
 Контейнер запускается read-only, без capabilities, с `no-new-privileges`, PID,
 CPU и memory limits; writable остаётся только project data bind mount.
 
+Runner не вводит отдельный pipeline или реестр релизов. Принятый job и есть
+минимальный Release: его `releaseId` совпадает с UUID job, а metadata связывает
+полный Git SHA, SHA-256 immutable source archive, точный config snapshot и его
+SHA-256, environment revision и фактический Docker image ID. Для 20 последних
+terminal jobs каждого Project сохраняются source/config/encrypted-env payload;
+для 100 — metadata и log. Более старые payload удаляются независимо от истории
+job, поэтому хранилище остаётся ограниченным.
+
 `validate`, `dry-run` и `build` могут использовать временный snapshot грязного
 worktree. `run` требует чистый committed `HEAD`.
 
@@ -1002,6 +1010,22 @@ Create/update/delete формируют 15-минутный точный пла�
 применять token в том же Codex turn, поэтому требуется отдельное подтверждающее
 сообщение. Pause/resume обратимы и выполняются только по явной инструкции.
 Ошибки расписаний отправляются всем текущим owners Project.
+
+Очередь имеет глобальный предел `SUMMING_RUNNER_MAX_PARALLEL_JOBS` (по умолчанию
+2): независимые Project выполняются параллельно, включая многочасовые scheduled
+jobs, но jobs одного Project сериализуются из-за общего writable data volume.
+Dispatcher пропускает временно заблокированные позиции того же Project и не
+создаёт head-of-line blocking для других Project. Health contract версии 2
+возвращает версию SUMMING, `running`, `queued` и `maxParallelJobs`; `runner.inspect`
+показывает агенту как локальное состояние Project/Workspace, так и загрузку всего
+runner node. Никаких новых action-specific network/data ограничений эта модель не
+добавляет.
+
+Source policy остаётся простой: `run` разрешён только из clean committed `HEAD`,
+`build`/`validate`/`dry-run` могут получить временный immutable snapshot, а
+schedule при каждом occurrence заново разрешает полный SHA текущего `master`.
+Сохранённый Release сам по себе не исполняем: replay production snapshot требует
+отдельной явной команды, потому что может повторить внешние side effects.
 
 Project-specific cron/systemd timers не являются частью нового control plane и
 не импортируются по догадке из имён unit-файлов. Перед созданием эквивалентного
@@ -1667,7 +1691,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "9.18.0",
+  "version": "9.19.0",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",

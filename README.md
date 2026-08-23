@@ -1,4 +1,4 @@
-# SUMMING 9.18
+# SUMMING 9.19
 
 SUMMING — один постоянно живущий агент с одним администратором и назначаемыми
 владельцами проектов. Он работает на Linux VPS, принимает команды из Telegram
@@ -527,6 +527,22 @@ config/unit/Caddyfile сохраняются для rollback. После cutover
 misfire-окно. Project-specific cron/systemd timers намеренно не импортируются по
 догадке: перед включением эквивалентного agent-managed расписания оператор должен
 отдельно отключить legacy timer, чтобы не получить двойной запуск.
+
+Job одновременно служит минимальным Release без отдельной CI/CD-сущности:
+`releaseId` равен job ID, а запись фиксирует полный Git SHA, SHA-256 переданного
+source archive и выбранного config, revision зашифрованного env и immutable Docker
+image ID. Payload последних 20 завершённых Release сохраняется для проверки и
+точного восстановления; metadata и логи — для последних 100. Автоматического
+повторного исполнения старого Release нет, поэтому сохранённый production job не
+может незаметно повторить внешние side effects.
+
+Runner выполняет до `SUMMING_RUNNER_MAX_PARALLEL_JOBS` независимых Project
+одновременно (по умолчанию 2). Jobs одного Project сериализуются, поскольку
+используют общий writable data volume; заблокированный job не мешает стартовать
+следующему независимому Project. `/health` публикует версию SUMMING и runner
+protocol, глобальные `running`/`queued` и лимит параллельности; те же данные
+доступны агенту через `runner.inspect`. Viewer показывает short release ID и env
+revision рядом с каждым job.
 
 Артефакты можно перечислить и безопасно прочитать как недоверенные данные с
 лимитом ответа. Удаление одного файла и очистка job/workspace также составляют

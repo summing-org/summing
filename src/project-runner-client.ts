@@ -25,10 +25,14 @@ export type RunnerJobStatus =
 
 export interface RunnerJob {
   id: string;
+  releaseId?: string;
   projectId: string;
   workspaceId: string;
   action: RunnerAction;
   revision: string;
+  archiveSha256?: string;
+  configSha256?: string;
+  imageId?: string;
   trigger?: RunnerJobTrigger;
   scheduleId?: string;
   scheduledFor?: string;
@@ -88,6 +92,15 @@ export interface RunnerProjectRegistration {
   projectId: string;
   workspaceIds: string[];
   source: "managed" | "static";
+}
+
+export interface RunnerHealth {
+  ok: boolean;
+  version: string;
+  protocolVersion: number;
+  queued: number;
+  running: number;
+  maxParallelJobs: number;
 }
 
 export class ProjectRunnerClientError extends Error {
@@ -160,11 +173,14 @@ export class ProjectRunnerClient {
 
   async available(): Promise<boolean> {
     try {
-      const result = await this.call<{ ok: boolean }>("GET", "/health");
-      return result.ok === true;
+      return (await this.health()).ok === true;
     } catch {
       return false;
     }
+  }
+
+  async health(): Promise<RunnerHealth> {
+    return await this.call<RunnerHealth>("GET", "/health");
   }
 
   async registerProject(

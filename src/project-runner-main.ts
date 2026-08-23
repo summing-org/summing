@@ -14,6 +14,10 @@ async function main(): Promise<void> {
   const managedDataRoot = process.env.SUMMING_RUNNER_MANAGED_DATA ||
     "/var/lib/summing-project-runs";
   const scheduleRoot = process.env.SUMMING_RUNNER_SCHEDULES || resolve(configRoot, "..", "schedules");
+  const maxParallelJobs = Number(process.env.SUMMING_RUNNER_MAX_PARALLEL_JOBS ?? "2");
+  if (!Number.isSafeInteger(maxParallelJobs) || maxParallelJobs < 1 || maxParallelJobs > 16) {
+    throw new Error("SUMMING_RUNNER_MAX_PARALLEL_JOBS must be an integer between 1 and 16");
+  }
   const configuredKeyPath = String(process.env.SUMMING_RUNNER_ENV_KEY ?? "").trim();
   const installedKeyPath = "/etc/summing-project-runner/environment.key";
   const keyPath = configuredKeyPath || (
@@ -34,6 +38,7 @@ async function main(): Promise<void> {
     migrations,
     process.env.SUMMING_SECRETS_RUNTIME_SOCKET || "/run/summing-secrets/runtime.sock",
     managedDataRoot,
+    maxParallelJobs,
   );
   let resolveSignal!: () => void;
   const signal = new Promise<void>((resolveSignalPromise) => {
