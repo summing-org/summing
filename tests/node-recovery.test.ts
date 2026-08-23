@@ -34,6 +34,7 @@ test("node recovery exports, verifies and stages portable node state", async () 
   mkdirSync(join(dataDir, "memory"), { recursive: true });
   mkdirSync(join(dataDir, "projects", "demo"), { recursive: true });
   mkdirSync(join(dataDir, "project-portal-outbox", "pending-message"), { recursive: true });
+  mkdirSync(join(dataDir, "project-portal-artifacts"), { recursive: true });
   mkdirSync(join(codexHome, "sessions", "2026", "08", "18"), { recursive: true });
   git(repository, "init", "--initial-branch=master");
   git(repository, "config", "user.name", "SUMMING Test");
@@ -55,6 +56,8 @@ test("node recovery exports, verifies and stages portable node state", async () 
     join(dataDir, "project-portal-outbox", "pending-message", "record.json"),
     "pending portal delivery\n",
   );
+  writeFileSync(join(dataDir, "project-portal-artifacts", "artifact.bin"), "encrypted artifact\n");
+  writeFileSync(join(dataDir, "project-portal-artifacts.key"), Buffer.alloc(32, 7), { mode: 0o600 });
   const configPath = join(root, "config.toml");
   const environmentPath = join(root, "summing.env");
   const mtprotoMasterKeyPath = join(root, "mtproto.key");
@@ -152,6 +155,10 @@ test("node recovery exports, verifies and stages portable node state", async () 
         inspection.components.some((component) => component.kind === "project-portal-outbox"),
         true,
       );
+      assert.equal(
+        inspection.components.some((component) => component.kind === "project-portal-artifacts"),
+        true,
+      );
       assert.match(inspection.restore.excluded.join("\n"), /Team Space contents/);
       assert.match(inspection.restore.reconnectRequired.join("\n"), /Codex account/);
 
@@ -202,6 +209,15 @@ test("node recovery exports, verifies and stages portable node state", async () 
         "pending-message",
         "record.json",
       ), "utf8"), "pending portal delivery\n");
+      assert.equal(readFileSync(join(
+        staged.stagePath,
+        "components",
+        "project-portal-artifacts",
+        "payload",
+        "data",
+        "project-portal-artifacts",
+        "artifact.bin",
+      ), "utf8"), "encrypted artifact\n");
       assert.equal(readFileSync(join(
         staged.stagePath,
         "components",
@@ -295,6 +311,14 @@ test("node recovery exports, verifies and stages portable node state", async () 
         "summing",
         "mtproto.key",
       ), "utf8"), `${"a".repeat(64)}\n`);
+      assert.deepEqual(readFileSync(join(
+        staged.stagePath,
+        "components",
+        "secrets",
+        "payload",
+        "data",
+        "project-portal-artifacts.key",
+      )), Buffer.alloc(32, 7));
       const objectFiles = readdirSync(join(root, "objects"), { recursive: true, withFileTypes: true })
         .filter((entry) => entry.isFile() && entry.name.endsWith(".enc"));
       assert.equal(objectFiles.length > 0, true);

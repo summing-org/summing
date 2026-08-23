@@ -1,6 +1,6 @@
 {
   "name": "summing",
-  "version": "9.17.0",
+  "version": "9.18.0",
   "description": "Persistent Telegram agent backed by the official Codex App Server",
   "type": "module",
   "private": true,
@@ -16,6 +16,8 @@
     "lint": "tsc -p tsconfig.json --noEmit",
     "pretest": "node scripts/require-node-version.mjs",
     "test": "npm run build && node --test dist/tests/*.test.js",
+    "release:version": "node scripts/set-version.mjs",
+    "release:check": "node scripts/set-version.mjs --check",
     "precodex:types": "node scripts/require-node-version.mjs",
     "codex:types": "codex app-server generate-ts --experimental --out .codex-protocol"
   },

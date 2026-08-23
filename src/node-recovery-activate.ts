@@ -321,7 +321,12 @@ export async function activateNodeRecovery(input: Arguments): Promise<{
       rollbackPath,
       entries,
     );
-    for (const id of ["run-artifacts", "attachments"] as const) {
+    for (const id of [
+      "run-artifacts",
+      "attachments",
+      "project-portal-outbox",
+      "project-portal-artifacts",
+    ] as const) {
       replacePath(
         join(component(id), "payload", "data", id),
         join(config.dataDir, id),
@@ -356,6 +361,12 @@ export async function activateNodeRecovery(input: Arguments): Promise<{
       replacePath(
         join(secrets, "data", "repository-credentials"),
         join(config.dataDir, "repository-credentials"),
+        rollbackPath,
+        entries,
+      );
+      replacePath(
+        join(secrets, "data", "project-portal-artifacts.key"),
+        join(config.dataDir, "project-portal-artifacts.key"),
         rollbackPath,
         entries,
       );

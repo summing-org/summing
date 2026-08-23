@@ -546,6 +546,50 @@ export class WorkspaceManager {
     }
   }
 
+  materializePortalArtifact(
+    prepared: PreparedWorkspace,
+    artifact: {
+      id: string;
+      eventId: number;
+      fileName: string;
+      mimeType: string;
+      size: number;
+      kind: string;
+      data: Uint8Array;
+    },
+  ): MaterializedAttachment {
+    if (
+      artifact.data.byteLength !== artifact.size ||
+      artifact.size <= 0 ||
+      artifact.size > this.config.maximumAttachmentBytes
+    ) {
+      throw new WorkspaceError("Project portal artifact size is invalid");
+    }
+    if (detectSecretData(artifact.data, artifact.fileName, artifact.mimeType).length > 0) {
+      throw new WorkspaceError("Project portal artifact may contain credentials");
+    }
+    const root = resolve(prepared.path, ".summing-runtime", "attachments");
+    this.ensureRuntimeDirectory(root, 0o700);
+    const safeName = telegramFileName(basename(artifact.fileName));
+    const destination = resolve(root, `portal-${artifact.eventId}-${artifact.id}-${safeName}`);
+    if (existsSync(destination)) {
+      const existing = lstatSync(destination);
+      if (existing.isSymbolicLink() || !existing.isFile() || existing.nlink !== 1) {
+        throw new WorkspaceError("refusing unsafe materialized portal artifact");
+      }
+    }
+    this.writeRuntimeFile(destination, artifact.data);
+    return {
+      relativePath: relative(prepared.path, destination).split(sep).join("/"),
+      fileName: safeName,
+      mimeType: artifact.mimeType,
+      size: artifact.size,
+      kind: new Set(["document", "audio", "image"]).has(artifact.kind)
+        ? artifact.kind as StoredAttachment["kind"]
+        : "document",
+    };
+  }
+
   private async gitRoot(path: string, signal?: AbortSignal): Promise<string | null> {
     const result = await runProcess(
       "git",

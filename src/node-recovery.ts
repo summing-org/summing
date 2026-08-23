@@ -119,7 +119,7 @@ export interface NodeRecoverySessionRecord {
 export interface NodeRecoveryComponentManifest {
   id: string;
   kind: "node-state" | "codex-sessions" | "run-artifacts" | "attachments" |
-    "project-portal-outbox" | "workspace" | "config" | "secrets";
+    "project-portal-outbox" | "project-portal-artifacts" | "workspace" | "config" | "secrets";
   key: string;
   sha256: string;
   size: number;
@@ -955,6 +955,11 @@ export class NodeRecoveryManager {
           "project-portal-outbox",
           join(this.config.dataDir, "project-portal-outbox"),
         ],
+        [
+          "project-portal-artifacts",
+          "project-portal-artifacts",
+          join(this.config.dataDir, "project-portal-artifacts"),
+        ],
       ] as const) {
         await addComponent(id, kind, [
           { sourcePath: path, archivePath: `payload/data/${id}`, optional: true },
@@ -1017,6 +1022,11 @@ export class NodeRecoveryManager {
           { sourcePath: knowledgeTransferKeyPath, archivePath: "payload/etc/summing/kb-transfer.key", optional: true },
           { sourcePath: tdlibRoot, archivePath: "payload/data/tdlib", optional: true },
           { sourcePath: repositoryCredentialsRoot, archivePath: "payload/data/repository-credentials", optional: true },
+          {
+            sourcePath: join(this.config.dataDir, "project-portal-artifacts.key"),
+            archivePath: "payload/data/project-portal-artifacts.key",
+            optional: true,
+          },
         ], false);
         mappings.push(
           { componentId: "secrets", archivePath: "payload/data/config.toml", destination: configPath },
@@ -1024,6 +1034,7 @@ export class NodeRecoveryManager {
           { componentId: "secrets", archivePath: "payload/data/repository-credentials", destination: repositoryCredentialsRoot },
           { componentId: "secrets", archivePath: "payload/data/tdlib", destination: tdlibRoot },
           { componentId: "secrets", archivePath: "payload/data/connector-core/core.sqlite", destination: join(this.config.dataDir, "core.sqlite") },
+          { componentId: "secrets", archivePath: "payload/data/project-portal-artifacts.key", destination: join(this.config.dataDir, "project-portal-artifacts.key") },
         );
       }
 

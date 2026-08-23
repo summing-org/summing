@@ -24,6 +24,11 @@ export type ConversationBindingMode = "project" | "external-readonly";
 export type RunAccess = "write" | "read-only";
 export type ResponseMode = "direct" | "ambient";
 
+export interface ProjectPortalOptions {
+  portalKey?: string;
+  isDefault?: boolean;
+}
+
 export interface AudioTranscript {
   fileName: string;
   text: string;
@@ -156,6 +161,9 @@ export interface TeamSource {
 
 export interface ProjectPortalBinding {
   portalId: string;
+  portalKey: string;
+  isDefault: boolean;
+  transport: string;
   projectId: string;
   workspaceId: string;
   chatId: number;
@@ -170,6 +178,8 @@ export interface TeamEventAttachment {
   mimeType: string;
   size: number;
   providerFileId?: string;
+  artifactId?: string;
+  sha256?: string;
 }
 
 export interface TeamEventInput {
@@ -299,6 +309,17 @@ export interface SecurityEvent {
 }
 
 type Row = Record<string, string | number | bigint | null>;
+const PROJECT_PORTAL_KEY = /^[a-z][a-z0-9_-]{0,47}$/;
+
+export function projectPortalKey(value: unknown): string {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (!PROJECT_PORTAL_KEY.test(normalized)) {
+    throw new Error(
+      "portalKey must start with a letter and contain 1-48 lowercase letters, digits, _ or -",
+    );
+  }
+  return normalized;
+}
 
 function storedAttachments(value: unknown): StoredAttachment[] {
   if (!Array.isArray(value)) return [];
@@ -694,6 +715,25 @@ export class StateStore {
         );
         CREATE INDEX IF NOT EXISTS pending_inputs_lookup
           ON pending_inputs(conversation_id, mode, state, id);
+        CREATE TABLE IF NOT EXISTS project_portal_bindings (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          portal_key TEXT NOT NULL,
+          is_default INTEGER NOT NULL DEFAULT 0 CHECK(is_default IN (0, 1)),
+          transport TEXT NOT NULL,
+          conversation_id TEXT UNIQUE REFERENCES conversations(id) ON DELETE CASCADE,
+          destination_json TEXT NOT NULL,
+          title TEXT NOT NULL DEFAULT '',
+          created_at REAL NOT NULL,
+          updated_at REAL NOT NULL,
+          UNIQUE(project_id, workspace_id, portal_key)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS project_portal_bindings_default
+          ON project_portal_bindings(project_id, workspace_id)
+          WHERE is_default = 1;
+        CREATE INDEX IF NOT EXISTS project_portal_bindings_project
+          ON project_portal_bindings(project_id, workspace_id, portal_key);
         CREATE TABLE IF NOT EXISTS runs (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
@@ -1001,6 +1041,7 @@ export class StateStore {
             "CHECK(binding_mode IN ('project', 'external-readonly'))",
         );
       }
+      this.migrateProjectPortalBindings();
       const pendingColumns = this.db.prepare("PRAGMA table_info(pending_inputs)").all() as Row[];
       if (!pendingColumns.some((column) => column.name === "access_mode")) {
         this.db.exec(
@@ -1809,6 +1850,35 @@ export class StateStore {
     });
   }
 
+  attachTeamEventArtifact(
+    eventId: number,
+    input: { providerFileId?: string; artifactId: string; sha256: string },
+  ): TeamEvent | null {
+    const event = this.teamEvent(eventId);
+    if (!event || event.synthesisState === "redacted") return null;
+    const providerFileId = String(input.providerFileId ?? "");
+    let attached = false;
+    const attachments = event.attachments.map((attachment) => {
+      if (
+        attached ||
+        (providerFileId && attachment.providerFileId !== providerFileId) ||
+        (!providerFileId && attachment.artifactId)
+      ) {
+        return attachment;
+      }
+      attached = true;
+      return { ...attachment, artifactId: input.artifactId, sha256: input.sha256 };
+    });
+    if (!attached) return event;
+    this.transaction(() => {
+      this.db.prepare(`
+        UPDATE team_events SET attachments_json = ?
+        WHERE id = ? AND synthesis_state <> 'redacted'
+      `).run(JSON.stringify(attachments), eventId);
+    });
+    return this.teamEvent(eventId);
+  }
+
   redactTeamEvent(eventId: number, redactedAt = Date.now() / 1_000): void {
     this.transaction(() => {
       this.db.prepare(`
@@ -2310,25 +2380,30 @@ export class StateStore {
     `).all(projectId) as Row[]).map((row) => this.toTeamSource(row));
   }
 
-  projectPortals(projectId: string, workspaceId: string): ProjectPortalBinding[] {
+  projectPortals(projectId: string, workspaceId = ""): ProjectPortalBinding[] {
     return (this.db.prepare(`
-      SELECT conversation.id AS portal_id, conversation.project_id,
-        conversation.workspace_id, conversation.chat_id, conversation.topic_id,
+      SELECT portal.id AS portal_id, portal.portal_key, portal.is_default,
+        portal.transport, portal.project_id, portal.workspace_id,
+        conversation.chat_id, conversation.topic_id,
         source.id AS source_id,
-        COALESCE(NULLIF(topic.name, ''), NULLIF(source.title, ''),
+        COALESCE(NULLIF(portal.title, ''), NULLIF(topic.name, ''), NULLIF(source.title, ''),
           'topic ' || CAST(conversation.topic_id AS TEXT)) AS title
-      FROM conversations conversation
+      FROM project_portal_bindings portal
+      JOIN conversations conversation ON conversation.id = portal.conversation_id
       LEFT JOIN team_sources source
         ON source.provider = 'telegram'
        AND source.external_space_id = CAST(conversation.chat_id AS TEXT)
        AND source.external_thread_id = CAST(conversation.topic_id AS TEXT)
       LEFT JOIN telegram_topics topic
         ON topic.chat_id = conversation.chat_id AND topic.topic_id = conversation.topic_id
-      WHERE conversation.project_id = ? AND conversation.workspace_id = ?
+      WHERE portal.project_id = ? AND (? = '' OR portal.workspace_id = ?)
         AND conversation.binding_mode = 'external-readonly'
-      ORDER BY conversation.updated_at DESC, conversation.id
-    `).all(projectId, workspaceId) as Row[]).map((row) => ({
+      ORDER BY portal.is_default DESC, portal.portal_key, portal.id
+    `).all(projectId, workspaceId, workspaceId) as Row[]).map((row) => ({
       portalId: String(row.portal_id),
+      portalKey: String(row.portal_key),
+      isDefault: Number(row.is_default) === 1,
+      transport: String(row.transport),
       projectId: String(row.project_id),
       workspaceId: String(row.workspace_id),
       chatId: Number(row.chat_id),
@@ -2347,6 +2422,19 @@ export class StateStore {
       .find((portal) => portal.portalId === portalId) ?? null;
   }
 
+  resolveProjectPortal(
+    projectId: string,
+    workspaceId: string,
+    requestedPortalKey = "",
+  ): ProjectPortalBinding | null {
+    const portals = this.projectPortals(projectId, workspaceId);
+    if (requestedPortalKey) {
+      const key = projectPortalKey(requestedPortalKey);
+      return portals.find((portal) => portal.portalKey === key) ?? null;
+    }
+    return portals.find((portal) => portal.isDefault) ?? null;
+  }
+
   projectPortalReplyMessageId(portal: ProjectPortalBinding, eventId: number): number | null {
     if (!portal.sourceId || !Number.isSafeInteger(eventId) || eventId <= 0) return null;
     const row = this.db.prepare(`
@@ -2363,6 +2451,11 @@ export class StateStore {
     sourceId?: string;
     query?: string;
     beforeEventId?: number;
+    afterEventId?: number;
+    authorExternalId?: string;
+    occurredAfter?: number;
+    occurredBefore?: number;
+    attachmentsOnly?: boolean;
     limit?: number;
   }): TeamEvent[] {
     const limit = Math.max(1, Math.min(50, Math.trunc(input.limit ?? 20)));
@@ -2370,6 +2463,14 @@ export class StateStore {
     const sourceId = String(input.sourceId ?? "").trim();
     const beforeEventId = Number.isSafeInteger(input.beforeEventId) && Number(input.beforeEventId) > 0
       ? Number(input.beforeEventId)
+      : Number.MAX_SAFE_INTEGER;
+    const afterEventId = Number.isSafeInteger(input.afterEventId) && Number(input.afterEventId) > 0
+      ? Number(input.afterEventId)
+      : 0;
+    const authorExternalId = String(input.authorExternalId ?? "").trim();
+    const occurredAfter = Number.isFinite(input.occurredAfter) ? Number(input.occurredAfter) : 0;
+    const occurredBefore = Number.isFinite(input.occurredBefore)
+      ? Number(input.occurredBefore)
       : Number.MAX_SAFE_INTEGER;
     const rows = this.db.prepare(`
       SELECT DISTINCT event.*
@@ -2383,17 +2484,28 @@ export class StateStore {
         AND conversation.binding_mode = 'external-readonly'
         AND event.synthesis_state <> 'redacted'
         AND event.id < ?
+        AND event.id > ?
         AND (? = '' OR source.id = ?)
         AND (? = '' OR instr(lower(event.text), ?) > 0)
+        AND (? = '' OR event.sender_external_id = ?)
+        AND event.occurred_at >= ?
+        AND event.occurred_at <= ?
+        AND (? = 0 OR event.attachments_json <> '[]')
       ORDER BY event.occurred_at DESC, event.id DESC
       LIMIT ?
     `).all(
       input.projectId,
       beforeEventId,
+      afterEventId,
       sourceId,
       sourceId,
       query,
       query,
+      authorExternalId,
+      authorExternalId,
+      occurredAfter,
+      occurredBefore,
+      input.attachmentsOnly ? 1 : 0,
       limit,
     ) as Row[];
     return rows.map((row) => this.toTeamEvent(row));
@@ -2720,6 +2832,102 @@ export class StateStore {
     return Number(row.count);
   }
 
+  private migrateProjectPortalBindings(): void {
+    const existing = new Set((this.db.prepare(
+      "SELECT conversation_id FROM project_portal_bindings WHERE conversation_id IS NOT NULL",
+    ).all() as Row[]).map((row) => String(row.conversation_id)));
+    const rows = this.db.prepare(`
+      SELECT conversation.*, COALESCE(NULLIF(topic.name, ''),
+        'topic ' || CAST(conversation.topic_id AS TEXT)) AS portal_title
+      FROM conversations conversation
+      LEFT JOIN telegram_topics topic
+        ON topic.chat_id = conversation.chat_id AND topic.topic_id = conversation.topic_id
+      WHERE conversation.binding_mode = 'external-readonly'
+      ORDER BY conversation.project_id, conversation.workspace_id,
+        conversation.created_at, conversation.id
+    `).all() as Row[];
+    for (const row of rows) {
+      const conversationId = String(row.id);
+      if (existing.has(conversationId)) continue;
+      const projectId = String(row.project_id);
+      const workspaceId = String(row.workspace_id);
+      const current = this.db.prepare(`
+        SELECT portal_key, is_default FROM project_portal_bindings
+        WHERE project_id = ? AND workspace_id = ? ORDER BY created_at, id
+      `).all(projectId, workspaceId) as Row[];
+      const usedKeys = new Set(current.map((item) => String(item.portal_key)));
+      const base = usedKeys.size === 0
+        ? "main"
+        : `topic-${Math.max(0, Number(row.topic_id))}`;
+      let portalKey = base;
+      for (let suffix = 2; usedKeys.has(portalKey); suffix += 1) {
+        portalKey = `${base}-${suffix}`.slice(0, 48);
+      }
+      const isDefault = current.some((item) => Number(item.is_default) === 1) ? 0 : 1;
+      const timestamp = Number(row.updated_at ?? row.created_at ?? Date.now() / 1_000);
+      this.db.prepare(`
+        INSERT INTO project_portal_bindings
+          (id, project_id, workspace_id, portal_key, is_default, transport,
+           conversation_id, destination_json, title, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, 'telegram', ?, ?, ?, ?, ?)
+      `).run(
+        conversationId,
+        projectId,
+        workspaceId,
+        portalKey,
+        isDefault,
+        conversationId,
+        JSON.stringify({ chatId: Number(row.chat_id), topicId: Number(row.topic_id) }),
+        String(row.portal_title),
+        timestamp,
+        timestamp,
+      );
+      existing.add(conversationId);
+    }
+    const groups = this.db.prepare(`
+      SELECT DISTINCT project_id, workspace_id FROM project_portal_bindings
+    `).all() as Row[];
+    for (const group of groups) {
+      this.ensureProjectPortalDefault(String(group.project_id), String(group.workspace_id));
+    }
+  }
+
+  private ensureProjectPortalDefault(projectId: string, workspaceId: string): void {
+    const selected = this.db.prepare(`
+      SELECT id FROM project_portal_bindings
+      WHERE project_id = ? AND workspace_id = ? AND is_default = 1 LIMIT 1
+    `).get(projectId, workspaceId) as Row | undefined;
+    if (selected) return;
+    const fallback = this.db.prepare(`
+      SELECT id FROM project_portal_bindings
+      WHERE project_id = ? AND workspace_id = ? ORDER BY created_at, id LIMIT 1
+    `).get(projectId, workspaceId) as Row | undefined;
+    if (fallback) {
+      this.db.prepare(`
+        UPDATE project_portal_bindings SET is_default = 1, updated_at = ? WHERE id = ?
+      `).run(Date.now() / 1_000, fallback.id as SQLInputValue);
+    }
+  }
+
+  private nextProjectPortalKey(
+    projectId: string,
+    workspaceId: string,
+    topicId: number,
+  ): string {
+    const rows = this.db.prepare(`
+      SELECT portal_key FROM project_portal_bindings
+      WHERE project_id = ? AND workspace_id = ?
+    `).all(projectId, workspaceId) as Row[];
+    const used = new Set(rows.map((row) => String(row.portal_key)));
+    if (!used.has("main")) return "main";
+    const base = `topic-${Math.max(0, topicId)}`;
+    let candidate = base;
+    for (let suffix = 2; used.has(candidate); suffix += 1) {
+      candidate = `${base}-${suffix}`.slice(0, 48);
+    }
+    return candidate;
+  }
+
   static conversationId(chatId: number, topicId: number): string {
     const digest = createHash("sha256").update(`${chatId}:${topicId}`).digest("hex").slice(0, 20);
     return `tg-${digest}`;
@@ -2731,6 +2939,7 @@ export class StateStore {
     projectId: string,
     workspaceId: string,
     bindingMode: ConversationBindingMode = "project",
+    portalOptions: ProjectPortalOptions = {},
   ): Conversation {
     const now = Date.now() / 1000;
     const conversationId = StateStore.conversationId(chatId, topicId);
@@ -2738,6 +2947,9 @@ export class StateStore {
       const old = this.db
         .prepare("SELECT project_id, workspace_id, binding_mode FROM conversations WHERE id = ?")
         .get(conversationId) as Row | undefined;
+      const oldPortal = this.db.prepare(`
+        SELECT * FROM project_portal_bindings WHERE conversation_id = ?
+      `).get(conversationId) as Row | undefined;
       const changed = Boolean(
         old && (
           old.project_id !== projectId ||
@@ -2781,6 +2993,60 @@ export class StateStore {
           "UPDATE pending_inputs SET state = 'consumed' WHERE conversation_id = ? AND state = 'pending'",
         ).run(conversationId);
       }
+      if (oldPortal) {
+        this.db.prepare("DELETE FROM project_portal_bindings WHERE id = ?")
+          .run(oldPortal.id as SQLInputValue);
+      }
+      if (bindingMode === "external-readonly") {
+        const portalKey = portalOptions.portalKey === undefined
+          ? oldPortal && oldPortal.project_id === projectId && oldPortal.workspace_id === workspaceId
+            ? String(oldPortal.portal_key)
+            : this.nextProjectPortalKey(projectId, workspaceId, topicId)
+          : projectPortalKey(portalOptions.portalKey);
+        const existingDefault = this.db.prepare(`
+          SELECT id FROM project_portal_bindings
+          WHERE project_id = ? AND workspace_id = ? AND is_default = 1 LIMIT 1
+        `).get(projectId, workspaceId) as Row | undefined;
+        const isDefault = portalOptions.isDefault === undefined
+          ? oldPortal && oldPortal.project_id === projectId && oldPortal.workspace_id === workspaceId
+            ? Number(oldPortal.is_default) === 1
+            : !existingDefault
+          : portalOptions.isDefault;
+        if (isDefault) {
+          this.db.prepare(`
+            UPDATE project_portal_bindings SET is_default = 0, updated_at = ?
+            WHERE project_id = ? AND workspace_id = ?
+          `).run(now, projectId, workspaceId);
+        }
+        const topic = this.telegramTopic(chatId, topicId);
+        this.db.prepare(`
+          INSERT INTO project_portal_bindings
+            (id, project_id, workspace_id, portal_key, is_default, transport,
+             conversation_id, destination_json, title, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, 'telegram', ?, ?, ?, ?, ?)
+        `).run(
+          conversationId,
+          projectId,
+          workspaceId,
+          portalKey,
+          isDefault ? 1 : 0,
+          conversationId,
+          JSON.stringify({ chatId, topicId }),
+          topic?.name || `topic ${topicId}`,
+          oldPortal?.created_at ?? now,
+          now,
+        );
+        this.ensureProjectPortalDefault(projectId, workspaceId);
+      }
+      if (oldPortal && (
+        oldPortal.project_id !== projectId || oldPortal.workspace_id !== workspaceId ||
+        bindingMode !== "external-readonly"
+      )) {
+        this.ensureProjectPortalDefault(
+          String(oldPortal.project_id),
+          String(oldPortal.workspace_id),
+        );
+      }
     });
     return this.get(conversationId);
   }
@@ -2791,7 +3057,13 @@ export class StateStore {
         .prepare("SELECT * FROM conversations WHERE chat_id = ? AND topic_id = ?")
         .get(chatId, topicId) as Row | undefined;
       if (!row) return null;
+      const portal = this.db.prepare(`
+        SELECT project_id, workspace_id FROM project_portal_bindings WHERE conversation_id = ?
+      `).get(row.id as SQLInputValue) as Row | undefined;
       this.db.prepare("DELETE FROM conversations WHERE id = ?").run(row.id as SQLInputValue);
+      if (portal) {
+        this.ensureProjectPortalDefault(String(portal.project_id), String(portal.workspace_id));
+      }
       return this.toConversation(row);
     });
   }

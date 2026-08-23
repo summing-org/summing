@@ -12,6 +12,9 @@ test("Project portal outbox persists, retries, verifies and deduplicates a docum
   const store = new ProjectPortalOutboxStore(root, 1_000, () => clock);
   const portal: ProjectPortalBinding = {
     portalId: "tg-portal",
+    portalKey: "main",
+    isDefault: true,
+    transport: "telegram",
     projectId: "demo",
     workspaceId: "repo",
     chatId: -100500,
@@ -60,6 +63,48 @@ test("Project portal outbox persists, retries, verifies and deduplicates a docum
     assert.equal(sent.telegramMessageId, 245);
     assert.equal(existsSync(join(store.root, sent.id, "attachment.bin")), false);
     assert.deepEqual(store.claimDue(), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an interrupted send becomes uncertain and requires an explicit retry", () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-project-portal-uncertain-"));
+  let clock = new Date("2026-08-23T08:00:00.000Z");
+  const portal: ProjectPortalBinding = {
+    portalId: "tg-portal",
+    portalKey: "reports",
+    isDefault: true,
+    transport: "telegram",
+    projectId: "demo",
+    workspaceId: "repo",
+    chatId: -100500,
+    topicId: 9,
+    sourceId: null,
+    title: "Reports",
+  };
+  try {
+    const first = new ProjectPortalOutboxStore(root, 1_000, () => clock);
+    const queued = first.enqueue({
+      projectId: "demo",
+      workspaceId: "repo",
+      portal,
+      text: "Проверить результат",
+      idempotencyKey: "turn-uncertain",
+      createdBy: 42,
+      originConversationId: "internal-topic",
+    });
+    assert.equal(first.claimDue()[0]?.status, "sending");
+    const reopened = new ProjectPortalOutboxStore(root, 1_000, () => clock);
+    assert.equal(reopened.get(queued.id)?.status, "uncertain");
+    assert.deepEqual(reopened.claimDue(), []);
+    assert.equal(reopened.notificationDue()[0]?.id, queued.id);
+    reopened.markNotificationFailed(queued.id);
+    assert.deepEqual(reopened.notificationDue(), []);
+    clock = new Date("2026-08-23T08:00:16.000Z");
+    assert.equal(reopened.notificationDue()[0]?.id, queued.id);
+    assert.equal(reopened.retry(queued.id).status, "pending");
+    assert.equal(reopened.claimDue()[0]?.attempts, 1);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

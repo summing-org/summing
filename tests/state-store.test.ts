@@ -137,6 +137,44 @@ test("external read-only bindings expose their durable topic history to the Proj
   }
 });
 
+test("Project portals resolve stable logical keys and exactly one default", () => {
+  const { root, store } = tempStore();
+  try {
+    const main = store.bind(-100500, 9, "ash-telegrams", "repo", "external-readonly", {
+      portalKey: "main",
+      isDefault: true,
+    });
+    const reports = store.bind(-100500, 10, "ash-telegrams", "repo", "external-readonly", {
+      portalKey: "reports",
+      isDefault: false,
+    });
+    assert.equal(store.resolveProjectPortal("ash-telegrams", "repo")?.portalId, main.id);
+    assert.equal(
+      store.resolveProjectPortal("ash-telegrams", "repo", "reports")?.portalId,
+      reports.id,
+    );
+    store.bind(-100500, 10, "ash-telegrams", "repo", "external-readonly", {
+      portalKey: "reports",
+      isDefault: true,
+    });
+    const portals = store.projectPortals("ash-telegrams", "repo");
+    assert.deepEqual(
+      portals.map((portal) => [portal.portalKey, portal.isDefault]),
+      [["reports", true], ["main", false]],
+    );
+    assert.equal(store.resolveProjectPortal("ash-telegrams", "repo")?.portalKey, "reports");
+    assert.throws(
+      () => store.bind(-100500, 11, "ash-telegrams", "repo", "external-readonly", {
+        portalKey: "Reports!",
+      }),
+      /portalKey/,
+    );
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("persists the model-egress switch and rolls usage into the active weekly window", () => {
   const { root, path, store } = tempStore();
   try {

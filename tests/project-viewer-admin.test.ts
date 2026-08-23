@@ -78,6 +78,7 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
   );
   const projects = new ProjectCatalog(config, state);
   const bindingNotifications: Array<[number, number]> = [];
+  const portalActions: string[] = [];
   let modelEgressEnabled = true;
   const modelEgressOverview = () => ({
     enabled: modelEgressEnabled,
@@ -107,6 +108,17 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
       setEnabled: (enabled) => {
         modelEgressEnabled = enabled;
         return modelEgressOverview();
+      },
+    },
+    {
+      overview: () => ({ counts: { pending: 1 }, deliveries: [{ id: "a".repeat(64) }] }),
+      retry: (id) => {
+        portalActions.push(`retry:${id}`);
+        return { id, status: "pending" };
+      },
+      cancel: (id) => {
+        portalActions.push(`cancel:${id}`);
+        return { id, status: "cancelled" };
       },
     },
   );
@@ -150,6 +162,20 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
 
   try {
     await viewer.start();
+    const portalOverview = await fetch(`${endpoint}/api/viewer/admin/project-portals`, {
+      headers: auth(1),
+    });
+    assert.equal(portalOverview.status, 200);
+    assert.deepEqual(await portalOverview.json(), {
+      counts: { pending: 1 },
+      deliveries: [{ id: "a".repeat(64) }],
+    });
+    const portalRetry = await fetch(
+      `${endpoint}/api/viewer/admin/project-portals/outbox/${"a".repeat(64)}/retry`,
+      { method: "POST", headers: auth(1) },
+    );
+    assert.equal(portalRetry.status, 200, await portalRetry.text());
+    assert.deepEqual(portalActions, [`retry:${"a".repeat(64)}`]);
 
     const page = await fetch(`${endpoint}/admin`);
     assert.equal(page.status, 200);
@@ -331,12 +357,16 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
         projectId: "client",
         workspaceId: "backend",
         bindingMode: "external-readonly",
+        portalKey: "reports",
+        isDefault: true,
       }),
     });
     assert.equal(bound.status, 200, await bound.text());
     const conversation = state.byTopic(-300, 44)!;
     assert.equal(conversation.projectId, "client");
     assert.equal(conversation.bindingMode, "external-readonly");
+    assert.equal(state.projectPortal("client", "backend", conversation.id)?.portalKey, "reports");
+    assert.equal(state.projectPortal("client", "backend", conversation.id)?.isDefault, true);
     assert.deepEqual(bindingNotifications, [[-300, 44]]);
 
     const unchanged = await fetch(`${endpoint}/api/viewer/admin/bindings`, {

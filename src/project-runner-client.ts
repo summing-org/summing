@@ -50,6 +50,7 @@ export interface RunnerPortalMessage {
   type: "text" | "document";
   text: string;
   artifact: string | null;
+  portalKey?: string | null;
 }
 
 export interface RunnerPortalMessageBatch {

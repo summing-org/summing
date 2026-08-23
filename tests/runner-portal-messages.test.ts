@@ -22,6 +22,7 @@ test("captures a bounded generic batch of runner portal messages", () => {
         type: "document",
         text: "Информационный dry-run готов.",
         artifact: "report.html",
+        portalKey: "reports",
       },
     ],
   }));
@@ -44,6 +45,7 @@ test("captures a bounded generic batch of runner portal messages", () => {
         type: "document",
         text: "Информационный dry-run готов.",
         artifact: "report.html",
+        portalKey: "reports",
       },
     ]);
     assert.deepEqual(store.capture({

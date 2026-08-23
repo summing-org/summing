@@ -53,6 +53,12 @@ export interface TeamModelEgressAdmin {
   setEnabled(enabled: boolean): Promise<Record<string, unknown>> | Record<string, unknown>;
 }
 
+export interface ProjectPortalAdmin {
+  overview(): Promise<Record<string, unknown>> | Record<string, unknown>;
+  retry(id: string): Promise<unknown> | unknown;
+  cancel(id: string): Promise<unknown> | unknown;
+}
+
 interface ViewerRepositoryConnection {
   mode: "none" | "external" | "managed-ssh";
   publicKey: string;
@@ -192,6 +198,7 @@ export class ProjectViewerServer {
     }),
     readonly nodeRecovery?: NodeRecoveryAdmin,
     readonly teamModelEgress?: TeamModelEgressAdmin,
+    readonly projectPortalAdmin?: ProjectPortalAdmin,
   ) {
     this.auth = new ViewerAuthenticator(
       config.telegramToken,
@@ -335,6 +342,30 @@ export class ProjectViewerServer {
     if (request.method === "GET" && url.pathname === "/api/viewer/admin") {
       this.requireAdminAccess(telegramUser);
       json(response, 200, this.adminOverview());
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/api/viewer/admin/project-portals") {
+      this.requireAdminAccess(telegramUser);
+      json(response, 200, await this.requireProjectPortalAdmin().overview());
+      return;
+    }
+    const portalOutboxAction = url.pathname.match(
+      /^\/api\/viewer\/admin\/project-portals\/outbox\/([a-f0-9]{64})\/(retry|cancel)$/,
+    );
+    if (request.method === "POST" && portalOutboxAction) {
+      this.requireAdminAccess(telegramUser);
+      try {
+        const admin = this.requireProjectPortalAdmin();
+        json(
+          response,
+          200,
+          portalOutboxAction[2] === "retry"
+            ? await admin.retry(portalOutboxAction[1]!)
+            : await admin.cancel(portalOutboxAction[1]!),
+        );
+      } catch (error) {
+        throw new ViewerHttpError(409, error instanceof Error ? error.message : String(error));
+      }
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/viewer/admin/model-egress") {
@@ -729,10 +760,35 @@ export class ProjectViewerServer {
         throw new ViewerHttpError(400, "некорректный bindingMode");
       }
       const current = this.state.byTopic(chatId, topicId);
+      const currentPortal = current?.bindingMode === "external-readonly"
+        ? this.state.projectPortal(current.projectId, current.workspaceId, current.id)
+        : null;
+      const requestedPortalKey = bindingMode === "external-readonly"
+        ? String(body?.portalKey ?? currentPortal?.portalKey ?? "").trim().toLowerCase()
+        : "";
+      const requestedDefault = bindingMode === "external-readonly"
+        ? body?.isDefault === undefined
+          ? currentPortal?.isDefault
+          : body.isDefault === true
+        : false;
+      if (
+        bindingMode === "external-readonly" &&
+        requestedPortalKey &&
+        !/^[a-z][a-z0-9_-]{0,47}$/.test(requestedPortalKey)
+      ) {
+        throw new ViewerHttpError(
+          400,
+          "portalKey: 1-48 символов, строчные латинские буквы, цифры, _ и -",
+        );
+      }
       if (
         current?.projectId === project.id &&
         current.workspaceId === workspace.id &&
-        current.bindingMode === bindingMode
+        current.bindingMode === bindingMode &&
+        (bindingMode !== "external-readonly" || (
+          (!requestedPortalKey || currentPortal?.portalKey === requestedPortalKey) &&
+          (requestedDefault === undefined || currentPortal?.isDefault === requestedDefault)
+        ))
       ) {
         json(response, 200, { conversation: current });
         return;
@@ -748,13 +804,24 @@ export class ProjectViewerServer {
           "в выбранном топике есть активная или ожидающая задача; сначала отмените её",
         );
       }
-      const conversation = this.state.bind(
-        chatId,
-        topicId,
-        project.id,
-        workspace.id,
-        bindingMode as "project" | "external-readonly",
-      );
+      let conversation: Conversation;
+      try {
+        conversation = this.state.bind(
+          chatId,
+          topicId,
+          project.id,
+          workspace.id,
+          bindingMode as "project" | "external-readonly",
+          bindingMode === "external-readonly"
+            ? {
+                ...(requestedPortalKey ? { portalKey: requestedPortalKey } : {}),
+                ...(requestedDefault === undefined ? {} : { isDefault: requestedDefault }),
+              }
+            : {},
+        );
+      } catch (error) {
+        throw new ViewerHttpError(409, error instanceof Error ? error.message : String(error));
+      }
       this.afterTopicBound(chatId, topicId);
       json(response, 200, { conversation });
       return;
@@ -1133,6 +1200,23 @@ export class ProjectViewerServer {
                 projectId: conversation.projectId,
                 workspaceId: conversation.workspaceId,
                 bindingMode: conversation.bindingMode,
+                ...(conversation.bindingMode === "external-readonly"
+                  ? (() => {
+                      const portal = this.state.projectPortal(
+                        conversation.projectId,
+                        conversation.workspaceId,
+                        conversation.id,
+                      );
+                      return portal
+                        ? {
+                            portalId: portal.portalId,
+                            portalKey: portal.portalKey,
+                            portalDefault: portal.isDefault,
+                            portalTransport: portal.transport,
+                          }
+                        : {};
+                    })()
+                  : {}),
                 busy:
                   conversation.activeTurnId !== null ||
                   this.state.pendingAll(conversation.id).length > 0 ||
@@ -1162,6 +1246,13 @@ export class ProjectViewerServer {
     if (!this.deployment.available) {
       throw new ViewerHttpError(503, "automatic deployment is not configured");
     }
+  }
+
+  private requireProjectPortalAdmin(): ProjectPortalAdmin {
+    if (!this.projectPortalAdmin) {
+      throw new ViewerHttpError(503, "Project portal control plane is unavailable");
+    }
+    return this.projectPortalAdmin;
   }
 
   private async withRepositoryOperation<T>(

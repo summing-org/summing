@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -39,7 +39,14 @@ function fixture(): {
 test("runner messages use the same durable Project portal transport", async () => {
   const { root, runtime } = fixture();
   const internal = runtime.state.bind(1, 0, "demo", "repo");
-  runtime.state.bind(-100500, 9, "demo", "repo", "external-readonly");
+  runtime.state.bind(-100500, 9, "demo", "repo", "external-readonly", {
+    portalKey: "main",
+    isDefault: true,
+  });
+  runtime.state.bind(-100501, 10, "demo", "repo", "external-readonly", {
+    portalKey: "reports",
+    isDefault: false,
+  });
   const job: RunnerJob = {
     id: "768d307d-1234-4567-89ab-123456789012",
     projectId: "demo",
@@ -59,6 +66,7 @@ test("runner messages use the same durable Project portal transport", async () =
       type: "document",
       text: "Информационный dry-run готов.",
       artifact: "report.html",
+      portalKey: "reports",
     }],
     createdAt: "2026-08-20T08:00:00.000Z",
   });
@@ -91,12 +99,12 @@ test("runner messages use the same durable Project portal transport", async () =
     ).sendRunnerPortalMessages(job, internal.id, 1);
     assert.equal(delivered, true);
     assert.deepEqual(deliveries, [{
-      chatId: -100500,
+      chatId: -100501,
       fileName: "report.html",
-      topicId: 9,
+      topicId: 10,
       caption: "Информационный dry-run готов.",
     }]);
-    const source = runtime.state.teamSourceForProvider("telegram", "-100500", "9");
+    const source = runtime.state.teamSourceForProvider("telegram", "-100501", "10");
     assert.ok(source);
     assert.equal(runtime.state.recentTeamEvents(source.spaceId, source.id)[0]?.externalEventId, "245");
   } finally {
@@ -204,10 +212,67 @@ test("an authorized Project agent can forward an incoming workspace attachment",
       senderExternalId: "42",
       senderDisplayName: "Customer",
       text: "Пожалуйста, пришлите итоговый вариант.",
+      attachments: [{
+        kind: "document",
+        fileName: "customer-notes.txt",
+        mimeType: "text/plain",
+        size: 14,
+        providerFileId: "telegram-notes",
+      }],
       occurredAt: Date.now() / 1_000,
       administratorUserId: 1,
     });
     assert.ok(customerEvent);
+    runtime.knowledgeSync.store.grantConsent({
+      sourceId: customerEvent.sourceId,
+      telegramUserId: 42,
+      proof: "test fixture consent",
+    });
+    const storedArtifact = runtime.projectPortalArtifacts.store({
+      projectId: "demo",
+      workspaceId: "repo",
+      portalId: portal.id,
+      portalKey: "main",
+      eventId: customerEvent.id,
+      telegramMessageId: 78061,
+      providerFileId: "telegram-notes",
+      kind: "document",
+      fileName: "customer-notes.txt",
+      mimeType: "text/plain",
+      data: new TextEncoder().encode("customer notes"),
+    });
+    runtime.state.attachTeamEventArtifact(customerEvent.id, {
+      providerFileId: "telegram-notes",
+      artifactId: storedArtifact.id,
+      sha256: storedArtifact.sha256,
+    });
+    const history = await runtime.projectPortalTool(
+      {
+        projectId: "demo",
+        workspaceId: "repo",
+        conversationId: internal.id,
+        actorUserId: 1,
+        turnId: "turn-forward",
+      },
+      "history",
+      { portalKey: "main", attachmentsOnly: true },
+    ) as { events: Array<{ portalKey: string; attachments: Array<{ artifactId: string }> }> };
+    assert.equal(history.events[0]?.portalKey, "main");
+    assert.equal(history.events[0]?.attachments[0]?.artifactId, storedArtifact.id);
+    const materialized = await runtime.projectPortalTool(
+      {
+        projectId: "demo",
+        workspaceId: "repo",
+        conversationId: internal.id,
+        actorUserId: 1,
+        turnId: "turn-forward",
+      },
+      "materialize_attachment",
+      { attachmentId: storedArtifact.id },
+    ) as { relativePath: string };
+    const materializedPath = join(repository, materialized.relativePath);
+    assert.equal(existsSync(materializedPath), true);
+    assert.equal(readFileSync(materializedPath, "utf8"), "customer notes");
     const textResult = await runtime.projectPortalTool(
       {
         projectId: "demo",
@@ -231,6 +296,19 @@ test("an authorized Project agent can forward an incoming workspace attachment",
       topicId: 9,
       replyTo: 78061,
     }]);
+    const forwardedArtifact = await runtime.projectPortalTool(
+      {
+        projectId: "demo",
+        workspaceId: "repo",
+        conversationId: internal.id,
+        actorUserId: 1,
+        turnId: "turn-forward",
+      },
+      "send",
+      { portalKey: "main", attachmentIds: [storedArtifact.id], text: "Файл заказчика" },
+    ) as Record<string, unknown>;
+    assert.equal(forwardedArtifact.status, "sent");
+    assert.equal(deliveries[1]?.data, "customer notes");
   } finally {
     runtime.state.close();
     await runtime.telegram.close();

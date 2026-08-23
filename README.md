@@ -1,4 +1,4 @@
-# SUMMING 9.17
+# SUMMING 9.18
 
 SUMMING — один постоянно живущий агент с одним администратором и назначаемыми
 владельцами проектов. Он работает на Linux VPS, принимает команды из Telegram
@@ -115,14 +115,18 @@ Team Space: создаётся при подключении командног�
   по всей доступной истории внешних порталов. Комментарий заказчика — контекст,
   а не команда на изменение, запуск или публикацию;
 - универсальный Project portal transport позволяет внутреннему авторизованному
-  агенту по явной просьбе владельца отправить во внешний портал текст или файл
-  из workspace, включая входящее вложение, ранее сохранённый Project-файл или
-  runner-артефакт. Сообщение сначала попадает в постоянную outbox-очередь с
-  idempotency key, SHA-256 вложения и retry, затем его отправляет Telegram-бот
-  SUMMING. Маршрут всегда берётся из привязки Project/Workspace; произвольные
-  host paths и Telegram-токен проекту недоступны. Dry-run использует тот же
-  транспорт через обычный `portal-messages.json`, без отдельного report bridge,
-  кнопок и callback state machine.
+  агенту по явной просьбе владельца отправить во внешний портал текст и до десяти
+  файлов из workspace, включая долговечно сохранённые входящие вложения или
+  runner-артефакты. Несколько destinations получают логические `portalKey`
+  (`main`, `reports`, `legal`), ровно один default; Telegram IDs скрыты от агента,
+  а schema остаётся transport-neutral. Сообщение сначала попадает в ограниченную
+  постоянную outbox-очередь с idempotency key, SHA-256, retry/dead-letter и
+  администраторскими Retry/Cancel. Рестарт во время отправки создаёт `uncertain`,
+  который никогда не повторяется автоматически. Входящие файлы после secret scan
+  хранятся AES-256-GCM до raw-retention и доступны только авторизованному Project
+  turn по `artifactId`. Dry-run использует тот же транспорт через обычный
+  `portal-messages.json` с необязательным `portalKey`, без report bridge, кнопок
+  согласования и callback state machine.
 
 ## Требования
 
@@ -422,7 +426,8 @@ key. В durable job хранится только его AES-GCM envelope, за�
 Импорт проходит HMAC/checksum verification и dry-run, после чего требует явно
 принять consent-записи; локальный revoke имеет приоритет. Связанные project IDs
 показываются как зависимости, которые нужно сопоставить или provision на целевой
-ноде. Коннекторы, MTProto-сессии, operational queues и outbox в bundle не входят,
+ноде. Коннекторы, MTProto-сессии, operational queues и Project Portal outbox в
+Team Space bundle не входят,
 а `search.sqlite` пересобирается из импортированного canonical-слоя. После import
 Telegram-источники явно перепривязываются к локальному MTProto-коннектору.
 
@@ -432,7 +437,9 @@ Team Space bundle и node recovery решают разные задачи. Team 
 бизнес-библиотеку между нодами. Формат `summing-node-recovery` v1 восстанавливает
 состояние конкретной ноды после rebuild: основной SQLite без физической копии
 Team Space, runner-control, conversations, identity/project memory, Codex session
-JSONL, run artifacts, attachments и Git workspaces. Каждый workspace представлен Git bundle,
+JSONL, run artifacts, attachments, Project Portal outbox, зашифрованные входящие
+portal-artifacts и Git workspaces. Ключ portal-artifacts относится к secrets и
+попадает только в export с `INCLUDE SECRETS`. Каждый workspace представлен Git bundle,
 отдельными staged/working binary patches и untracked-файлами; дополнительно
 обнаруживаются Git-каталоги в managed repository/worktree roots, даже если они
 уже не перечислены в project catalog. `node_modules`, `dist` и caches не архивируются.

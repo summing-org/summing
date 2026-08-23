@@ -1,8 +1,8 @@
-# SUMMING 9.17: архитектура, эксплуатация и разработка
+# SUMMING 9.18: архитектура, эксплуатация и разработка
 
-> Версия: **9.17.0**
+> Версия: **9.18.0**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
-> Последняя сверка с кодом: **19 августа 2026 года**.
+> Последняя сверка с кодом: **23 августа 2026 года**.
 
 Это единый технический документ о проекте. Он описывает продуктовую модель,
 архитектуру, состояние на диске, протокол выполнения, авторизацию ChatGPT,
@@ -1024,46 +1024,65 @@ Workspace сначала фиксируют точные `jobId/name` в отд�
 без symlink, переносит его в приватный `.trash` на том же filesystem и обновляет
 `artifactCount`. Результат различает успешно перемещённые и неудавшиеся цели.
 
-### 9.1. Approval bridge для project runner
+### 9.2. Project Portal: история, маршруты и доставка
 
-Одноразовый project-контейнер не принимает Telegram updates и не получает token
-основного бота. Если успешный manual `dry-run` требует согласования, приложение
-создаёт allowlisted `approval-request.json` рядом с `report.html`:
+Внешний Telegram-топик — постоянный read-only портал Project, а не approval
+state machine. Любой доступный ответ заказчика сохраняется в общей истории
+Project как недоверенное evidence: он не становится автоматически ТЗ, командой,
+разрешением на изменение или публикацию. Отдельных feedback-сессий,
+approve/reject-кнопок и обязательного feedback-history нет. Внутренний агент
+читает историю через `project_portal.history`, обсуждает смысл с владельцем в
+рабочем топике и действует только по его явному указанию.
+
+Один Project/Workspace может иметь несколько логических порталов. Свойство
+`portalKey` (`main`, `reports`, `legal`) выражает бизнес-намерение и не содержит
+`chat_id` или `topic_id`; транспорт хранится отдельно. Ровно одна привязка имеет
+`is_default=1`. `project_portal.send` и runner-сообщение без `portalKey`
+используют default, с ключом — точное назначение. Неизвестный ключ не угадывается.
+Сегодня destination реализован через Telegram, но таблица привязок и outbox
+сохраняют `transport` и нейтральный `destination_json` для будущих Email/MAX
+адаптеров. Администратор задаёт ключ/default в Mini App либо резервной командой:
+
+```text
+/bind_external_topic <chat_id> <topic_id> <project> [workspace] [portalKey] [default]
+```
+
+Runner публикует декларативный bounded `portal-messages.json`; каждое сообщение
+может выбрать маршрут независимо:
 
 ```json
 {
   "schemaVersion": 1,
-  "planId": "768d307d-8bd1-49ea-9ae5-ee6de0793e1d",
-  "digest": "f3a497ee88cdd0e3f2d9343ccceb38f4a56d80d13443b40fd99213c5cda2b314",
-  "statePath": "approval-plans/768d307d-8bd1-49ea-9ae5-ee6de0793e1d/approval.json",
-  "reportArtifact": "report.html",
-  "message": "План готов к согласованию."
+  "messages": [
+    {
+      "id": "dry-run-report",
+      "type": "document",
+      "text": "Информационный dry-run готов.",
+      "artifact": "report.html",
+      "portalKey": "reports"
+    }
+  ]
 }
 ```
 
-Runner принимает только bounded regular JSON, фиксированный `report.html` и
-относительный `statePath` внутри project data без symlink/traversal. `planId` и
-SHA-256 обязаны совпасть с pending project state. После завершения job runner
-сохраняет приватную запись в `SUMMING_RUNNER_DATA/approval-events`; callback token
-не передаётся project-контейнеру.
+Runtime копирует payload в filesystem outbox до Bot API call. Запись содержит
+idempotency key, SHA-256, route, actor, attempts и origin Conversation. Временная
+ошибка повторяется экспоненциально не более пяти раз; постоянная или исчерпавшая
+лимит доставка становится `dead-letter`. Если процесс перезапустился в состоянии
+`sending`, запись становится `uncertain` и никогда не повторяется автоматически:
+Telegram мог принять сообщение до падения. Внутренний топик получает предупреждение,
+а администратор после ручной проверки выбирает Retry или Cancel в Mini App.
+Один drain обрабатывает не более 20 записей; очередь ограничена 1000 активными
+записями и 250 МБ вложений. `sent/cancelled` хранятся 30 дней,
+`dead-letter/uncertain` — 90 дней.
 
-Runtime отправляет отчёт через основной Bot API в conversation, из которой был
-запущен dry-run. Сначала сообщение создаётся без активных кнопок, затем runner
-атомарно связывает его с `chat_id`, `message_thread_id`, `message_id` и actor user
-ID, и только после этого runtime добавляет inline-кнопки. `callback_query`
-принимается постоянным Telegram update loop. Runner повторно сверяет весь scope,
-текущий pending state, `planId` и digest; повтор того же callback идемпотентен,
-противоположное решение отклоняется.
-
-Нажатие кнопки не меняет project `approval.json` на `approved`: это сохранило бы
-решение и публикацию в одном live-run. Вместо этого runner пишет отдельное
-approval event и при следующем `run` монтирует его read-only как
-`SUMMING_APPROVAL_EVENT_PATH`. Первый live-run обязан ещё раз сверить `planId` и
-digest, перенести решение в собственный project state и завершиться без
-публикации. Только второй отдельный live-run видит уже локальный `approved`, снова
-проверяет digest неизменяемого плана и публикует. Runner объявляет контракт через
-`SUMMING_APPROVAL_BRIDGE=true` и `SUMMING_PROJECT_DATA_PATH=/app/data`; bot token и
-чтение Telegram history контейнеру для согласования не нужны.
+Входящий файл внешнего портала после secret scan шифруется локальным
+AES-256-GCM ключом, получает SHA-256, `artifactId` и raw-retention Team Space.
+История возвращает метаданные, но не байты. Только активный авторизованный owner
+turn может расшифровать файл в `.summing-runtime/attachments/` через
+`project_portal.materialize_attachment` либо переслать его по `attachmentId`.
+`send` принимает до десяти workspace paths или durable attachment IDs. Key и
+encrypted artifacts включены в node recovery (key — только при INCLUDE SECRETS).
 
 Dynamic tools нельзя добавить при `thread/resume`, поэтому Conversation хранит
 версию capability. При первом write-turn существующего topic старый editor
@@ -1083,6 +1102,7 @@ thread без `runner-control-v1` атомарно переносится в `pr
 | `/project_clone <project> <primary_owner_id> <repo> <git_url>` | Клонировать управляемый Git Project; только администратор в личном чате. |
 | `/topics` | Список обнаруженных Telegram chats/topics и их bindings; только администратор в личном чате. |
 | `/bind_topic <chat_id> <topic_id> <project> [workspace]` | Удалённо привязать обнаруженный topic; только администратор в личном чате. |
+| `/bind_external_topic <chat_id> <topic_id> <project> [workspace] [portalKey] [default]` | Привязать именованный внешний read-only портал; основной интерфейс — Admin Mini App. |
 | `/projects` | Список доступных отправителю Project и Workspace. |
 | `/bind <project> [workspace]` | Привязать текущий topic. |
 | `/status` | Версия SUMMING, account, plan, binding, active/pending. |
@@ -1138,6 +1158,9 @@ $SUMMING_DATA_DIR/
 │   └── <project-id>/<repo-id>/
 ├── run-artifacts/                 # before/after snapshots и patch каждого editor Run
 │   └── <conversation-id>/<run-id>/
+├── project-portal-outbox/         # durable delivery records и ещё не отправленные payloads
+├── project-portal-artifacts/      # AES-256-GCM blobs входящих файлов и metadata
+├── project-portal-artifacts.key   # локальный 32-байтовый ключ, mode 0600
 └── worktrees/                     # default SUMMING_WORKTREE_ROOT
     └── <conversation-id>/
 ```
@@ -1150,6 +1173,7 @@ $SUMMING_DATA_DIR/
 SQLite хранит:
 
 - binding `chat_id/topic_id → project/workspace`;
+- логические `project/workspace/portalKey → transport destination` и ровно один default;
 - editor и read-only Codex thread id;
 - активный turn и Telegram stream message id;
 - pending steer/follow-up с `access_mode`, `response_mode`, Telegram user id и
@@ -1169,6 +1193,7 @@ SQLite хранит:
 | Таблица | Содержимое |
 |---|---|
 | `conversations` | Binding, editor/read-only threads, active turn, stream message и worktree path. |
+| `project_portal_bindings` | Transport-neutral portalKey/default/destination; Telegram Conversation — текущий adapter. |
 | `pending_inputs` | Очередь, access/response mode, Telegram user id, attachment JSON и состояние обработки. |
 | `runs` | Access/response mode, prompt, response, status, error и время выполнения. |
 | `runtime_state` | Сейчас только Telegram update offset. |
@@ -1642,7 +1667,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "9.17.0",
+  "version": "9.18.0",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",

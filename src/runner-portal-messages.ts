@@ -15,6 +15,7 @@ import {
 import { dirname, resolve } from "node:path";
 
 const IDENTIFIER = /^[A-Za-z0-9._-]{1,120}$/;
+const PORTAL_KEY = /^[a-z][a-z0-9_-]{0,47}$/;
 const MAXIMUM_REQUEST_BYTES = 64_000;
 const MAXIMUM_ARTIFACT_BYTES = 8_000_000;
 const MAXIMUM_MESSAGES = 20;
@@ -24,6 +25,7 @@ export interface RunnerPortalMessage {
   type: "text" | "document";
   text: string;
   artifact: string | null;
+  portalKey?: string;
 }
 
 export interface RunnerPortalMessageBatch {
@@ -125,7 +127,9 @@ export class RunnerPortalMessageStore {
         throw new RunnerPortalMessageError(409, "portal message must be an object");
       }
       const item = value as Record<string, unknown>;
-      if (Object.keys(item).some((key) => !["id", "type", "text", "artifact"].includes(key))) {
+      if (Object.keys(item).some((key) =>
+        !["id", "type", "text", "artifact", "portalKey"].includes(key)
+      )) {
         throw new RunnerPortalMessageError(409, "portal message contains unsupported fields");
       }
       const id = String(item.id ?? "");
@@ -134,12 +138,18 @@ export class RunnerPortalMessageStore {
       const artifact = item.artifact === undefined || item.artifact === null
         ? null
         : String(item.artifact);
+      const portalKey = item.portalKey === undefined || item.portalKey === null
+        ? null
+        : String(item.portalKey).trim().toLowerCase();
       if (!IDENTIFIER.test(id) || identifiers.has(id)) {
         throw new RunnerPortalMessageError(409, "portal message id is invalid or duplicated");
       }
       identifiers.add(id);
       if (!new Set(["text", "document"]).has(type)) {
         throw new RunnerPortalMessageError(409, "portal message type is invalid");
+      }
+      if (portalKey !== null && !PORTAL_KEY.test(portalKey)) {
+        throw new RunnerPortalMessageError(409, "portalKey is invalid");
       }
       const maximumText = type === "document" ? 900 : 3_500;
       if ((!text && type === "text") || Array.from(text).length > maximumText) {
@@ -166,7 +176,13 @@ export class RunnerPortalMessageStore {
           throw new RunnerPortalMessageError(409, "portal document artifact is unsafe");
         }
       }
-      return { id, type: type as RunnerPortalMessage["type"], text, artifact };
+      return {
+        id,
+        type: type as RunnerPortalMessage["type"],
+        text,
+        artifact,
+        ...(portalKey ? { portalKey } : {}),
+      };
     });
     const batch: RunnerPortalMessageBatch = {
       projectId: input.projectId,

@@ -20,9 +20,20 @@ import type { ProjectPortalBinding } from "./state-store.js";
 
 const OUTBOX_ID = /^[a-f0-9]{64}$/;
 const MAXIMUM_ATTEMPTS = 5;
+const DEFAULT_MAXIMUM_RECORDS = 1_000;
+const DEFAULT_MAXIMUM_QUEUED_ATTACHMENT_BYTES = 250 * 1024 * 1024;
+const SENT_RETENTION_MILLISECONDS = 30 * 24 * 60 * 60 * 1_000;
+const FAILED_RETENTION_MILLISECONDS = 90 * 24 * 60 * 60 * 1_000;
 
 export type ProjectPortalMessageKind = "text" | "document";
-export type ProjectPortalDeliveryStatus = "pending" | "sending" | "sent" | "failed";
+export type ProjectPortalDeliveryStatus =
+  | "pending"
+  | "sending"
+  | "sent"
+  | "failed"
+  | "uncertain"
+  | "dead-letter"
+  | "cancelled";
 
 export interface ProjectPortalOutboxAttachment {
   fileName: string;
@@ -37,9 +48,12 @@ export interface ProjectPortalOutboxRecord {
   projectId: string;
   workspaceId: string;
   portalId: string;
+  portalKey?: string;
+  transport?: string;
   chatId: number;
   topicId: number;
   sourceId: string | null;
+  originConversationId?: string | null;
   kind: ProjectPortalMessageKind;
   text: string;
   replyToEventId: number | null;
@@ -56,6 +70,9 @@ export interface ProjectPortalOutboxRecord {
   createdAt: string;
   updatedAt: string;
   sentAt: string | null;
+  terminalNotifiedAt?: string | null;
+  terminalNotificationAttempts?: number;
+  terminalNotificationNextAttemptAt?: string | null;
 }
 
 export class ProjectPortalOutboxError extends Error {}
@@ -113,10 +130,15 @@ export class ProjectPortalOutboxStore {
     dataDir: string,
     readonly maximumAttachmentBytes: number,
     readonly now: () => Date = () => new Date(),
+    readonly limits: {
+      maximumRecords?: number;
+      maximumQueuedAttachmentBytes?: number;
+    } = {},
   ) {
     this.root = resolve(dataDir, "project-portal-outbox");
     this.ensureDirectory(this.root);
     this.recoverSending();
+    this.prune();
   }
 
   enqueue(input: {
@@ -129,6 +151,7 @@ export class ProjectPortalOutboxStore {
     attachment?: { fileName: string; mimeType: string; data: Uint8Array } | null;
     idempotencyKey: string;
     createdBy: number;
+    originConversationId?: string | null;
   }): ProjectPortalOutboxRecord {
     const text = String(input.text ?? "").trim();
     const attachment = input.attachment ?? null;
@@ -199,6 +222,7 @@ export class ProjectPortalOutboxStore {
       }
       return existing;
     }
+    this.assertCapacity(attachmentData?.byteLength ?? 0);
     const directory = this.directory(id);
     this.ensureDirectory(directory);
     if (attachmentData && attachmentMetadata) {
@@ -212,6 +236,9 @@ export class ProjectPortalOutboxStore {
       schemaVersion: 1,
       id,
       ...immutablePayload,
+      portalKey: input.portal.portalKey,
+      transport: input.portal.transport,
+      originConversationId: input.originConversationId ?? null,
       payloadDigest,
       status: "pending",
       attempts: 0,
@@ -221,6 +248,9 @@ export class ProjectPortalOutboxStore {
       createdAt: timestamp,
       updatedAt: timestamp,
       sentAt: null,
+      terminalNotifiedAt: null,
+      terminalNotificationAttempts: 0,
+      terminalNotificationNextAttemptAt: null,
     };
     atomicJson(this.recordPath(id), record);
     return record;
@@ -235,10 +265,39 @@ export class ProjectPortalOutboxStore {
       throw new ProjectPortalOutboxError("unsafe portal outbox record");
     }
     const record = JSON.parse(readFileSync(path, "utf8")) as ProjectPortalOutboxRecord;
-    if (record.schemaVersion !== 1 || record.id !== id || record.payloadDigest.length !== 64) {
+    if (
+      record.schemaVersion !== 1 ||
+      record.id !== id ||
+      !OUTBOX_ID.test(String(record.payloadDigest ?? "")) ||
+      !this.validStatus(record.status)
+    ) {
       throw new ProjectPortalOutboxError("invalid portal outbox record");
     }
-    return record;
+    return {
+      ...record,
+      portalKey: record.portalKey || "main",
+      transport: record.transport || "telegram",
+      originConversationId: record.originConversationId ?? null,
+      terminalNotifiedAt: record.terminalNotifiedAt ?? null,
+      terminalNotificationAttempts: record.terminalNotificationAttempts ?? 0,
+      terminalNotificationNextAttemptAt: record.terminalNotificationNextAttemptAt ?? null,
+    };
+  }
+
+  list(input: {
+    projectId?: string;
+    workspaceId?: string;
+    statuses?: ProjectPortalDeliveryStatus[];
+    limit?: number;
+  } = {}): ProjectPortalOutboxRecord[] {
+    const statuses = input.statuses?.length ? new Set(input.statuses) : null;
+    const limit = Math.max(1, Math.min(500, Math.trunc(input.limit ?? 100)));
+    return this.records()
+      .filter((record) => !input.projectId || record.projectId === input.projectId)
+      .filter((record) => !input.workspaceId || record.workspaceId === input.workspaceId)
+      .filter((record) => !statuses || statuses.has(record.status))
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+      .slice(0, limit);
   }
 
   claimDue(limit = 10): ProjectPortalOutboxRecord[] {
@@ -311,30 +370,167 @@ export class ProjectPortalOutboxStore {
     return sent;
   }
 
-  markFailed(id: string, error: string): ProjectPortalOutboxRecord {
+  markFailed(
+    id: string,
+    error: string,
+    options: { permanent?: boolean } = {},
+  ): ProjectPortalOutboxRecord {
     const record = this.required(id);
     const delaySeconds = Math.min(300, 5 * (2 ** Math.max(0, record.attempts - 1)));
     const nextAttempt = new Date(this.now().getTime() + delaySeconds * 1_000);
     const failed: ProjectPortalOutboxRecord = {
       ...record,
-      status: "failed",
+      status: options.permanent || record.attempts >= MAXIMUM_ATTEMPTS
+        ? "dead-letter"
+        : "failed",
       lastError: error.trim().slice(0, 500) || "portal delivery failed",
       nextAttemptAt: iso(nextAttempt),
+      updatedAt: iso(this.now()),
+      ...(options.permanent || record.attempts >= MAXIMUM_ATTEMPTS
+        ? { terminalNotificationNextAttemptAt: iso(this.now()) }
+        : {}),
+    };
+    atomicJson(this.recordPath(id), failed);
+    return failed;
+  }
+
+  markUncertain(id: string, error: string): ProjectPortalOutboxRecord {
+    const record = this.required(id);
+    const uncertain: ProjectPortalOutboxRecord = {
+      ...record,
+      status: "uncertain",
+      lastError: error.trim().slice(0, 500) || "portal delivery outcome is uncertain",
+      updatedAt: iso(this.now()),
+      terminalNotificationNextAttemptAt: iso(this.now()),
+    };
+    atomicJson(this.recordPath(id), uncertain);
+    return uncertain;
+  }
+
+  retry(id: string): ProjectPortalOutboxRecord {
+    const record = this.required(id);
+    if (!["failed", "uncertain", "dead-letter"].includes(record.status)) {
+      throw new ProjectPortalOutboxError(`portal delivery in ${record.status} state cannot be retried`);
+    }
+    if (record.attachment && !existsSync(this.attachmentPath(id))) {
+      throw new ProjectPortalOutboxError("portal attachment is no longer available for retry");
+    }
+    const timestamp = iso(this.now());
+    const pending: ProjectPortalOutboxRecord = {
+      ...record,
+      status: "pending",
+      attempts: 0,
+      nextAttemptAt: timestamp,
+      lastError: "",
+      updatedAt: timestamp,
+      terminalNotifiedAt: null,
+      terminalNotificationAttempts: 0,
+      terminalNotificationNextAttemptAt: null,
+    };
+    atomicJson(this.recordPath(id), pending);
+    return pending;
+  }
+
+  cancel(id: string): ProjectPortalOutboxRecord {
+    const record = this.required(id);
+    if (["sent", "cancelled"].includes(record.status)) return record;
+    if (record.status === "sending") {
+      throw new ProjectPortalOutboxError("a sending portal delivery cannot be cancelled safely");
+    }
+    const cancelled: ProjectPortalOutboxRecord = {
+      ...record,
+      status: "cancelled",
+      lastError: "cancelled by administrator",
+      updatedAt: iso(this.now()),
+    };
+    atomicJson(this.recordPath(id), cancelled);
+    this.removeAttachment(id);
+    return cancelled;
+  }
+
+  notificationDue(limit = 20): ProjectPortalOutboxRecord[] {
+    return this.records()
+      .filter((record) =>
+        ["uncertain", "dead-letter"].includes(record.status) &&
+        !record.terminalNotifiedAt &&
+        Boolean(record.originConversationId) &&
+        Date.parse(record.terminalNotificationNextAttemptAt ?? record.updatedAt) <= this.now().getTime()
+      )
+      .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt))
+      .slice(0, Math.max(1, Math.min(50, limit)));
+  }
+
+  markNotified(id: string): ProjectPortalOutboxRecord {
+    const record = this.required(id);
+    const notified = {
+      ...record,
+      terminalNotifiedAt: iso(this.now()),
+      terminalNotificationNextAttemptAt: null,
+      updatedAt: iso(this.now()),
+    };
+    atomicJson(this.recordPath(id), notified);
+    return notified;
+  }
+
+  markNotificationFailed(id: string): ProjectPortalOutboxRecord {
+    const record = this.required(id);
+    const attempts = (record.terminalNotificationAttempts ?? 0) + 1;
+    const delaySeconds = Math.min(3_600, 15 * (2 ** Math.min(8, attempts - 1)));
+    const failed = {
+      ...record,
+      terminalNotificationAttempts: attempts,
+      terminalNotificationNextAttemptAt: iso(
+        new Date(this.now().getTime() + delaySeconds * 1_000),
+      ),
       updatedAt: iso(this.now()),
     };
     atomicJson(this.recordPath(id), failed);
     return failed;
   }
 
+  prune(): number {
+    const now = this.now().getTime();
+    let removed = 0;
+    for (const id of this.ids()) {
+      let record: ProjectPortalOutboxRecord | null;
+      try {
+        record = this.get(id);
+      } catch {
+        continue;
+      }
+      if (!record) {
+        rmSync(this.directory(id), { recursive: true, force: true });
+        removed += 1;
+        continue;
+      }
+      const age = now - Date.parse(record.sentAt ?? record.createdAt);
+      const expired =
+        (["sent", "cancelled"].includes(record.status) && age >= SENT_RETENTION_MILLISECONDS) ||
+        (["dead-letter", "uncertain"].includes(record.status) && age >= FAILED_RETENTION_MILLISECONDS);
+      if (!expired) continue;
+      rmSync(this.directory(id), { recursive: true, force: true });
+      removed += 1;
+    }
+    return removed;
+  }
+
   nextRetryDelayMilliseconds(): number | null {
-    const dates = this.ids()
-      .map((id) => this.get(id))
-      .filter((record): record is ProjectPortalOutboxRecord => Boolean(record))
+    const records = this.records();
+    const dates = records
       .filter((record) =>
         ["pending", "failed"].includes(record.status) && record.attempts < MAXIMUM_ATTEMPTS
       )
       .map((record) => Date.parse(record.nextAttemptAt))
       .filter(Number.isFinite);
+    dates.push(...records
+      .filter((record) =>
+        ["uncertain", "dead-letter"].includes(record.status) &&
+        !record.terminalNotifiedAt &&
+        Boolean(record.originConversationId) &&
+        Boolean(record.terminalNotificationNextAttemptAt)
+      )
+      .map((record) => Date.parse(record.terminalNotificationNextAttemptAt!))
+      .filter(Number.isFinite));
     if (dates.length === 0) return null;
     return Math.max(0, Math.min(...dates) - this.now().getTime());
   }
@@ -345,10 +541,10 @@ export class ProjectPortalOutboxStore {
       if (!record || record.status !== "sending") continue;
       atomicJson(this.recordPath(id), {
         ...record,
-        status: "failed",
-        lastError: "SUMMING restarted during portal delivery",
-        nextAttemptAt: iso(this.now()),
+        status: "uncertain",
+        lastError: "SUMMING restarted while Telegram delivery was in flight; manual review required",
         updatedAt: iso(this.now()),
+        terminalNotificationNextAttemptAt: iso(this.now()),
       });
     }
   }
@@ -363,6 +559,64 @@ export class ProjectPortalOutboxStore {
     return readdirSync(this.root, { withFileTypes: true })
       .filter((entry) => entry.isDirectory() && OUTBOX_ID.test(entry.name))
       .map((entry) => entry.name);
+  }
+
+  private records(): ProjectPortalOutboxRecord[] {
+    const records: ProjectPortalOutboxRecord[] = [];
+    for (const id of this.ids()) {
+      try {
+        const record = this.get(id);
+        if (record) records.push(record);
+      } catch {
+        // One corrupt entry must not disable delivery or the administrator control plane.
+      }
+    }
+    return records;
+  }
+
+  private assertCapacity(incomingAttachmentBytes: number): void {
+    const records = this.records();
+    const active = records.filter((record) =>
+      ["pending", "sending", "failed", "uncertain", "dead-letter"].includes(record.status)
+    );
+    const maximumRecords = Math.max(1, this.limits.maximumRecords ?? DEFAULT_MAXIMUM_RECORDS);
+    if (active.length >= maximumRecords) {
+      throw new ProjectPortalOutboxError(`portal outbox is full (${maximumRecords} records)`);
+    }
+    const queuedAttachmentBytes = active.reduce((sum, record) => {
+      return sum + (record.attachment && existsSync(this.attachmentPath(record.id))
+        ? record.attachment.size
+        : 0);
+    }, 0);
+    const maximumBytes = Math.max(
+      this.maximumAttachmentBytes,
+      this.limits.maximumQueuedAttachmentBytes ?? DEFAULT_MAXIMUM_QUEUED_ATTACHMENT_BYTES,
+    );
+    if (queuedAttachmentBytes + incomingAttachmentBytes > maximumBytes) {
+      throw new ProjectPortalOutboxError(`portal outbox attachment quota is ${maximumBytes} bytes`);
+    }
+  }
+
+  private removeAttachment(id: string): void {
+    const path = this.attachmentPath(id);
+    if (!existsSync(path)) return;
+    try {
+      unlinkSync(path);
+    } catch {
+      // Retention and quota checks remain conservative if best-effort cleanup fails.
+    }
+  }
+
+  private validStatus(value: unknown): value is ProjectPortalDeliveryStatus {
+    return [
+      "pending",
+      "sending",
+      "sent",
+      "failed",
+      "uncertain",
+      "dead-letter",
+      "cancelled",
+    ].includes(String(value));
   }
 
   private directory(id: string): string {
