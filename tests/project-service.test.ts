@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { serviceDefinition } from "../src/project-service.js";
+import { serviceDefinition, serviceDefinitions } from "../src/project-service.js";
 
 test("service manifest defines bounded named long-running workloads", () => {
   const manifest = JSON.stringify({
@@ -27,6 +27,7 @@ test("service manifest defines bounded named long-running workloads", () => {
     healthPath: null,
     startupTimeoutSeconds: 60,
   });
+  assert.deepEqual([...serviceDefinitions(manifest).keys()], ["api", "worker"]);
   assert.throws(() => serviceDefinition(manifest, "missing"), /is not declared/);
   assert.throws(
     () => serviceDefinition(JSON.stringify({
@@ -41,5 +42,15 @@ test("service manifest defines bounded named long-running workloads", () => {
       services: { api: { containerPort: 3_000, privileged: true } },
     }), "api"),
     /unsupported fields/,
+  );
+  assert.throws(
+    () => serviceDefinitions(JSON.stringify({
+      version: 1,
+      services: {
+        api: {},
+        worker: { command: [] },
+      },
+    })),
+    /service worker command must contain/,
   );
 });

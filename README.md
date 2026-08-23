@@ -592,6 +592,12 @@ runner закрепляет свободный host port из диапазона
 возвращает `localEndpoint`; внешний домен по-прежнему является отдельным явным
 маршрутом Caddy и автоматически из Project manifest не создаётся.
 
+`runner.validate` распознаёт service snapshot по `.summing/services.json`, проверяет
+все объявления и собранный immutable image и создаёт deployable Release без запуска
+legacy entrypoint `node dist/src/main.js --validate`. Runtime-проверка service
+выполняется при deployment через его собственную command и health check. Для Project
+без service manifest прежняя изолированная validation-команда сохраняется.
+
 `service.deploy` принимает имя и точный ID завершённого non-build Release. Runner
 проверяет source/config/environment hashes и immutable image ID, копирует необходимые
 runtime snapshots в service storage, запускает контейнер с `restart=unless-stopped`

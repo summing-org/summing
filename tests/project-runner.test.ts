@@ -344,7 +344,9 @@ exit 0
 
     const validate = await client.submit("demo", "repo", "validate", revision, archive);
     assert.equal((await completedJob(client, "demo", "repo", validate.id)).status, "completed");
-    assert.match(readFileSync(dockerArgs, "utf8"), /--network\nnone/);
+    const validationArgs = readFileSync(dockerArgs, "utf8");
+    assert.match(validationArgs, /--network\nnone/);
+    assert.match(validationArgs, /dist\/src\/main\.js\n--validate/);
     assert.equal(readdirSync(runs).length, 102);
     assert.equal(existsSync(join(runs, validate.id)), true);
     assert.equal(existsSync(join(runs, dryRun.id)), true);
@@ -856,6 +858,11 @@ esac
     );
     const firstRelease = await completedJob(client, "demo", "repo", firstReleaseJob.id);
     assert.equal(firstRelease.status, "completed");
+    assert.match(
+      await client.log("demo", firstRelease.id),
+      /service manifest and image validated; startup is deferred/,
+    );
+    assert.doesNotMatch(readFileSync(join(dockerState, "docker-args"), "utf8"), /dist\/src\/main\.js/);
     const deployed = await client.deployService(
       "demo",
       "repo",

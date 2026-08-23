@@ -53,6 +53,7 @@ import type {
 import {
   SERVICE_NAME,
   serviceDefinition,
+  serviceDefinitions,
   type RunnerService,
   type RunnerServiceAction,
   type RunnerServiceDefinition,
@@ -1403,6 +1404,19 @@ export class ProjectRunnerServer {
     throw new RunnerHttpError(409, `${SERVICE_MANIFEST_PATH} is missing from the Release`);
   }
 
+  private validateServiceRelease(source: string): boolean {
+    const sourceRoot = realpathSync(source);
+    const manifestPath = resolve(sourceRoot, SERVICE_MANIFEST_PATH);
+    if (!existsSync(manifestPath)) return false;
+    const metadata = lstatSync(manifestPath);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || realpathSync(manifestPath) !== manifestPath) {
+      throw new Error(`${SERVICE_MANIFEST_PATH} must be a regular file in the source snapshot`);
+    }
+    if (metadata.size > 100_000) throw new Error("service manifest exceeds 100 KB");
+    serviceDefinitions(readFileSync(manifestPath, "utf8"));
+    return true;
+  }
+
   private servicePorts(): Set<number> {
     const ports = new Set<number>();
     const projects = resolve(this.dataRoot, "projects");
@@ -2218,7 +2232,16 @@ export class ProjectRunnerServer {
       }
       this.saveJob(job);
       if (signal.aborted) throw new RunnerCommandCancelledError("runner job cancelled");
-      const result = job.action === "build"
+      const serviceRelease = job.action === "validate" && this.validateServiceRelease(source);
+      if (serviceRelease) {
+        writeFileSync(
+          logPath,
+          `[${new Date().toISOString()}] service manifest and image validated; ` +
+            "startup is deferred to service deployment health checks\n",
+          { flag: "a" },
+        );
+      }
+      const result = job.action === "build" || serviceRelease
         ? { code: 0 }
         : await this.runImage(job, project, configPath!, logPath, signal);
       job.exitCode = result.code;

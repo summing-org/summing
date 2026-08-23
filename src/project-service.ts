@@ -48,27 +48,8 @@ function exactKeys(value: Record<string, unknown>, allowed: readonly string[], m
   if (Object.keys(value).some((key) => !keys.has(key))) throw new Error(message);
 }
 
-export function serviceDefinition(manifestText: string, name: string): RunnerServiceDefinition {
-  if (!SERVICE_NAME.test(name)) throw new Error("service name is invalid");
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(manifestText);
-  } catch {
-    throw new Error(".summing/services.json is malformed");
-  }
-  const manifest = record(parsed, ".summing/services.json must contain an object");
-  exactKeys(manifest, ["version", "services"], ".summing/services.json contains unsupported fields");
-  if (manifest.version !== 1) throw new Error("service manifest version must be 1");
-  const services = record(manifest.services, "service manifest must contain services");
-  if (Object.keys(services).length === 0 || Object.keys(services).length > 20) {
-    throw new Error("service manifest must contain 1-20 services");
-  }
-  if (Object.keys(services).some((serviceName) => !SERVICE_NAME.test(serviceName))) {
-    throw new Error("service manifest contains an invalid service name");
-  }
-  const raw = services[name];
-  if (raw === undefined) throw new Error(`service ${name} is not declared in .summing/services.json`);
-  const definition = record(raw, `service ${name} must contain an object`);
+function parseServiceDefinition(name: string, value: unknown): RunnerServiceDefinition {
+  const definition = record(value, `service ${name} must contain an object`);
   exactKeys(
     definition,
     ["command", "containerPort", "healthPath", "startupTimeoutSeconds"],
@@ -105,4 +86,35 @@ export function serviceDefinition(manifestText: string, name: string): RunnerSer
     throw new Error(`service ${name} startupTimeoutSeconds must be an integer from 5 to 300`);
   }
   return { command, containerPort, healthPath, startupTimeoutSeconds };
+}
+
+export function serviceDefinitions(
+  manifestText: string,
+): ReadonlyMap<string, RunnerServiceDefinition> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(manifestText);
+  } catch {
+    throw new Error(".summing/services.json is malformed");
+  }
+  const manifest = record(parsed, ".summing/services.json must contain an object");
+  exactKeys(manifest, ["version", "services"], ".summing/services.json contains unsupported fields");
+  if (manifest.version !== 1) throw new Error("service manifest version must be 1");
+  const services = record(manifest.services, "service manifest must contain services");
+  if (Object.keys(services).length === 0 || Object.keys(services).length > 20) {
+    throw new Error("service manifest must contain 1-20 services");
+  }
+  if (Object.keys(services).some((serviceName) => !SERVICE_NAME.test(serviceName))) {
+    throw new Error("service manifest contains an invalid service name");
+  }
+  return new Map(
+    Object.entries(services).map(([name, value]) => [name, parseServiceDefinition(name, value)]),
+  );
+}
+
+export function serviceDefinition(manifestText: string, name: string): RunnerServiceDefinition {
+  if (!SERVICE_NAME.test(name)) throw new Error("service name is invalid");
+  const definition = serviceDefinitions(manifestText).get(name);
+  if (!definition) throw new Error(`service ${name} is not declared in .summing/services.json`);
+  return definition;
 }
