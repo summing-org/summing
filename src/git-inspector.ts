@@ -61,13 +61,13 @@ export interface RepositorySyncStatus extends RepositorySummary {
   message: string;
   canPush: boolean;
   canPull: boolean;
-  masterPublished: boolean;
-  masterHead: string;
-  masterShortHead: string;
-  masterAhead: number;
-  masterBehind: number;
-  masterMessage: string;
-  canPushMaster: boolean;
+  defaultPublished: boolean;
+  defaultHead: string;
+  defaultShortHead: string;
+  defaultAhead: number;
+  defaultBehind: number;
+  defaultMessage: string;
+  canPushDefault: boolean;
   errorCode: RepositoryDiagnosticCode;
   legacySshCommand: boolean;
 }
@@ -355,13 +355,13 @@ export class GitInspector {
       message: "Origin не настроен.",
       canPush: false,
       canPull: false,
-      masterPublished: false,
-      masterHead: "",
-      masterShortHead: "",
-      masterAhead: 0,
-      masterBehind: 0,
-      masterMessage: "Origin/master недоступен.",
-      canPushMaster: false,
+      defaultPublished: false,
+      defaultHead: "",
+      defaultShortHead: "",
+      defaultAhead: 0,
+      defaultBehind: 0,
+      defaultMessage: "Основная ветка origin недоступна.",
+      canPushDefault: false,
       errorCode: "missing-origin",
       legacySshCommand: false,
     };
@@ -412,9 +412,13 @@ export class GitInspector {
       { allowFailure: true },
     );
     const published = publishedResult.code === 0;
-    const defaultBranch = await this.defaultRemoteBranch();
-    const master = await this.masterPublicationStatus(summary);
-    const pullSource = published ? `origin/${summary.branch}` : defaultBranch;
+    const defaultTarget = await this.defaultRemoteBranch();
+    const publication = await this.defaultPublicationStatus(summary, defaultTarget);
+    const pullSource = published
+      ? `origin/${summary.branch}`
+      : defaultTarget.published
+        ? `origin/${defaultTarget.branch}`
+        : "";
     let ahead = 0;
     let behind = 0;
     if (pullSource) {
@@ -463,7 +467,7 @@ export class GitInspector {
 
     return {
       ...base,
-      defaultBranch,
+      defaultBranch: defaultTarget.branch,
       pullSource,
       published,
       ahead,
@@ -472,7 +476,7 @@ export class GitInspector {
       message,
       canPush: !published || (ahead > 0 && behind === 0),
       canPull: !summary.dirty && Boolean(pullSource) && ahead === 0 && behind > 0,
-      ...master,
+      ...publication,
       errorCode: legacySshCommand ? "legacy-ssh-command" : "ok",
       legacySshCommand,
     };
@@ -585,40 +589,54 @@ export class GitInspector {
     return this.repositoryStatus(true);
   }
 
-  async pushHeadToMaster(
+  async pushHeadToDefault(
     expectedHead: string,
-    expectedMasterHead: string,
+    expectedDefaultBranch: string,
+    expectedDefaultHead: string,
   ): Promise<RepositorySyncStatus> {
     const status = await this.repositoryStatus(true);
     this.verifyExpectedHead(status, expectedHead);
     if (!status.remote) throw new GitInspectorError("origin не настроен");
     if (status.state === "error") throw new GitInspectorError(status.message);
+    if (!status.defaultBranch) {
+      throw new GitInspectorError(
+        "не удалось определить основную ветку; создайте локальную main, master или единственную основную ветку",
+      );
+    }
+    if (expectedDefaultBranch !== status.defaultBranch) {
+      throw new GitInspectorError(
+        "основная ветка origin изменилась после отображения; обновите состояние и подтвердите снова",
+      );
+    }
+    const target = `origin/${status.defaultBranch}`;
     if (status.dirty) {
       throw new GitInspectorError(
-        "перед публикацией в origin/master закоммитьте или отмените рабочие изменения",
+        `перед публикацией в ${target} закоммитьте или отмените рабочие изменения`,
       );
     }
-    if (!status.masterPublished) {
+    if (status.defaultPublished) {
+      if (
+        !/^[0-9a-f]{40}$/.test(expectedDefaultHead)
+        || expectedDefaultHead !== status.defaultHead
+      ) {
+        throw new GitInspectorError(
+          `${target} изменился после отображения; обновите состояние и подтвердите снова`,
+        );
+      }
+    } else if (expectedDefaultHead) {
       throw new GitInspectorError(
-        "origin/master отсутствует; создание основной ветки через Mini App запрещено",
+        `${target} появился после отображения; обновите состояние и подтвердите снова`,
       );
     }
-    if (
-      !/^[0-9a-f]{40}$/.test(expectedMasterHead)
-      || expectedMasterHead !== status.masterHead
-    ) {
+    if (status.defaultBehind > 0) {
       throw new GitInspectorError(
-        "origin/master изменился после отображения; обновите состояние и подтвердите снова",
+        `в ${target} или локальной ${status.defaultBranch} есть отсутствующие в текущей ветке `
+          + "коммиты; сначала выполните merge или rebase",
       );
     }
-    if (status.masterBehind > 0) {
-      throw new GitInspectorError(
-        "в origin/master есть отсутствующие в текущей ветке коммиты; сначала выполните merge или rebase",
-      );
-    }
-    if (status.masterAhead === 0) return status;
-    if (!status.canPushMaster) {
-      throw new GitInspectorError("текущий HEAD нельзя безопасно опубликовать в origin/master");
+    if (status.defaultPublished && status.defaultAhead === 0) return status;
+    if (!status.canPushDefault) {
+      throw new GitInspectorError(`текущий HEAD нельзя безопасно опубликовать в ${target}`);
     }
     const endpoints = await this.repositoryEndpoints();
     const pushed = await this.git(
@@ -627,13 +645,13 @@ export class GitInspector {
         "--porcelain",
         "--",
         endpoints.push,
-        `${status.head}:refs/heads/master`,
+        `${status.head}:refs/heads/${status.defaultBranch}`,
       ],
       { allowFailure: true, env: this.repositoryEnvironment() },
     );
     if (pushed.code !== 0) {
       throw new GitInspectorError(
-        `Публикация в origin/master не выполнена: ${gitFailure(pushed, status.remote)}`,
+        `Публикация в ${target} не выполнена: ${gitFailure(pushed, status.remote)}`,
       );
     }
     return this.repositoryStatus(true);
@@ -928,7 +946,7 @@ export class GitInspector {
     );
   }
 
-  private async defaultRemoteBranch(): Promise<string> {
+  private async defaultRemoteBranch(): Promise<{ branch: string; published: boolean }> {
     const symbolic = await this.git(
       ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
       { allowFailure: true },
@@ -939,14 +957,16 @@ export class GitInspector {
         ["show-ref", "--verify", "--quiet", `refs/remotes/${symbolicName}`],
         { allowFailure: true },
       );
-      if (target.code === 0) return symbolicName;
+      if (target.code === 0) {
+        return { branch: symbolicName.slice("origin/".length), published: true };
+      }
     }
     for (const branch of ["main", "master"]) {
       const result = await this.git(
         ["show-ref", "--verify", "--quiet", `refs/remotes/origin/${branch}`],
         { allowFailure: true },
       );
-      if (result.code === 0) return `origin/${branch}`;
+      if (result.code === 0) return { branch, published: true };
     }
     const refs = text(await this.git([
       "for-each-ref",
@@ -955,68 +975,100 @@ export class GitInspector {
     ])).split(/\r?\n/).map((value) => value.trim()).filter((value) =>
       value.startsWith("origin/") && value !== "origin/HEAD"
     );
-    return refs.length === 1 ? refs[0]! : "";
+    if (refs.length === 1) {
+      return { branch: refs[0]!.slice("origin/".length), published: true };
+    }
+    if (refs.length > 1) return { branch: "", published: false };
+
+    for (const branch of ["main", "master"]) {
+      const result = await this.git(
+        ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`],
+        { allowFailure: true },
+      );
+      if (result.code === 0) return { branch, published: false };
+    }
+    const localBranches = text(await this.git([
+      "for-each-ref",
+      "--format=%(refname:short)",
+      "refs/heads",
+    ])).split(/\r?\n/).map((value) => value.trim()).filter((value) =>
+      value && !value.startsWith("summing/") && !value.startsWith("codex/")
+    );
+    return localBranches.length === 1
+      ? { branch: localBranches[0]!, published: false }
+      : { branch: "", published: false };
   }
 
-  private async masterPublicationStatus(summary: RepositorySummary): Promise<{
-    masterPublished: boolean;
-    masterHead: string;
-    masterShortHead: string;
-    masterAhead: number;
-    masterBehind: number;
-    masterMessage: string;
-    canPushMaster: boolean;
+  private async defaultPublicationStatus(
+    summary: RepositorySummary,
+    target: { branch: string; published: boolean },
+  ): Promise<{
+    defaultPublished: boolean;
+    defaultHead: string;
+    defaultShortHead: string;
+    defaultAhead: number;
+    defaultBehind: number;
+    defaultMessage: string;
+    canPushDefault: boolean;
   }> {
-    const masterRef = "refs/remotes/origin/master";
-    const exists = await this.git(
-      ["show-ref", "--verify", "--quiet", masterRef],
-      { allowFailure: true },
-    );
-    if (exists.code !== 0) {
+    if (!target.branch) {
       return {
-        masterPublished: false,
-        masterHead: "",
-        masterShortHead: "",
-        masterAhead: 0,
-        masterBehind: 0,
-        masterMessage: "В origin нет ветки master; Mini App не создаёт основную ветку автоматически.",
-        canPushMaster: false,
+        defaultPublished: false,
+        defaultHead: "",
+        defaultShortHead: "",
+        defaultAhead: 0,
+        defaultBehind: 0,
+        defaultMessage: "Не удалось однозначно определить основную ветку репозитория.",
+        canPushDefault: false,
       };
     }
-    const masterHead = text(await this.git(["rev-parse", masterRef])).trim();
+    const label = `origin/${target.branch}`;
+    const comparisonRef = target.published
+      ? `refs/remotes/origin/${target.branch}`
+      : `refs/heads/${target.branch}`;
     const counts = text(await this.git([
       "rev-list",
       "--left-right",
       "--count",
-      `HEAD...${masterRef}`,
+      `HEAD...${comparisonRef}`,
     ])).trim().split(/\s+/);
-    const masterAhead = Number(counts[0] ?? 0);
-    const masterBehind = Number(counts[1] ?? 0);
-    let masterMessage: string;
-    if (masterAhead > 0 && masterBehind > 0) {
-      masterMessage =
-        "Текущая ветка и origin/master разошлись; сначала выполните merge или rebase.";
-    } else if (masterBehind > 0) {
-      masterMessage =
-        `В origin/master есть ${masterBehind} отсутствующих локально коммитов; ` +
+    let defaultAhead = Number(counts[0] ?? 0);
+    const defaultBehind = Number(counts[1] ?? 0);
+    let defaultMessage: string;
+    if (!target.published && defaultBehind === 0) {
+      defaultAhead = Number(text(await this.git(["rev-list", "--count", "HEAD"])).trim());
+      defaultMessage =
+        `${label} ещё не создана; Mini App безопасно опубликует текущий HEAD `
+          + `как основную ветку ${target.branch}.`;
+    } else if (defaultAhead > 0 && defaultBehind > 0) {
+      defaultMessage =
+        `Текущая ветка и ${label} разошлись; сначала выполните merge или rebase.`;
+    } else if (defaultBehind > 0) {
+      defaultMessage =
+        `В ${label} или локальной ${target.branch} есть ${defaultBehind} отсутствующих коммитов; ` +
         "сначала добавьте их в текущую ветку.";
-    } else if (masterAhead > 0 && summary.dirty) {
-      masterMessage =
-        `Fast-forward на ${masterAhead} комм., но рабочее дерево должно быть чистым.`;
-    } else if (masterAhead > 0) {
-      masterMessage =
-        `Готово к fast-forward: ${masterAhead} комм. из ${summary.branch} в origin/master.`;
+    } else if (defaultAhead > 0 && summary.dirty) {
+      defaultMessage =
+        `Fast-forward на ${defaultAhead} комм., но рабочее дерево должно быть чистым.`;
+    } else if (defaultAhead > 0) {
+      defaultMessage =
+        `Готово к fast-forward: ${defaultAhead} комм. из ${summary.branch} в ${label}.`;
     } else {
-      masterMessage = "Origin/master уже содержит текущий HEAD.";
+      defaultMessage = `${label} уже содержит текущий HEAD.`;
     }
+    const defaultHead = target.published
+      ? text(await this.git(["rev-parse", comparisonRef])).trim()
+      : "";
     return {
-      masterPublished: true,
-      masterHead,
-      masterShortHead: masterHead.slice(0, 8),
-      masterAhead,
-      masterBehind,
-      masterMessage,
-      canPushMaster: !summary.dirty && masterAhead > 0 && masterBehind === 0,
+      defaultPublished: target.published,
+      defaultHead,
+      defaultShortHead: defaultHead.slice(0, 8),
+      defaultAhead,
+      defaultBehind,
+      defaultMessage,
+      canPushDefault: !summary.dirty
+        && defaultBehind === 0
+        && (!target.published || defaultAhead > 0),
     };
   }
 

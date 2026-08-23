@@ -252,14 +252,14 @@ test("publishes and fast-forwards the current branch without force or automatic 
   }
 });
 
-test("publishes a clean current HEAD to origin/master only as a fast-forward", async () => {
-  const fixture = mkdtempSync(join(tmpdir(), "summing-inspector-master-publish-"));
+test("publishes a clean current HEAD to the detected default branch without force", async () => {
+  const fixture = mkdtempSync(join(tmpdir(), "summing-inspector-default-publish-"));
   const local = join(fixture, "local");
   const remote = join(local, ".git", "origin.git");
   const updater = join(fixture, "updater");
   try {
-    execFileSync("git", ["init", "--initial-branch=master", local]);
-    execFileSync("git", ["init", "--bare", "--initial-branch=master", remote]);
+    execFileSync("git", ["init", "--initial-branch=main", local]);
+    execFileSync("git", ["init", "--bare", "--initial-branch=main", remote]);
     execFileSync("git", ["-C", local, "config", "user.name", "Test"]);
     execFileSync("git", ["-C", local, "config", "user.email", "test@example.test"]);
     writeFileSync(join(local, "README.md"), "initial\n");
@@ -272,48 +272,59 @@ test("publishes a clean current HEAD to origin/master only as a fast-forward", a
     execFileSync("git", ["-C", local, "commit", "-m", "feature"]);
 
     const inspector = new GitInspector(local);
-    const missingMaster = await inspector.repositoryStatus();
-    assert.equal(missingMaster.masterPublished, false);
-    assert.equal(missingMaster.canPushMaster, false);
-    await assert.rejects(
-      inspector.pushHeadToMaster(missingMaster.head, ""),
-      /создание основной ветки через Mini App запрещено/,
+    const missingDefault = await inspector.repositoryStatus();
+    assert.equal(missingDefault.defaultBranch, "main");
+    assert.equal(missingDefault.defaultPublished, false);
+    assert.equal(missingDefault.canPushDefault, true);
+    const created = await inspector.pushHeadToDefault(
+      missingDefault.head,
+      missingDefault.defaultBranch,
+      missingDefault.defaultHead,
     );
-    execFileSync("git", ["-C", local, "push", "origin", "master"]);
+    assert.equal(created.defaultPublished, true);
+    assert.equal(gitOutput(remote, "rev-parse", "refs/heads/main"), missingDefault.head);
+
+    writeFileSync(join(local, "NEXT.md"), "next\n");
+    execFileSync("git", ["-C", local, "add", "NEXT.md"]);
+    execFileSync("git", ["-C", local, "commit", "-m", "next feature"]);
     const ready = await inspector.repositoryStatus();
-    assert.equal(ready.masterPublished, true);
-    assert.equal(ready.masterAhead, 1);
-    assert.equal(ready.masterBehind, 0);
-    assert.equal(ready.canPushMaster, true);
+    assert.equal(ready.defaultPublished, true);
+    assert.equal(ready.defaultAhead, 1);
+    assert.equal(ready.defaultBehind, 0);
+    assert.equal(ready.canPushDefault, true);
 
     writeFileSync(join(local, "DRAFT.md"), "not committed\n");
     const dirty = await inspector.repositoryStatus();
-    assert.equal(dirty.canPushMaster, false);
+    assert.equal(dirty.canPushDefault, false);
     await assert.rejects(
-      inspector.pushHeadToMaster(dirty.head, dirty.masterHead),
+      inspector.pushHeadToDefault(dirty.head, dirty.defaultBranch, dirty.defaultHead),
       /рабочие изменения/,
     );
     rmSync(join(local, "DRAFT.md"));
 
     const clean = await inspector.repositoryStatus();
     await assert.rejects(
-      inspector.pushHeadToMaster(clean.head, "0".repeat(40)),
-      /origin\/master изменился после отображения/,
+      inspector.pushHeadToDefault(clean.head, clean.defaultBranch, "0".repeat(40)),
+      /origin\/main изменился после отображения/,
     );
-    const hookMarker = join(fixture, "master-hook-ran");
+    const hookMarker = join(fixture, "default-hook-ran");
     const hook = join(local, ".git", "hooks", "pre-push");
     writeFileSync(hook, `#!/bin/sh\nprintf ran > ${JSON.stringify(hookMarker)}\n`);
     chmodSync(hook, 0o700);
-    const published = await inspector.pushHeadToMaster(clean.head, clean.masterHead);
-    assert.equal(published.masterAhead, 0);
-    assert.equal(published.canPushMaster, false);
+    const published = await inspector.pushHeadToDefault(
+      clean.head,
+      clean.defaultBranch,
+      clean.defaultHead,
+    );
+    assert.equal(published.defaultAhead, 0);
+    assert.equal(published.canPushDefault, false);
     assert.equal(
-      gitOutput(remote, "rev-parse", "refs/heads/master"),
+      gitOutput(remote, "rev-parse", "refs/heads/main"),
       clean.head,
     );
     assert.equal(existsSync(hookMarker), false);
 
-    execFileSync("git", ["clone", "--branch", "master", remote, updater]);
+    execFileSync("git", ["clone", "--branch", "main", remote, updater]);
     execFileSync("git", ["-C", updater, "config", "user.name", "Remote"]);
     execFileSync("git", ["-C", updater, "config", "user.email", "remote@example.test"]);
     writeFileSync(join(local, "LOCAL.md"), "local\n");
@@ -323,16 +334,16 @@ test("publishes a clean current HEAD to origin/master only as a fast-forward", a
     writeFileSync(join(updater, "REMOTE.md"), "remote\n");
     execFileSync("git", ["-C", updater, "add", "REMOTE.md"]);
     execFileSync("git", ["-C", updater, "commit", "-m", "next remote"]);
-    execFileSync("git", ["-C", updater, "push", "origin", "master"]);
+    execFileSync("git", ["-C", updater, "push", "origin", "main"]);
 
     await assert.rejects(
-      inspector.pushHeadToMaster(stale.head, stale.masterHead),
-      /origin\/master изменился после отображения/,
+      inspector.pushHeadToDefault(stale.head, stale.defaultBranch, stale.defaultHead),
+      /origin\/main изменился после отображения/,
     );
     const diverged = await inspector.repositoryStatus();
-    assert.equal(diverged.masterAhead, 1);
-    assert.equal(diverged.masterBehind, 1);
-    assert.equal(diverged.canPushMaster, false);
+    assert.equal(diverged.defaultAhead, 1);
+    assert.equal(diverged.defaultBehind, 1);
+    assert.equal(diverged.canPushDefault, false);
   } finally {
     rmSync(fixture, { recursive: true, force: true });
   }

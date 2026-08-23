@@ -75,7 +75,7 @@ interface ViewerRepositoryConnection {
 const REPOSITORY_ACTIONS = new Set([
   "pull",
   "push",
-  "push-master",
+  "push-default",
   "connect",
   "verify",
   "migrate-legacy",
@@ -1299,7 +1299,8 @@ export class ProjectViewerServer {
     body: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
     const expectedHead = String(body.expectedHead ?? "");
-    const expectedMasterHead = String(body.expectedMasterHead ?? "");
+    const expectedDefaultBranch = String(body.expectedDefaultBranch ?? "");
+    const expectedDefaultHead = String(body.expectedDefaultHead ?? "");
     const expectedRemote = String(body.expectedRemote ?? "");
     const remoteUrl = String(body.remoteUrl ?? "");
     let context = await this.repositoryContext(scope);
@@ -1518,15 +1519,18 @@ export class ProjectViewerServer {
         context.rotation = null;
         repository = await context.inspector.repositoryStatus(false);
         message = "Ротация ключа отменена.";
-      } else if (action === "push-master") {
+      } else if (action === "push-default") {
         if (body.confirmed !== true) {
-          throw new ViewerHttpError(400, "подтвердите публикацию в origin/master");
+          throw new ViewerHttpError(400, "подтвердите публикацию в основную ветку origin");
         }
-        repository = await context.inspector.pushHeadToMaster(
+        repository = await context.inspector.pushHeadToDefault(
           expectedHead,
-          expectedMasterHead,
+          expectedDefaultBranch,
+          expectedDefaultHead,
         );
-        message = "Текущий HEAD опубликован в origin/master безопасным fast-forward.";
+        message = repository.defaultBranch
+          ? `Текущий HEAD опубликован в origin/${repository.defaultBranch} без перезаписи истории.`
+          : "Текущий HEAD опубликован в основную ветку origin без перезаписи истории.";
       } else {
         repository = action === "pull"
           ? await context.inspector.pullCurrentBranch(expectedHead)
@@ -1628,8 +1632,8 @@ export class ProjectViewerServer {
           ...repository,
           canPush: false,
           canPull: false,
-          canPushMaster: false,
-          masterMessage: `${repository.masterMessage} Дождитесь завершения активного Codex run.`,
+          canPushDefault: false,
+          defaultMessage: `${repository.defaultMessage} Дождитесь завершения активного Codex run.`,
           message: `${repository.message} Дождитесь завершения активного Codex run.`,
         }
       : verification
@@ -1637,10 +1641,10 @@ export class ProjectViewerServer {
             ...repository,
             canPush: repository.canPush && verification.write,
             canPull: repository.canPull && verification.read,
-            canPushMaster: repository.canPushMaster && verification.write,
+            canPushDefault: repository.canPushDefault && verification.write,
           }
         : context.credential
-          ? { ...repository, canPush: false, canPull: false, canPushMaster: false }
+          ? { ...repository, canPush: false, canPull: false, canPushDefault: false }
           : repository;
     return {
       repository: gated,

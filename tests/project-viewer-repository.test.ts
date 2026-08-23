@@ -143,15 +143,17 @@ test("repository tab gives the project owner and administrator safe push and pul
         head: string;
         ahead: number;
         canPush: boolean;
-        masterHead: string;
-        masterAhead: number;
-        canPushMaster: boolean;
+        defaultBranch: string;
+        defaultHead: string;
+        defaultAhead: number;
+        canPushDefault: boolean;
       };
     };
     assert.equal(statusPayload.repository.ahead, 1);
     assert.equal(statusPayload.repository.canPush, true);
-    assert.equal(statusPayload.repository.masterAhead, 1);
-    assert.equal(statusPayload.repository.canPushMaster, true);
+    assert.equal(statusPayload.repository.defaultBranch, "master");
+    assert.equal(statusPayload.repository.defaultAhead, 1);
+    assert.equal(statusPayload.repository.canPushDefault, true);
 
     const administratorStatus = await fetch(
       `${endpoint}/api/viewer/repository?conversation=${conversation.id}`,
@@ -170,9 +172,10 @@ test("repository tab gives the project owner and administrator safe push and pul
       headers: { ...auth(42), "content-type": "application/json" },
       body: JSON.stringify({
         conversation: conversation.id,
-        action: "push-master",
+        action: "push-default",
         expectedHead: statusPayload.repository.head,
-        expectedMasterHead: statusPayload.repository.masterHead,
+        expectedDefaultBranch: statusPayload.repository.defaultBranch,
+        expectedDefaultHead: statusPayload.repository.defaultHead,
         confirmed: true,
       }),
     });
@@ -203,9 +206,10 @@ test("repository tab gives the project owner and administrator safe push and pul
       headers: { ...auth(42), "content-type": "application/json" },
       body: JSON.stringify({
         conversation: conversation.id,
-        action: "push-master",
+        action: "push-default",
         expectedHead: statusPayload.repository.head,
-        expectedMasterHead: statusPayload.repository.masterHead,
+        expectedDefaultBranch: statusPayload.repository.defaultBranch,
+        expectedDefaultHead: statusPayload.repository.defaultHead,
       }),
     });
     assert.equal(unconfirmedMaster.status, 400);
@@ -214,9 +218,10 @@ test("repository tab gives the project owner and administrator safe push and pul
       headers: { ...auth(42), "content-type": "application/json" },
       body: JSON.stringify({
         conversation: conversation.id,
-        action: "push-master",
+        action: "push-default",
         expectedHead: statusPayload.repository.head,
-        expectedMasterHead: statusPayload.repository.masterHead,
+        expectedDefaultBranch: statusPayload.repository.defaultBranch,
+        expectedDefaultHead: statusPayload.repository.defaultHead,
         confirmed: true,
       }),
     });
@@ -236,20 +241,22 @@ test("repository tab gives the project owner and administrator safe push and pul
     const administratorMasterPayload = await administratorMasterStatus.json() as {
       repository: {
         head: string;
-        masterHead: string;
+        defaultBranch: string;
+        defaultHead: string;
         canPush: boolean;
-        canPushMaster: boolean;
+        canPushDefault: boolean;
       };
     };
-    assert.equal(administratorMasterPayload.repository.canPushMaster, true);
+    assert.equal(administratorMasterPayload.repository.canPushDefault, true);
     const administratorMaster = await fetch(`${endpoint}/api/viewer/repository`, {
       method: "POST",
       headers: { ...auth(1), "content-type": "application/json" },
       body: JSON.stringify({
         conversation: conversation.id,
-        action: "push-master",
+        action: "push-default",
         expectedHead: administratorMasterPayload.repository.head,
-        expectedMasterHead: administratorMasterPayload.repository.masterHead,
+        expectedDefaultBranch: administratorMasterPayload.repository.defaultBranch,
+        expectedDefaultHead: administratorMasterPayload.repository.defaultHead,
         confirmed: true,
       }),
     });
@@ -393,9 +400,10 @@ test("repository controls are present in the Mini App", () => {
   assert.match(VIEWER_HTML, /id="repositoryAudit"/);
   assert.match(VIEWER_HTML, /id="pullRepository"/);
   assert.match(VIEWER_HTML, /id="pushRepository"/);
-  assert.match(VIEWER_HTML, /id="pushMasterRepository"/);
-  assert.match(VIEWER_HTML, /id="repositoryMasterHead"/);
-  assert.match(VIEWER_HTML, /id="repositoryMasterAhead"/);
+  assert.match(VIEWER_HTML, /id="pushDefaultRepository"/);
+  assert.match(VIEWER_HTML, /id="repositoryDefaultHead"/);
+  assert.match(VIEWER_HTML, /id="repositoryDefaultAhead"/);
+  assert.doesNotMatch(VIEWER_HTML, /origin\/master/);
   assert.match(VIEWER_JS, /postRepository\("connect"/);
   assert.match(VIEWER_JS, /copyFrom\("repositoryPublicKey"/);
   assert.match(VIEWER_JS, /postRepository\("verify"\)/);
@@ -403,8 +411,9 @@ test("repository controls are present in the Mini App", () => {
   assert.match(VIEWER_JS, /rotationAction\("activate-rotation"\)/);
   assert.match(VIEWER_JS, /syncRepository\("pull"\)/);
   assert.match(VIEWER_JS, /syncRepository\("push"\)/);
-  assert.match(VIEWER_JS, /postRepository\("push-master"/);
-  assert.match(VIEWER_JS, /expectedMasterHead:repository\.masterHead/);
+  assert.match(VIEWER_JS, /postRepository\("push-default"/);
+  assert.match(VIEWER_JS, /expectedDefaultHead:repository\.defaultHead/);
+  assert.match(VIEWER_JS, /repository\.defaultBranch/);
 });
 
 test("active owner turns use the managed host repository control plane", async () => {
