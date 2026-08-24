@@ -73,6 +73,11 @@ export interface KnowledgeSyncAdmin {
     proof: string;
     historicalFrom?: number | null;
   }): Record<string, unknown>;
+  grantGroupConsent(input: {
+    chatId: number;
+    proof: string;
+    historicalFrom?: number | null;
+  }): Record<string, unknown>;
   revokeConsent(chatId: number, telegramUserId: number): Promise<void>;
   startSource(input: AdminStartInput): Promise<SyncStatus>;
   pauseSource(chatId: number): SyncStatus;
@@ -541,6 +546,75 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
       );
     }
     return { ...consent };
+  }
+
+  grantGroupConsent(input: {
+    chatId: number;
+    proof: string;
+    historicalFrom?: number | null;
+  }): Record<string, unknown> {
+    if (!input.proof.trim()) throw new Error("consent proof is required");
+    const users = this.state.listTelegramChatUsers(input.chatId)
+      .filter((user) => !user.isBot)
+      .sort((left, right) => left.userId - right.userId);
+    if (users.length === 0) {
+      throw new Error("no observed non-bot Telegram users found in the group");
+    }
+    const source = this.rootSource(input.chatId);
+    let newlyGranted = 0;
+    for (const user of users) {
+      if (!this.store.consentGranted(source.sourceId, user.userId)) newlyGranted += 1;
+      this.grantConsent({
+        chatId: input.chatId,
+        telegramUserId: user.userId,
+        proof: input.proof,
+        ...(input.historicalFrom === undefined
+          ? {}
+          : { historicalFrom: input.historicalFrom }),
+      });
+    }
+    return {
+      sourceId: source.sourceId,
+      chatId: input.chatId,
+      granted: users.length,
+      newlyGranted,
+      alreadyGranted: users.length - newlyGranted,
+      telegramUserIds: users.map((user) => user.userId),
+    };
+  }
+
+  consentGrantedForSource(
+    sourceId: string,
+    telegramUserId: number,
+    occurredAt?: number,
+  ): boolean {
+    return this.consentSourceIds(sourceId).some((candidateSourceId) =>
+      this.store.consentGranted(candidateSourceId, telegramUserId, occurredAt));
+  }
+
+  consentScopeGrantedForSource(
+    sourceId: string,
+    telegramUserId: number,
+    scope: "history" | "future" | "model_egress",
+    occurredAt?: number,
+  ): boolean {
+    return this.consentSourceIds(sourceId).some((candidateSourceId) =>
+      this.store.consentScopeGranted(candidateSourceId, telegramUserId, scope, occurredAt));
+  }
+
+  private consentSourceIds(sourceId: string): string[] {
+    const source = this.state.teamSource(sourceId);
+    if (
+      !source ||
+      source.provider !== "telegram" ||
+      source.externalThreadId === "0"
+    ) {
+      return [sourceId];
+    }
+    return [
+      sourceId,
+      StateStore.teamSourceId("telegram", source.externalSpaceId, "0"),
+    ];
   }
 
   async revokeConsent(chatId: number, telegramUserId: number): Promise<void> {

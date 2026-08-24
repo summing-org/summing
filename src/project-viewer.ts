@@ -482,14 +482,22 @@ export class ProjectViewerServer {
       const body = await requestBody(request) as Record<string, unknown> | null;
       try {
         json(response, 200, {
-          consent: this.requireKnowledgeSync().grantConsent({
-            chatId: Number(body?.chatId),
-            telegramUserId: Number(body?.telegramUserId),
-            proof: String(body?.proof ?? ""),
-            ...(body?.historicalFrom === undefined || body.historicalFrom === null
-              ? {}
-              : { historicalFrom: Number(body.historicalFrom) }),
-          }),
+          consent: body?.allUsers === true
+            ? this.requireKnowledgeSync().grantGroupConsent({
+                chatId: Number(body?.chatId),
+                proof: String(body?.proof ?? ""),
+                ...(body?.historicalFrom === undefined || body.historicalFrom === null
+                  ? {}
+                  : { historicalFrom: Number(body.historicalFrom) }),
+              })
+            : this.requireKnowledgeSync().grantConsent({
+                chatId: Number(body?.chatId),
+                telegramUserId: Number(body?.telegramUserId),
+                proof: String(body?.proof ?? ""),
+                ...(body?.historicalFrom === undefined || body.historicalFrom === null
+                  ? {}
+                  : { historicalFrom: Number(body.historicalFrom) }),
+              }),
         });
       } catch (error) {
         throw new ViewerHttpError(400, error instanceof Error ? error.message : String(error));
@@ -1150,7 +1158,7 @@ export class ProjectViewerServer {
         title: "Согласия авторов",
         detail: grantedConsents > 0
           ? `Активных записей согласия: ${grantedConsents}.`
-          : "Зафиксируйте history + future + model egress для каждого предполагаемого автора.",
+          : "Зафиксируйте групповые history + future + model egress для всех наблюдаемых участников.",
       },
       {
         id: "first-source",

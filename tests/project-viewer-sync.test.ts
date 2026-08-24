@@ -89,6 +89,7 @@ test("owner-only Admin API exposes MTProto, consent and source sync actions", as
       return { connectorId: id, state: "ready", passwordHint: "", expiresAt: 999, error: "" };
     },
     grantConsent: (input) => { calls.push(["consent", input]); return input; },
+    grantGroupConsent: (input) => { calls.push(["group-consent", input]); return input; },
     revokeConsent: async (chatId, userId) => { calls.push(["revoke-consent", { chatId, userId }]); },
     startSource: async (input) => {
       calls.push(["start", input]);
@@ -186,7 +187,7 @@ test("owner-only Admin API exposes MTProto, consent and source sync actions", as
     const consent = await fetch(`${endpoint}/api/viewer/admin/knowledge/consents`, {
       method: "POST",
       headers: { ...auth(1), "content-type": "application/json" },
-      body: JSON.stringify({ chatId: -100, telegramUserId: 42, proof: "contract" }),
+      body: JSON.stringify({ chatId: -100, allUsers: true, proof: "contract" }),
     });
     assert.equal(consent.status, 200);
 
@@ -218,7 +219,7 @@ test("owner-only Admin API exposes MTProto, consent and source sync actions", as
     assert.equal(imported.status, 202);
     assert.equal(
       calls.map(([name]) => name).join(","),
-      "authorize,consent,start,export,import",
+      "authorize,group-consent,start,export,import",
     );
 
     assert.equal(
@@ -258,7 +259,7 @@ test("owner-only Admin API exposes MTProto, consent and source sync actions", as
     assert.equal(confirmedRecovery.status, 202);
     assert.equal(
       calls.map(([name]) => name).join(","),
-      "authorize,consent,start,export,import,node-export,node-restore,node-confirm",
+      "authorize,group-consent,start,export,import,node-export,node-restore,node-confirm",
     );
   } finally {
     await viewer.close();

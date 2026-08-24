@@ -4383,7 +4383,7 @@ export class SummingRuntime {
     const events = candidates
       .filter((event) =>
         (this.telegramBotId > 0 && Number(event.senderExternalId) === this.telegramBotId) ||
-        this.knowledgeSync.store.consentScopeGranted(
+        this.knowledgeSync.consentScopeGrantedForSource(
           event.sourceId,
           Number(event.senderExternalId),
           "model_egress",
@@ -4493,7 +4493,7 @@ export class SummingRuntime {
       const events = candidates
         .filter((event) =>
           (this.telegramBotId > 0 && Number(event.senderExternalId) === this.telegramBotId) ||
-          this.knowledgeSync.store.consentScopeGranted(
+          this.knowledgeSync.consentScopeGrantedForSource(
             event.sourceId,
             Number(event.senderExternalId),
             "model_egress",

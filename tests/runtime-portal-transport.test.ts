@@ -6,6 +6,7 @@ import test from "node:test";
 import { ProjectConfig, RuntimeConfig, type WorkspaceConfig } from "../src/config.js";
 import type { RunnerJob } from "../src/project-runner-client.js";
 import { SummingRuntime } from "../src/runtime.js";
+import { StateStore } from "../src/state-store.js";
 
 function fixture(): {
   root: string;
@@ -224,9 +225,9 @@ test("an authorized Project agent can forward an incoming workspace attachment",
     });
     assert.ok(customerEvent);
     runtime.knowledgeSync.store.grantConsent({
-      sourceId: customerEvent.sourceId,
+      sourceId: StateStore.teamSourceId("telegram", "-100500", "0"),
       telegramUserId: 42,
-      proof: "test fixture consent",
+      proof: "group-level test fixture consent",
     });
     const storedArtifact = runtime.projectPortalArtifacts.store({
       projectId: "demo",

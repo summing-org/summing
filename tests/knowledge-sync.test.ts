@@ -74,6 +74,82 @@ test("Team Space export returns one recovery key and persists only its wrapped e
   }
 });
 
+test("group consent grants every observed human and applies to every Telegram topic", async () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-group-consent-"));
+  const state = new StateStore(join(root, "state.sqlite3"));
+  const service = new KnowledgeSyncService(
+    { ...enabledConfig(root), enabled: false },
+    state,
+    "",
+    async () => {},
+    root,
+    1,
+  );
+  try {
+    state.recordTelegramChat({
+      chatId: -100500,
+      type: "supergroup",
+      title: "Customer group",
+      isForum: true,
+    });
+    state.recordTelegramTopic(-100500, 9, "Reports");
+    state.recordTelegramTopicUser(-100500, 9, {
+      userId: 42,
+      firstName: "Customer",
+      observedAt: 150,
+    });
+    state.recordTelegramTopicUser(-100500, 9, {
+      userId: 43,
+      firstName: "Manager",
+      observedAt: 160,
+    });
+    state.recordTelegramTopicUser(-100500, 9, {
+      userId: 123,
+      firstName: "Bot",
+      isBot: true,
+      observedAt: 170,
+    });
+    const topic = state.ensureTeamSource({
+      provider: "telegram",
+      externalSpaceId: "-100500",
+      externalThreadId: "9",
+      spaceName: "Customer group",
+      sourceTitle: "Reports",
+      administratorUserId: 1,
+    }).source;
+
+    assert.deepEqual(service.grantGroupConsent({
+      chatId: -100500,
+      proof: "customer contracts",
+      historicalFrom: 100,
+    }), {
+      sourceId: StateStore.teamSourceId("telegram", "-100500", "0"),
+      chatId: -100500,
+      granted: 2,
+      newlyGranted: 2,
+      alreadyGranted: 0,
+      telegramUserIds: [42, 43],
+    });
+    assert.equal(service.store.consent(topic.id, 42), null);
+    assert.equal(
+      service.consentScopeGrantedForSource(topic.id, 42, "model_egress", 150),
+      true,
+    );
+    assert.equal(
+      service.consentScopeGrantedForSource(topic.id, 42, "model_egress", 99),
+      false,
+    );
+    assert.equal(
+      service.consentScopeGrantedForSource(topic.id, 123, "model_egress", 170),
+      false,
+    );
+  } finally {
+    await service.close();
+    state.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("disabled knowledge sync does not require production S3 credentials or an MTProto key", async () => {
   const root = mkdtempSync(join(tmpdir(), "summing-disabled-knowledge-sync-"));
   const state = new StateStore(join(root, "state.sqlite3"));
