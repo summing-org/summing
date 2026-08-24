@@ -305,6 +305,10 @@ Background loop использует собственные `team_memory.model` 
 рестарта; durable override имеет приоритет над config default. Там же показываются
 credits отдельных background threads и помеченная `≈` наблюдаемая доля недельного
 лимита, рассчитанная по приросту общего weekly indicator вокруг этих turns.
+Отдельный `team_memory.proactive_replies_enabled` и соседний Admin-переключатель
+управляют только model-generated репликами: при выключенных проактивных ответах
+Conversation Understanding Loop продолжает собирать эпизоды и обновлять background
+memory, пока включён сам model egress.
 
 Один structured output содержит Conversation Episode, обновлённый summary,
 evidence-backed knowledge и `silent/reply` decision. Runtime принимает его только после
@@ -314,6 +318,10 @@ ambient model call нет. До первого batch Team Space получает
 model egress; после `team_memory.orientation_event_threshold` событий SUMMING один раз
 показывает понимание и уточняет главные пробелы. Дальнейшие replies ограничены
 `team_memory.intervention_cooldown_sec` и всегда привязаны к конкретному provider message.
+Сообщение, маршрутизированное в direct Project-turn, синхронно получает локальный
+`direct_claimed_at`; оно остаётся evidence для памяти, но runtime запрещает orientation
+или proactive reply по этому событию и повторно проверяет claim непосредственно перед
+Telegram send. Этот routing-факт не экспортируется как Team Knowledge.
 
 Документ можно отправить с caption или без него. SUMMING сохранит его внутри
 runtime-каталога conversation и передаст Codex точный относительный путь. Архивы

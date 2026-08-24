@@ -80,8 +80,10 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
   const bindingNotifications: Array<[number, number]> = [];
   const portalActions: string[] = [];
   let modelEgressEnabled = true;
+  let proactiveRepliesEnabled = true;
   const modelEgressOverview = () => ({
     enabled: modelEgressEnabled,
+    proactive_replies_enabled: proactiveRepliesEnabled,
     model: "gpt-5.6-luna",
     effort: "low",
     account_weekly: { used_percent: 40, remaining_percent: 60, resets_at: 1_800_000_000 },
@@ -107,6 +109,10 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
       overview: modelEgressOverview,
       setEnabled: (enabled) => {
         modelEgressEnabled = enabled;
+        return modelEgressOverview();
+      },
+      setProactiveRepliesEnabled: (enabled) => {
+        proactiveRepliesEnabled = enabled;
         return modelEgressOverview();
       },
     },
@@ -206,6 +212,20 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
     );
     assert.equal(disabledModelEgress.status, 200);
     assert.equal((await disabledModelEgress.json() as { enabled: boolean }).enabled, false);
+    const disabledProactiveReplies = await fetch(
+      `${endpoint}/api/viewer/admin/model-egress/proactive-replies`,
+      {
+        method: "POST",
+        headers: { ...auth(1), "content-type": "application/json" },
+        body: JSON.stringify({ enabled: false }),
+      },
+    );
+    assert.equal(disabledProactiveReplies.status, 200);
+    assert.equal(
+      (await disabledProactiveReplies.json() as { proactive_replies_enabled: boolean })
+        .proactive_replies_enabled,
+      false,
+    );
 
     const disabledDeployment = await fetch(
       `${endpoint}/api/viewer/admin/deployment`,

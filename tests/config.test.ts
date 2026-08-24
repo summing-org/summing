@@ -24,6 +24,7 @@ enabled = true
 model_egress_enabled = true
 model = "gpt-5.6-luna"
 effort = "low"
+proactive_replies_enabled = true
 understanding_quiet_sec = 45
 understanding_max_wait_sec = 150
 understanding_max_events = 80
@@ -78,6 +79,7 @@ test("loads the explicit project model", () => {
     assert.equal(config.teamModelEgressEnabled, true);
     assert.equal(config.teamUnderstandingModel, "gpt-5.6-luna");
     assert.equal(config.teamUnderstandingEffort, "low");
+    assert.equal(config.teamProactiveRepliesEnabled, true);
     assert.equal(config.teamUnderstandingQuietSeconds, 45);
     assert.equal(config.teamUnderstandingMaxWaitSeconds, 150);
     assert.equal(config.teamUnderstandingMaxEvents, 80);
@@ -166,6 +168,26 @@ test("background Team Space model egress is opt-in", () => {
       TELEGRAM_OWNER_ID: "42",
     });
     assert.equal(config.teamModelEgressEnabled, false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("proactive Team Space replies are opt-in independently from model egress", () => {
+  const { root, configPath } = fixture();
+  try {
+    writeFileSync(
+      configPath,
+      readFileSync(configPath, "utf8").replace("proactive_replies_enabled = true\n", ""),
+    );
+    const config = loadConfig({
+      SUMMING_DATA_DIR: join(root, "data"),
+      SUMMING_CONFIG: configPath,
+      TELEGRAM_BOT_TOKEN: "test-token",
+      TELEGRAM_OWNER_ID: "42",
+    });
+    assert.equal(config.teamModelEgressEnabled, true);
+    assert.equal(config.teamProactiveRepliesEnabled, false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

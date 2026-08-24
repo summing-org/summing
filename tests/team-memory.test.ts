@@ -96,6 +96,7 @@ test("validates one episode shared by memory and intervention", () => {
     attachments: [],
     occurredAt: 1_700_000_000,
     observedAt: 1_700_000_001,
+    directClaimedAt: null,
     synthesisState: "pending",
     redactedAt: null,
   };

@@ -137,6 +137,7 @@ export class RuntimeConfig {
     readonly knowledgeSync: KnowledgeSyncConfig = defaultKnowledgeSyncConfig(dataDir),
     readonly teamUnderstandingModel = "gpt-5.6-luna",
     readonly teamUnderstandingEffort = "low",
+    readonly teamProactiveRepliesEnabled = false,
   ) {}
 
   project(projectId: string): ProjectConfig {
@@ -543,5 +544,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig 
     },
     String(teamMemory.model || "gpt-5.6-luna").trim(),
     String(teamMemory.effort || "low").trim(),
+    Boolean(teamMemory.proactive_replies_enabled ?? false),
   );
 }

@@ -15,6 +15,7 @@ enabled = true
 model_egress_enabled = false
 model = "gpt-5.6-luna"
 effort = "low"
+proactive_replies_enabled = false
 understanding_quiet_sec = 60
 understanding_max_wait_sec = 300
 understanding_max_events = 100

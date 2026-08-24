@@ -215,6 +215,7 @@ export interface TeamEvent {
   attachments: TeamEventAttachment[];
   occurredAt: number;
   observedAt: number;
+  directClaimedAt: number | null;
   synthesisState: "pending" | "synthesized" | "redacted";
   redactedAt: number | null;
 }
@@ -894,6 +895,7 @@ export class StateStore {
           attachments_json TEXT NOT NULL DEFAULT '[]',
           occurred_at REAL NOT NULL,
           observed_at REAL NOT NULL,
+          direct_claimed_at REAL,
           synthesis_state TEXT NOT NULL DEFAULT 'pending'
             CHECK(synthesis_state IN ('pending', 'synthesized', 'redacted')),
           redacted_at REAL,
@@ -992,6 +994,10 @@ export class StateStore {
       }
       if (!teamSpaceColumns.some((column) => column.name === "model_egress_announced_at")) {
         this.db.exec("ALTER TABLE team_spaces ADD COLUMN model_egress_announced_at REAL");
+      }
+      const teamEventColumns = this.db.prepare("PRAGMA table_info(team_events)").all() as Row[];
+      if (!teamEventColumns.some((column) => column.name === "direct_claimed_at")) {
+        this.db.exec("ALTER TABLE team_events ADD COLUMN direct_claimed_at REAL");
       }
       const interventionSchema = this.db.prepare(`
         SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'team_interventions'
@@ -1850,6 +1856,20 @@ export class StateStore {
     });
   }
 
+  claimTeamEventForDirectResponse(
+    eventId: number,
+    claimedAt = Date.now() / 1_000,
+  ): TeamEvent | null {
+    this.transaction(() => {
+      this.db.prepare(`
+        UPDATE team_events
+        SET direct_claimed_at = COALESCE(direct_claimed_at, ?)
+        WHERE id = ? AND synthesis_state <> 'redacted'
+      `).run(claimedAt, eventId);
+    });
+    return this.teamEvent(eventId);
+  }
+
   attachTeamEventArtifact(
     eventId: number,
     input: { providerFileId?: string; artifactId: string; sha256: string },
@@ -1940,6 +1960,10 @@ export class StateStore {
       attachments,
       occurredAt: Number(row.occurred_at),
       observedAt: Number(row.observed_at),
+      directClaimedAt:
+        row.direct_claimed_at === null || row.direct_claimed_at === undefined
+          ? null
+          : Number(row.direct_claimed_at),
       synthesisState: String(row.synthesis_state) as TeamEvent["synthesisState"],
       redactedAt: row.redacted_at === null ? null : Number(row.redacted_at),
     };
@@ -3354,6 +3378,25 @@ export class StateStore {
     this.transaction(() => {
       this.db.prepare(`
         INSERT INTO runtime_state (key, value) VALUES ('team_model_egress_enabled', ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+      `).run(String(enabled));
+    });
+  }
+
+  teamProactiveRepliesEnabledOverride(): boolean | null {
+    const row = this.db.prepare(
+      "SELECT value FROM runtime_state WHERE key = 'team_proactive_replies_enabled'",
+    ).get() as Row | undefined;
+    if (!row) return null;
+    if (row.value === "true") return true;
+    if (row.value === "false") return false;
+    return null;
+  }
+
+  setTeamProactiveRepliesEnabled(enabled: boolean): void {
+    this.transaction(() => {
+      this.db.prepare(`
+        INSERT INTO runtime_state (key, value) VALUES ('team_proactive_replies_enabled', ?)
         ON CONFLICT(key) DO UPDATE SET value = excluded.value
       `).run(String(enabled));
     });

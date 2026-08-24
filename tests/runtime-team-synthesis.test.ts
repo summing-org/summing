@@ -7,7 +7,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { RuntimeConfig } from "../src/config.js";
 import { SummingRuntime } from "../src/runtime.js";
 
-test("administrator model-egress override survives a runtime restart", () => {
+test("administrator model-egress and proactive-reply overrides survive a runtime restart", () => {
   const root = mkdtempSync(join(tmpdir(), "summing-team-egress-toggle-"));
   const config = new RuntimeConfig(
     join(root, "data"),
@@ -24,17 +24,30 @@ test("administrator model-egress override survives a runtime restart", () => {
     false,
     new Map(),
   );
-  Object.assign(config, { teamModelEgressEnabled: true });
+  Object.assign(config, {
+    teamModelEgressEnabled: true,
+    teamProactiveRepliesEnabled: true,
+  });
   const first = new SummingRuntime(config);
   try {
     assert.equal(
       (first.status().team_memory as Record<string, unknown>).model_egress_enabled,
       true,
     );
+    assert.equal(
+      (first.status().team_memory as Record<string, unknown>).proactive_replies_enabled,
+      true,
+    );
     (first as unknown as { setTeamModelEgressEnabled(enabled: boolean): void })
       .setTeamModelEgressEnabled(false);
     assert.equal(
       (first.status().team_memory as Record<string, unknown>).model_egress_enabled,
+      false,
+    );
+    (first as unknown as { setTeamProactiveRepliesEnabled(enabled: boolean): void })
+      .setTeamProactiveRepliesEnabled(false);
+    assert.equal(
+      (first.status().team_memory as Record<string, unknown>).proactive_replies_enabled,
       false,
     );
   } finally {
@@ -44,6 +57,10 @@ test("administrator model-egress override survives a runtime restart", () => {
   try {
     assert.equal(
       (reopened.status().team_memory as Record<string, unknown>).model_egress_enabled,
+      false,
+    );
+    assert.equal(
+      (reopened.status().team_memory as Record<string, unknown>).proactive_replies_enabled,
       false,
     );
   } finally {
@@ -71,6 +88,7 @@ test("one background understanding loop creates an episode, memory, and optional
   );
   Object.assign(config, {
     teamModelEgressEnabled: true,
+    teamProactiveRepliesEnabled: false,
     teamUnderstandingModel: "gpt-5.6-luna",
     teamUnderstandingEffort: "low",
     teamUnderstandingMaxEvents: 20,
@@ -264,6 +282,13 @@ test("one background understanding loop creates an episode, memory, and optional
     assert.equal(sent.length, 1);
     assert.match(sent[0]?.text ?? "", /Администратор включил фоновое осмысление/);
     assert.doesNotMatch(sent[0]?.text ?? "", /Что мне важно уточнить/);
+    assert.equal(
+      (runtime.status().team_memory as Record<string, unknown>).proactive_replies_enabled,
+      false,
+    );
+
+    (runtime as unknown as { setTeamProactiveRepliesEnabled(enabled: boolean): void })
+      .setTeamProactiveRepliesEnabled(true);
 
     runtime.state.bind(-100500, 9, "summing", "repo");
     const bindingEvent = runtime.state.recordTeamEvent({
@@ -382,6 +407,54 @@ test("one background understanding loop creates an episode, memory, and optional
     );
     assert.deepEqual(sent[2]?.options, { topicId: 9, replyTo: 104, parseMode: "HTML" });
 
+    const claimed = runtime.state.recordTeamEvent({
+      provider: "telegram",
+      externalSpaceId: "-100500",
+      externalThreadId: "9",
+      spaceName: "Engineering",
+      sourceTitle: "Release",
+      externalEventId: "105",
+      eventKind: "message",
+      senderExternalId: "42",
+      senderDisplayName: "Маша",
+      text: "Выкатывай новый релиз",
+      occurredAt: 1_700_000_040,
+      administratorUserId: 1,
+    })!;
+    runtime.state.claimTeamEventForDirectResponse(claimed.id, 1_700_000_041);
+    response = JSON.stringify({
+      episode: {
+        source_id: claimed.sourceId,
+        subject: "Запуск релиза",
+        synopsis: "Маша поручила Project-turn развернуть новый релиз.",
+        confidence: 0.98,
+        event_ids: [claimed.id],
+        participants: [{
+          person_id: claimed.personId,
+          role: "speaker",
+          intent: "Запустить релиз",
+          confidence: 0.95,
+          evidence_event_ids: [claimed.id],
+        }],
+      },
+      summary: "Команда запускает новый релиз.",
+      knowledge: [],
+      orientation_ready: false,
+      orientation_message: "",
+      clarification_questions: [],
+      intervention: {
+        action: "reply",
+        reply_to_event_id: claimed.id,
+        message: "Какой релиз и в какое окружение развернуть?",
+        reason: "Модель сочла запрос неоднозначным.",
+      },
+    });
+    await understandTeamConversation(claimed.sourceId);
+
+    assert.equal(runtime.state.pendingTeamEventCountForSource(claimed.sourceId), 0);
+    assert.equal(sent.length, 3);
+    assert.match(prompts[3] ?? "", /"direct_route_claimed": true/);
+
     response = JSON.stringify({
       episode: {
         source_id: otherSource.sourceId,
@@ -436,6 +509,7 @@ test("one background understanding loop creates an episode, memory, and optional
       "gpt-5.6-luna",
       "gpt-5.6-luna",
       "gpt-5.6-luna",
+      "gpt-5.6-luna",
     ]);
     assert.equal(threadOptions.every((item) => item.readOnly === true), true);
     assert.equal(threadOptions.every((item) => item.networkAccess === false), true);
@@ -464,12 +538,13 @@ test("one background understanding loop creates an episode, memory, and optional
       "thr-team-2",
       "thr-team-3",
       "thr-team-4",
+      "thr-team-5",
     ]);
     assert.deepEqual(runtime.state.teamModelEgressUsage(), {
       weeklyResetsAt: 1_800_000_000,
-      turns: 4,
-      measuredTurns: 4,
-      estimatedCreditsMicros: 1_000_000,
+      turns: 5,
+      measuredTurns: 5,
+      estimatedCreditsMicros: 1_250_000,
       observedWeeklyPercent: 3,
       updatedAt: runtime.state.teamModelEgressUsage()?.updatedAt,
     });

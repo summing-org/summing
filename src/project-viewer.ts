@@ -51,6 +51,9 @@ export interface OnboardingRuntimeStatus {
 export interface TeamModelEgressAdmin {
   overview(): Promise<Record<string, unknown>> | Record<string, unknown>;
   setEnabled(enabled: boolean): Promise<Record<string, unknown>> | Record<string, unknown>;
+  setProactiveRepliesEnabled(
+    enabled: boolean,
+  ): Promise<Record<string, unknown>> | Record<string, unknown>;
 }
 
 export interface ProjectPortalAdmin {
@@ -380,6 +383,22 @@ export class ProjectViewerServer {
         throw new ViewerHttpError(400, "enabled must be boolean");
       }
       json(response, 200, await this.requireTeamModelEgress().setEnabled(body.enabled));
+      return;
+    }
+    if (
+      request.method === "POST" &&
+      url.pathname === "/api/viewer/admin/model-egress/proactive-replies"
+    ) {
+      this.requireAdminAccess(telegramUser);
+      const body = await requestBody(request) as Record<string, unknown> | null;
+      if (typeof body?.enabled !== "boolean") {
+        throw new ViewerHttpError(400, "enabled must be boolean");
+      }
+      json(
+        response,
+        200,
+        await this.requireTeamModelEgress().setProactiveRepliesEnabled(body.enabled),
+      );
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/viewer/admin/sync") {

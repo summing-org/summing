@@ -179,8 +179,11 @@ test("persists the model-egress switch and rolls usage into the active weekly wi
   const { root, path, store } = tempStore();
   try {
     assert.equal(store.teamModelEgressEnabledOverride(), null);
+    assert.equal(store.teamProactiveRepliesEnabledOverride(), null);
     store.setTeamModelEgressEnabled(false);
+    store.setTeamProactiveRepliesEnabled(true);
     assert.equal(store.teamModelEgressEnabledOverride(), false);
+    assert.equal(store.teamProactiveRepliesEnabledOverride(), true);
     assert.deepEqual(store.recordTeamModelEgressUsage({
       weeklyResetsAt: 200,
       measured: true,
@@ -217,6 +220,7 @@ test("persists the model-egress switch and rolls usage into the active weekly wi
     const reopened = new StateStore(path);
     try {
       assert.equal(reopened.teamModelEgressEnabledOverride(), false);
+      assert.equal(reopened.teamProactiveRepliesEnabledOverride(), true);
       assert.equal(reopened.teamModelEgressUsage()?.weeklyResetsAt, 300);
     } finally {
       reopened.close();
@@ -499,6 +503,12 @@ test("Team Space journals evidence, preserves provenance, and honors erasure", (
       administratorUserId: 1,
     })!;
     assert.equal(duplicate.id, second.id);
+    assert.equal(first.directClaimedAt, null);
+    assert.equal(store.claimTeamEventForDirectResponse(first.id, 1_700_000_105)?.directClaimedAt,
+      1_700_000_105);
+    assert.equal(store.claimTeamEventForDirectResponse(first.id, 1_700_000_109)?.directClaimedAt,
+      1_700_000_105);
+    assert.equal(store.teamEvent(second.id)?.directClaimedAt, null);
     const space = store.teamSpaceForProvider("telegram", "-100500")!;
     assert.equal(store.teamEventCount(space.id), 2);
     assert.equal(

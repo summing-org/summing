@@ -287,14 +287,14 @@ test("owners control projects while group participants get read-only Q&A", async
     startedConversation = "";
 
     const bound = runtime.state.byTopic(-100, 5)!;
-    await send(
+    const humanAddressedMessageId = await send(
       42,
       "@TON1K_01 текущий топик настроен на проект summing",
       -100,
       "supergroup",
       5,
     );
-    await send(
+    const humanReplyMessageId = await send(
       42,
       "тебя там владельцем поставим",
       -100,
@@ -308,6 +308,18 @@ test("owners control projects while group participants get read-only Q&A", async
     assert.equal(startedConversation, "");
     assert.deepEqual(runtime.state.pendingAll(bound.id), []);
     const boundSource = runtime.state.teamSourceForProvider("telegram", "-100", "5")!;
+    assert.equal(
+      runtime.state.teamEventByExternalId(
+        boundSource.id,
+        String(humanAddressedMessageId),
+      )?.directClaimedAt,
+      null,
+    );
+    assert.equal(
+      runtime.state.teamEventByExternalId(boundSource.id, String(humanReplyMessageId))
+        ?.directClaimedAt,
+      null,
+    );
     assert.deepEqual(
       runtime.state.recentTeamEvents(boundSource.spaceId, boundSource.id)
         .slice(-2)
@@ -454,11 +466,22 @@ test("owners control projects while group participants get read-only Q&A", async
     runtime.state.consume(runtime.state.pendingAll(bound.id).map((item) => item.id));
     startedConversation = "";
 
-    await send(42, "проверь текущий статус проекта", -100, "supergroup", 5);
+    const directStatusMessageId = await send(
+      42,
+      "проверь текущий статус проекта",
+      -100,
+      "supergroup",
+      5,
+    );
     assert.equal(startedConversation, bound.id);
     assert.deepEqual(
       runtime.state.pendingAll(bound.id).map((item) => [item.access, item.responseMode]),
       [["write", "direct"]],
+    );
+    assert.notEqual(
+      runtime.state.teamEventByExternalId(boundSource.id, String(directStatusMessageId))
+        ?.directClaimedAt,
+      null,
     );
     runtime.state.consume(runtime.state.pendingAll(bound.id).map((item) => item.id));
     startedConversation = "";

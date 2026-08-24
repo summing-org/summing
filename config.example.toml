@@ -20,6 +20,9 @@ model_egress_enabled = false
 # Background understanding uses a cheaper model without changing coding turns.
 model = "gpt-5.6-luna"
 effort = "low"
+# Controls only model-generated conversation replies. Memory synthesis continues
+# whenever model_egress_enabled is true.
+proactive_replies_enabled = false
 # One Conversation Understanding Loop resets this quiet window on every new event.
 understanding_quiet_sec = 60
 # Continuous chatter cannot postpone understanding beyond this hard deadline.

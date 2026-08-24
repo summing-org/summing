@@ -28,6 +28,8 @@ test("administrator Mini App exposes projects, bindings and global settings", ()
   assert.match(ADMIN_HTML, /id="systemPanel"[^>]+role="tabpanel"/);
   assert.match(ADMIN_HTML, /Team Memory model egress/);
   assert.match(ADMIN_HTML, /id="modelEgressToggle"/);
+  assert.match(ADMIN_HTML, /id="proactiveRepliesToggle"/);
+  assert.match(ADMIN_HTML, /Проактивные ответы/);
   assert.match(ADMIN_HTML, /id="modelEgressWeeklyPercent"/);
   assert.match(ADMIN_HTML, /Обновиться сейчас/);
   assert.match(ADMIN_HTML, /id="refreshDeployment"/);
@@ -50,6 +52,8 @@ test("administrator Mini App exposes projects, bindings and global settings", ()
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/deployment/);
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/deployment\/refresh/);
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/model-egress/);
+  assert.match(ADMIN_JS, /\/api\/viewer\/admin\/model-egress\/proactive-replies/);
+  assert.match(ADMIN_JS, /background memory продолжает обновляться/);
   assert.match(ADMIN_JS, /observed_weekly_percent/);
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/sync/);
   assert.match(ADMIN_JS, /spaceId:\$\("exportSpace"\)\.value/);
