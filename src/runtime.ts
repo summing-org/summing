@@ -4335,7 +4335,7 @@ export class SummingRuntime {
       actorUserId: active.actorUserId,
       turnId: call.turnId,
     };
-    if (call.namespace === "runner") {
+    if (call.namespace === "runner" || call.namespace === "service") {
       return executeRunnerTool(this.runnerControl, context, call);
     }
     if (call.namespace === "repository") {

@@ -678,6 +678,41 @@ test("owners control projects while group participants get read-only Q&A", async
     );
     assert.equal(runtime.state.get(bound.id).previousCodexThreadId, "thr-legacy");
 
+    (runtime.runnerControl as unknown as {
+      inspect(): Promise<{ services: Array<{ name: string }>; recent: unknown[] }>;
+    }).inspect = async () => ({ services: [{ name: "web" }], recent: [] });
+    (runtime as unknown as { activeByThread: Map<string, unknown> }).activeByThread.set(
+      "thr-write",
+      {
+        access: "write",
+        turnId: "turn-service-inspect",
+        actorUserId: 42,
+        conversation: runtime.state.get(bound.id),
+        prepared: { readableRoot: alphaWorkspace },
+      },
+    );
+    const dynamicToolHandler = writeOptions.dynamicToolHandler as (call: {
+      threadId: string;
+      turnId: string;
+      callId: string;
+      namespace: string;
+      tool: string;
+      arguments: Record<string, never>;
+    }) => Promise<{ success: boolean; contentItems: Array<{ text: string }> }>;
+    const serviceInspection = await dynamicToolHandler({
+      threadId: "thr-write",
+      turnId: "turn-service-inspect",
+      callId: "call-service-inspect",
+      namespace: "service",
+      tool: "inspect",
+      arguments: {},
+    });
+    assert.equal(serviceInspection.success, true);
+    assert.match(serviceInspection.contentItems[0]?.text ?? "", /"name":"web"/);
+    (runtime as unknown as { activeByThread: Map<string, unknown> }).activeByThread.delete(
+      "thr-write",
+    );
+
     await send(42, "/new", -100, "supergroup", 5);
     assert.equal(runtime.state.get(bound.id).codexThreadId, null);
     assert.equal(runtime.state.get(bound.id).readOnlyCodexThreadId, null);
