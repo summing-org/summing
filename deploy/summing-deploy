@@ -420,6 +420,7 @@ install_project_runner_host() {
   fi
   SUMMING_PROJECT_RUNNER_RELEASE="${release}" \
     SUMMING_PROJECT_RUNNER_INSTALL_STATIC_CONFIGS=0 \
+    SUMMING_PROJECT_RUNNER_DRAIN_TIMEOUT_SEC="${drain_timeout}" \
     "${installer}"
 }
 
@@ -460,18 +461,32 @@ wait_for_health() {
 
 wait_for_idle_runtime() {
   local deadline=$((SECONDS + drain_timeout))
-  local payload=
+  local payload= runner_payload=
   local active=0
+  local runner_running=0
+  local runner_queued=0
   while payload=$(curl --fail --silent http://127.0.0.1:8765/health 2>/dev/null); do
     active=$(printf '%s' "${payload}" | jq -r '.active // 0' 2>/dev/null || printf '0')
-    if [ "${active}" = 0 ]; then return 0; fi
+    runner_running=0
+    runner_queued=0
+    if runner_payload=$(curl --silent \
+      --unix-socket /run/summing-project-runner/runner.sock \
+      http://localhost/health 2>/dev/null); then
+      runner_running=$(printf '%s' "${runner_payload}" | \
+        jq -r '.running // 0' 2>/dev/null || printf '0')
+      runner_queued=$(printf '%s' "${runner_payload}" | \
+        jq -r '.queued // 0' 2>/dev/null || printf '0')
+    fi
+    if [ "${active}" = 0 ] && [ "${runner_running}" = 0 ] && \
+      [ "${runner_queued}" = 0 ]; then return 0; fi
     if [ "${SECONDS}" -ge "${deadline}" ]; then
-      printf 'Timed out waiting for %s active run(s) to finish.\n' "${active}" >&2
+      printf 'Timed out waiting for work to drain: %s SUMMING run(s), %s runner job(s), %s queued.\n' \
+        "${active}" "${runner_running}" "${runner_queued}" >&2
       return 1
     fi
     write_state \
       waiting \
-      "Ждём завершения активных runs: ${active}" \
+      "Ждём завершения работы: SUMMING ${active}, runner ${runner_running}, очередь ${runner_queued}" \
       "${previous_sha}" \
       "${target_sha}"
     sleep 5
@@ -650,6 +665,9 @@ if [ "${previous_sha}" = "${target_sha}" ]; then
   sync_project_runner_configs "${previous_target}"
   if [ "${runner_configs_changed}" = 1 ] && \
     systemctl is-enabled --quiet summing-project-runner.service 2>/dev/null; then
+    phase=drain
+    wait_for_idle_runtime
+    phase=sync
     write_state deploying "Обновляем конфигурацию Project runner" \
       "${previous_sha}" "${target_sha}"
     systemctl restart summing-project-runner.service
@@ -761,6 +779,8 @@ install_project_runner_host "${release_dir}"
 phase=sync
 failure_kind=runtime
 sync_project_runner_configs "${release_dir}"
+phase=drain
+wait_for_idle_runtime
 phase=restart
 restart_services
 phase=health

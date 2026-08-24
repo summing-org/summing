@@ -18,6 +18,7 @@ runner_socket=/run/summing-project-runner/runner.sock
 env_file=/etc/summing/summing.env
 unit_path=/etc/systemd/system/summing-project-runner.service
 install_static_configs=${SUMMING_PROJECT_RUNNER_INSTALL_STATIC_CONFIGS:-1}
+drain_timeout=${SUMMING_PROJECT_RUNNER_DRAIN_TIMEOUT_SEC:-1800}
 docker_source=
 temporary_key=
 temporary_unit=
@@ -41,6 +42,40 @@ case "${install_static_configs}" in
     exit 2
     ;;
 esac
+case "${drain_timeout}" in
+  ''|*[!0-9]*)
+    printf '%s\n' 'SUMMING_PROJECT_RUNNER_DRAIN_TIMEOUT_SEC must be an integer.' >&2
+    exit 2
+    ;;
+esac
+
+wait_for_idle_runner_jobs() {
+  local deadline=$((SECONDS + drain_timeout))
+  local payload running queued
+  if [ ! -S "${runner_socket}" ]; then return 0; fi
+  while true; do
+    if ! payload=$(curl --silent --unix-socket "${runner_socket}" \
+      http://localhost/health 2>/dev/null); then
+      printf '%s\n' \
+        'Project runner health is unavailable; continuing the required recovery restart.' >&2
+      return 0
+    fi
+    if ! running=$(printf '%s' "${payload}" | jq -er \
+      'if (.running | type) == "number" and .running >= 0 then .running else error("running") end') || \
+      ! queued=$(printf '%s' "${payload}" | jq -er \
+        'if (.queued | type) == "number" and .queued >= 0 then .queued else error("queued") end'); then
+      printf '%s\n' 'Project runner returned invalid workload counters.' >&2
+      return 1
+    fi
+    if [ "${running}" = 0 ] && [ "${queued}" = 0 ]; then return 0; fi
+    if [ "${SECONDS}" -ge "${deadline}" ]; then
+      printf 'Timed out waiting for runner jobs to drain: %s running, %s queued.\n' \
+        "${running}" "${queued}" >&2
+      return 1
+    fi
+    sleep 5
+  done
+}
 
 if [ -z "${release_root}" ] || [ ! -d "${release_root}/deploy" ] || \
   [ -L "${release_root}/deploy" ]; then
@@ -188,17 +223,44 @@ runner_env=(
   "XDG_RUNTIME_DIR=/run/user/${runner_uid}"
   "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${runner_uid}/bus"
 )
+docker_config=${runner_home}/.config/docker/daemon.json
+docker_restart_required=0
 if [ ! -S "/run/user/${runner_uid}/docker.sock" ]; then
+  docker_restart_required=1
   runuser -u "${runner_user}" -- env "${runner_env[@]}" \
     dockerd-rootless-setuptool.sh install --force
 fi
 install -d -o "${runner_user}" -g "${runner_user}" -m 0700 \
   "${runner_home}/.config/docker"
-install -o "${runner_user}" -g "${runner_user}" -m 0600 \
-  "${release_root}/deploy/docker-rootless-daemon.json" \
-  "${runner_home}/.config/docker/daemon.json"
-runuser -u "${runner_user}" -- env "${runner_env[@]}" \
-  systemctl --user restart docker.service
+if [ -L "${docker_config}" ] || \
+  { [ -e "${docker_config}" ] && [ ! -f "${docker_config}" ]; }; then
+  printf 'Rootless Docker config is unsafe: %s\n' "${docker_config}" >&2
+  exit 2
+fi
+docker_config_changed=0
+if ! cmp -s "${release_root}/deploy/docker-rootless-daemon.json" "${docker_config}"; then
+  docker_config_changed=1
+  docker_restart_required=1
+fi
+if ! runuser -u "${runner_user}" -- env "${runner_env[@]}" \
+  systemctl --user is-active --quiet docker.service; then
+  docker_restart_required=1
+fi
+if [ "${docker_restart_required}" = 1 ]; then
+  wait_for_idle_runner_jobs
+  if [ "${docker_config_changed}" = 1 ]; then
+    install -o "${runner_user}" -g "${runner_user}" -m 0600 \
+      "${release_root}/deploy/docker-rootless-daemon.json" "${docker_config}"
+  elif [ -f "${docker_config}" ]; then
+    chown "${runner_user}:${runner_user}" "${docker_config}"
+    chmod 0600 "${docker_config}"
+  fi
+  runuser -u "${runner_user}" -- env "${runner_env[@]}" \
+    systemctl --user restart docker.service
+elif [ -f "${docker_config}" ]; then
+  chown "${runner_user}:${runner_user}" "${docker_config}"
+  chmod 0600 "${docker_config}"
+fi
 
 docker_ready=0
 for _ in $(seq 1 30); do
@@ -271,13 +333,38 @@ done
 temporary_unit=$(mktemp /run/summing-project-runner.service.XXXXXX)
 sed "s/PROJECT_RUNNER_UID/${runner_uid}/g" \
   "${release_root}/deploy/summing-project-runner.service" > "${temporary_unit}"
-install -o root -g root -m 0644 "${temporary_unit}" "${unit_path}"
+if [ -L "${unit_path}" ] || { [ -e "${unit_path}" ] && [ ! -f "${unit_path}" ]; }; then
+  printf 'Project runner unit is unsafe: %s\n' "${unit_path}" >&2
+  exit 2
+fi
+runner_unit_changed=0
+runner_restart_required=0
+if ! cmp -s "${temporary_unit}" "${unit_path}"; then
+  runner_unit_changed=1
+  runner_restart_required=1
+fi
+if ! systemctl is-active --quiet summing-project-runner.service || \
+  ! curl --fail --silent --unix-socket "${runner_socket}" \
+    http://localhost/health >/dev/null 2>&1; then
+  runner_restart_required=1
+fi
+if [ "${runner_restart_required}" = 1 ]; then
+  wait_for_idle_runner_jobs
+fi
+if [ "${runner_unit_changed}" = 1 ]; then
+  install -o root -g root -m 0644 "${temporary_unit}" "${unit_path}"
+  systemctl daemon-reload
+elif [ -f "${unit_path}" ]; then
+  chown root:root "${unit_path}"
+  chmod 0644 "${unit_path}"
+fi
 rm -f "${temporary_unit}"
 temporary_unit=
 
-systemctl daemon-reload
 systemctl enable summing-project-runner.service
-systemctl restart summing-project-runner.service
+if [ "${runner_restart_required}" = 1 ]; then
+  systemctl restart summing-project-runner.service
+fi
 
 runner_healthy=0
 for _ in $(seq 1 30); do

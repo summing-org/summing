@@ -101,6 +101,10 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
   assert.match(script, /install_project_runner_host\(\)/);
   assert.match(script, /SUMMING_PROJECT_RUNNER_RELEASE="\$\{release\}"/);
   assert.match(script, /SUMMING_PROJECT_RUNNER_INSTALL_STATIC_CONFIGS=0/);
+  assert.match(
+    script,
+    /SUMMING_PROJECT_RUNNER_DRAIN_TIMEOUT_SEC="\$\{drain_timeout\}"/,
+  );
   assert.match(script, /restore_project_runner_configs\(\)/);
   assert.match(script, /if ! restore_project_runner_configs; then/);
   assert.match(script, /mv -f -- "\$\{candidate\}" "\$\{target\}"/);
@@ -153,6 +157,11 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
   assert.ok(
     releaseSwitch >= 0 && releaseRunnerInstall > releaseSwitch &&
       releaseSync > releaseRunnerInstall,
+  );
+  const finalIdleWait = script.lastIndexOf("wait_for_idle_runtime", releaseRestart);
+  assert.ok(
+    finalIdleWait > releaseSync,
+    "runner jobs must be drained again immediately before the release restart",
   );
   assert.ok(releaseRestart > releaseSync, "new configs must be installed before runner restart");
   const releaseHealth = script.indexOf("wait_for_health", releaseRestart);
@@ -258,6 +267,52 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
   );
   assert.match(runnerInstaller, /systemctl enable summing-project-runner\.service/);
   assert.match(runnerInstaller, /\/run\/summing-project-runner\/runner\.sock/);
+  assert.match(runnerInstaller, /SUMMING_PROJECT_RUNNER_DRAIN_TIMEOUT_SEC/);
+  assert.match(runnerInstaller, /wait_for_idle_runner_jobs\(\)/);
+  assert.match(runnerInstaller, /\.running \| type/);
+  assert.match(runnerInstaller, /\.queued \| type/);
+  const dockerConfigComparison = runnerInstaller.indexOf(
+    'cmp -s "${release_root}/deploy/docker-rootless-daemon.json" "${docker_config}"',
+  );
+  const guardedDockerRestart = runnerInstaller.indexOf(
+    'if [ "${docker_restart_required}" = 1 ]; then',
+    dockerConfigComparison,
+  );
+  const dockerDrain = runnerInstaller.indexOf(
+    "wait_for_idle_runner_jobs",
+    guardedDockerRestart,
+  );
+  const dockerRestart = runnerInstaller.indexOf(
+    "systemctl --user restart docker.service",
+    guardedDockerRestart,
+  );
+  assert.ok(
+    dockerConfigComparison >= 0 && guardedDockerRestart > dockerConfigComparison &&
+      dockerDrain > guardedDockerRestart && dockerRestart > dockerDrain,
+    "unchanged rootless Docker config must not restart the daemon, and required restarts must drain jobs",
+  );
+  const runnerUnitComparison = runnerInstaller.indexOf(
+    'cmp -s "${temporary_unit}" "${unit_path}"',
+  );
+  const guardedRunnerRestart = runnerInstaller.indexOf(
+    'if [ "${runner_restart_required}" = 1 ]; then',
+    runnerUnitComparison,
+  );
+  const runnerDrain = runnerInstaller.indexOf(
+    "wait_for_idle_runner_jobs",
+    guardedRunnerRestart,
+  );
+  const runnerRestart = runnerInstaller.indexOf(
+    "systemctl restart summing-project-runner.service",
+    runnerDrain,
+  );
+  assert.ok(
+    runnerUnitComparison >= 0 && guardedRunnerRestart > runnerUnitComparison &&
+      runnerDrain > guardedRunnerRestart && runnerRestart > runnerDrain,
+    "unchanged runner unit must not restart the service, and required restarts must drain jobs",
+  );
+  assert.match(script, /\.running \/\/ 0/);
+  assert.match(script, /\.queued \/\/ 0/);
   assert.match(runnerInstaller, /range_in_use\(\)/);
   assert.doesNotMatch(runnerInstaller, /systemctl disable --now docker\.service/);
   assert.doesNotMatch(
@@ -278,6 +333,11 @@ test("Project Viewer installer supports an HTTPS domain transition", () => {
   assert.match(installer, /caddy validate --config "\$\{temporary_caddy\}"/);
   assert.match(installer, /mktemp \/etc\/caddy\/Caddyfile\.XXXXXX/);
   assert.match(installer, /mv -f "\$\{temporary_caddy\}" \/etc\/caddy\/Caddyfile/);
+  assert.doesNotMatch(
+    installer,
+    /systemctl restart summing-project-runner\.service/,
+    "the idempotent host installer owns runner restarts",
+  );
 });
 
 test("all production processes execute through the current release symlink", () => {

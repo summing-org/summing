@@ -104,7 +104,6 @@ ufw allow 80/tcp
 ufw allow 443/tcp
 systemctl daemon-reload
 systemctl enable summing-project-runner.service
-systemctl restart summing-project-runner.service
 systemctl enable caddy.service
 systemctl restart caddy.service
 
