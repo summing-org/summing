@@ -45,7 +45,9 @@ export const PROJECT_CONTEXT_DYNAMIC_TOOLS: DynamicToolNamespaceSpec[] = [{
       description:
         "Read a bounded page of external portal messages. With query, performs literal " +
         "case-insensitive text search; without query, returns the newest messages. Pass the " +
-        "smallest eventId from one page as beforeEventId to continue into older history.",
+        "smallest eventId from one page as beforeEventId to continue into older history. The " +
+        "result reports the count and latest time of comments hidden by consent without exposing " +
+        "their authors or contents.",
       inputSchema: {
         ...OBJECT_SCHEMA,
         properties: {

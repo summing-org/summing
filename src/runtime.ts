@@ -4350,6 +4350,39 @@ export class SummingRuntime {
     throw new Error(`unknown host tool namespace: ${call.namespace ?? "none"}`);
   }
 
+  private projectEventVisibleToModel(event: TeamEvent): boolean {
+    return (this.telegramBotId > 0 && Number(event.senderExternalId) === this.telegramBotId) ||
+      this.knowledgeSync.consentScopeGrantedForSource(
+        event.sourceId,
+        Number(event.senderExternalId),
+        "model_egress",
+        event.occurredAt,
+      );
+  }
+
+  private hiddenProjectCommentSummary(events: TeamEvent[]): {
+    commentCount: number;
+    latestOccurredAt: string | null;
+  } {
+    const comments = new Map<string, number>();
+    for (const event of events) {
+      if (
+        this.projectEventVisibleToModel(event) ||
+        (event.eventKind !== "message" && event.eventKind !== "edit")
+      ) {
+        continue;
+      }
+      const telegramMessageId = event.externalEventId.match(/^(\d+)(?::|$)/)?.[1] ??
+        event.externalEventId;
+      const key = `${event.sourceId}:${telegramMessageId}`;
+      comments.set(key, Math.max(comments.get(key) ?? 0, event.occurredAt));
+    }
+    const latestOccurredAt = comments.size > 0
+      ? new Date(Math.max(...comments.values()) * 1_000).toISOString()
+      : null;
+    return { commentCount: comments.size, latestOccurredAt };
+  }
+
   async projectContextTool(
     context: ProjectContextToolContext,
     operation: "sources" | "search",
@@ -4381,15 +4414,7 @@ export class SummingRuntime {
       limit: 50,
     });
     const events = candidates
-      .filter((event) =>
-        (this.telegramBotId > 0 && Number(event.senderExternalId) === this.telegramBotId) ||
-        this.knowledgeSync.consentScopeGrantedForSource(
-          event.sourceId,
-          Number(event.senderExternalId),
-          "model_egress",
-          event.occurredAt,
-        )
-      )
+      .filter((event) => this.projectEventVisibleToModel(event))
       .slice(0, requestedLimit)
       .map((event) => ({
         eventId: event.id,
@@ -4410,6 +4435,7 @@ export class SummingRuntime {
       projectId: context.projectId,
       query: input.query ?? "",
       events,
+      hiddenByConsent: this.hiddenProjectCommentSummary(candidates),
       nextBeforeEventId: candidates.length > 0
         ? Math.min(...candidates.map((event) => event.id))
         : null,
@@ -4491,15 +4517,7 @@ export class SummingRuntime {
           .map((candidate) => [candidate.sourceId!, candidate]),
       );
       const events = candidates
-        .filter((event) =>
-          (this.telegramBotId > 0 && Number(event.senderExternalId) === this.telegramBotId) ||
-          this.knowledgeSync.consentScopeGrantedForSource(
-            event.sourceId,
-            Number(event.senderExternalId),
-            "model_egress",
-            event.occurredAt,
-          )
-        )
+        .filter((event) => this.projectEventVisibleToModel(event))
         .slice(0, requestedLimit)
         .map((event) => {
           const eventPortal = portalsBySource.get(event.sourceId);
@@ -4529,6 +4547,7 @@ export class SummingRuntime {
         portalKey: input.portalKey ?? null,
         query: input.query ?? "",
         events,
+        hiddenByConsent: this.hiddenProjectCommentSummary(candidates),
         nextBeforeEventId: candidates.length > 0
           ? Math.min(...candidates.map((event) => event.id))
           : null,

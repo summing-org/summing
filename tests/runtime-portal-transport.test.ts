@@ -115,6 +115,85 @@ test("runner messages use the same durable Project portal transport", async () =
   }
 });
 
+test("portal history reports hidden comments without exposing their author or contents", async () => {
+  const { root, runtime } = fixture();
+  const internal = runtime.state.bind(1, 0, "demo", "repo");
+  runtime.state.bind(-100500, 9, "demo", "repo", "external-readonly", {
+    portalKey: "main",
+    isDefault: true,
+  });
+  runtime.state.recordTeamEvent({
+    provider: "telegram",
+    externalSpaceId: "-100500",
+    externalThreadId: "9",
+    spaceName: "Customer chat",
+    sourceTitle: "Customer topic",
+    externalEventId: "900",
+    eventKind: "message",
+    senderExternalId: "123",
+    senderDisplayName: "SUMMING",
+    text: "Dry-run report",
+    occurredAt: 100,
+    administratorUserId: 1,
+  });
+  runtime.state.recordTeamEvent({
+    provider: "telegram",
+    externalSpaceId: "-100500",
+    externalThreadId: "9",
+    spaceName: "Customer chat",
+    sourceTitle: "Customer topic",
+    externalEventId: "901",
+    eventKind: "message",
+    senderExternalId: "42",
+    senderDisplayName: "Confidential Customer",
+    text: "private feedback original",
+    occurredAt: 110,
+    administratorUserId: 1,
+  });
+  runtime.state.recordTeamEvent({
+    provider: "telegram",
+    externalSpaceId: "-100500",
+    externalThreadId: "9",
+    spaceName: "Customer chat",
+    sourceTitle: "Customer topic",
+    externalEventId: "901:update:1",
+    eventKind: "edit",
+    senderExternalId: "42",
+    senderDisplayName: "Confidential Customer",
+    text: "private feedback edited",
+    occurredAt: 120,
+    administratorUserId: 1,
+  });
+  try {
+    const history = await runtime.projectPortalTool(
+      {
+        projectId: "demo",
+        workspaceId: "repo",
+        conversationId: internal.id,
+        actorUserId: 1,
+        turnId: "turn-history",
+      },
+      "history",
+      { portalKey: "main" },
+    ) as {
+      events: Array<{ text: string }>;
+      hiddenByConsent: { commentCount: number; latestOccurredAt: string | null };
+    };
+    assert.deepEqual(history.events.map((event) => event.text), ["Dry-run report"]);
+    assert.deepEqual(history.hiddenByConsent, {
+      commentCount: 1,
+      latestOccurredAt: "1970-01-01T00:02:00.000Z",
+    });
+    const serialized = JSON.stringify(history);
+    assert.doesNotMatch(serialized, /Confidential Customer/);
+    assert.doesNotMatch(serialized, /private feedback/);
+  } finally {
+    runtime.state.close();
+    await runtime.telegram.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("an authorized Project agent can forward an incoming workspace attachment", async () => {
   const { root, repository, runtime } = fixture();
   const internal = runtime.state.bind(1, 0, "demo", "repo");
@@ -257,9 +336,13 @@ test("an authorized Project agent can forward an incoming workspace attachment",
       },
       "history",
       { portalKey: "main", attachmentsOnly: true },
-    ) as { events: Array<{ portalKey: string; attachments: Array<{ artifactId: string }> }> };
+    ) as {
+      events: Array<{ portalKey: string; attachments: Array<{ artifactId: string }> }>;
+      hiddenByConsent: { commentCount: number; latestOccurredAt: string | null };
+    };
     assert.equal(history.events[0]?.portalKey, "main");
     assert.equal(history.events[0]?.attachments[0]?.artifactId, storedArtifact.id);
+    assert.deepEqual(history.hiddenByConsent, { commentCount: 0, latestOccurredAt: null });
     const materialized = await runtime.projectPortalTool(
       {
         projectId: "demo",
