@@ -45,6 +45,7 @@ export interface RunnerSchedule {
   timeZone: string;
   weekdays: number[];
   enabled: boolean;
+  // Legacy persisted selector; execution resolves the repository's published default branch.
   revisionRef: "master";
   overlapPolicy: "skip";
   misfireGraceMinutes: number;
@@ -1441,7 +1442,9 @@ export class RunnerControlPlane {
       }
       const workspace = this.projects.project(schedule.projectId).workspace(schedule.workspaceId);
       const inspector = new GitInspector(workspace.path);
-      const revision = await inspector.resolveRevision(schedule.revisionRef);
+      // revision_ref historically stores "master", but managed repositories may publish main or
+      // another unambiguous default branch and may not have a matching local branch at all.
+      const revision = await inspector.resolveDefaultRevision();
       const archive = await inspector.archive(revision);
       const job = await this.runner.submit(
         schedule.projectId,

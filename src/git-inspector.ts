@@ -1165,6 +1165,18 @@ export class GitInspector {
     return text(result).trim();
   }
 
+  async resolveDefaultRevision(): Promise<string> {
+    const target = await this.defaultRemoteBranch();
+    if (!target.branch) {
+      throw new GitInspectorError("cannot determine the repository default branch");
+    }
+    return this.resolveRevision(
+      target.published
+        ? `refs/remotes/origin/${target.branch}`
+        : `refs/heads/${target.branch}`,
+    );
+  }
+
   private async removePrivateIndexEntries(env: NodeJS.ProcessEnv): Promise<void> {
     const indexed = text(await this.git(["ls-files", "-z"], { env }))
       .split("\0")

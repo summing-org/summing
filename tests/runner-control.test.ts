@@ -84,12 +84,28 @@ test("schedule changes require a later-turn confirmation and execute each occurr
   const root = mkdtempSync(join(tmpdir(), "summing-runner-control-"));
   const repository = join(root, "repo");
   mkdirSync(repository);
-  execFileSync("git", ["init", "--initial-branch=master", repository]);
+  execFileSync("git", ["init", "--initial-branch=main", repository]);
   execFileSync("git", ["-C", repository, "config", "user.name", "Test"]);
   execFileSync("git", ["-C", repository, "config", "user.email", "test@example.test"]);
   writeFileSync(join(repository, "README.md"), "test\n");
   execFileSync("git", ["-C", repository, "add", "."]);
   execFileSync("git", ["-C", repository, "commit", "-m", "initial"]);
+  execFileSync("git", ["-C", repository, "switch", "-c", "published-work"]);
+  writeFileSync(join(repository, "README.md"), "published\n");
+  execFileSync("git", ["-C", repository, "commit", "-am", "published"]);
+  const publishedRevision = execFileSync(
+    "git",
+    ["-C", repository, "rev-parse", "HEAD"],
+    { encoding: "utf8" },
+  ).trim();
+  execFileSync("git", [
+    "-C",
+    repository,
+    "update-ref",
+    "refs/remotes/origin/master",
+    publishedRevision,
+  ]);
+  execFileSync("git", ["-C", repository, "switch", "main"]);
 
   let now = Date.parse("2026-08-17T05:50:00.000Z");
   const jobs: RunnerJob[] = [];
@@ -171,6 +187,7 @@ test("schedule changes require a later-turn confirmation and execute each occurr
     await control.tick();
     await control.tick();
     assert.equal(submissions.length, 1);
+    assert.equal(jobs[0]?.revision, publishedRevision);
     const { idempotencyKey: scheduleRequestKey, ...scheduleMetadata } = submissions[0]!;
     assert.deepEqual(scheduleMetadata, {
       trigger: "schedule",
