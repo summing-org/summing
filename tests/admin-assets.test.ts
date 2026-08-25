@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { ADMIN_CSS, ADMIN_HTML, ADMIN_JS } from "../src/admin-assets.js";
 
-test("administrator Mini App exposes projects, bindings and global settings", () => {
+test("administrator Mini App separates projects, topic bindings and global settings", () => {
   assert.doesNotThrow(() => new Function(ADMIN_JS));
   assert.match(ADMIN_HTML, /telegram-web-app\.js\?63/);
   assert.match(ADMIN_HTML, /id="createForm"/);
@@ -13,7 +13,11 @@ test("administrator Mini App exposes projects, bindings and global settings", ()
   assert.match(ADMIN_HTML, /Telegram Bot API не отдаёт полный список/);
   assert.match(ADMIN_HTML, /уведомит владельца проекта прямо в выбранном топике/);
   assert.match(ADMIN_HTML, /Настройки SUMMING/);
-  assert.match(ADMIN_HTML, /data-admin-section="overview"/);
+  assert.match(ADMIN_HTML, /data-admin-section="projects"/);
+  assert.match(ADMIN_HTML, /data-admin-section="bindings"/);
+  assert.match(ADMIN_HTML, /id="projectsPanel"[^>]+role="tabpanel"/);
+  assert.match(ADMIN_HTML, /id="bindingsPanel"[^>]+role="tabpanel"/);
+  assert.doesNotMatch(ADMIN_HTML, />Управление<\/button>/);
   assert.match(ADMIN_HTML, /data-admin-section="system"/);
   assert.match(ADMIN_HTML, /data-admin-section="knowledge"/);
   assert.match(ADMIN_HTML, /id="connectorForm"/);
@@ -69,6 +73,7 @@ test("administrator Mini App exposes projects, bindings and global settings", ()
   assert.match(ADMIN_JS, /renderDeploymentFailure/);
   assert.match(ADMIN_JS, /renderDeploymentHistory/);
   assert.match(ADMIN_JS, /activateAdminSection/);
+  assert.match(ADMIN_JS, /state\.section==="bindings"/);
   assert.match(ADMIN_JS, /state\.section==="system"/);
   assert.match(ADMIN_JS, /failure\.logTail/);
   assert.match(ADMIN_JS, /deployment-attempt-details/);

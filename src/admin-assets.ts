@@ -17,29 +17,27 @@ export const ADMIN_HTML = `<!doctype html>
     <button id="refreshButton" class="icon-button" aria-label="Обновить">↻</button>
   </header>
   <nav class="admin-tabs" role="tablist" aria-label="Разделы Admin Mini App">
-    <button id="overviewTab" type="button" role="tab" data-admin-section="overview" aria-controls="overviewPanel" aria-selected="true" class="active">Управление</button>
+    <button id="projectsTab" type="button" role="tab" data-admin-section="projects" aria-controls="projectsPanel" aria-selected="true" class="active">Проекты</button>
+    <button id="bindingsTab" type="button" role="tab" data-admin-section="bindings" aria-controls="bindingsPanel" aria-selected="false">Привязки топиков</button>
     <button id="knowledgeTab" type="button" role="tab" data-admin-section="knowledge" aria-controls="knowledgePanel" aria-selected="false">База знаний</button>
     <button id="systemTab" type="button" role="tab" data-admin-section="system" aria-controls="systemPanel" aria-selected="false">Система</button>
   </nav>
   <main class="shell">
-    <div id="overviewPanel" class="admin-panel active" role="tabpanel" aria-labelledby="overviewTab">
+    <div id="projectsPanel" class="admin-panel active" role="tabpanel" aria-labelledby="projectsTab">
     <section class="hero">
       <div>
-        <span class="eyebrow">ADMIN MINI APP</span>
-        <h1>Проекты, топики и люди</h1>
-        <p>Управляйте проектами, привязками и наблюдаемой активностью участников без команд боту.</p>
+        <span class="eyebrow">PROJECT CATALOG</span>
+        <h1>Проекты</h1>
+        <p>Создавайте проекты, настраивайте репозитории и управляйте владельцами.</p>
       </div>
-      <dl class="metrics" aria-label="Сводка">
+      <dl class="metrics project-metrics" aria-label="Сводка проектов">
         <div><dt id="projectCount">—</dt><dd>проектов</dd></div>
-        <div><dt id="topicCount">—</dt><dd>топиков</dd></div>
-        <div><dt id="bindingCount">—</dt><dd>привязано</dd></div>
-        <div><dt id="userCount">—</dt><dd>пользователей</dd></div>
       </dl>
     </section>
 
     <section class="section" aria-labelledby="projectsTitle">
       <div class="section-heading">
-        <div><span class="eyebrow">PROJECT CATALOG</span><h2 id="projectsTitle">Проекты</h2></div>
+        <div><span class="eyebrow">PROJECT CATALOG</span><h2 id="projectsTitle">Каталог проектов</h2></div>
         <button id="toggleCreate" class="primary">Новый проект</button>
       </div>
       <form id="createForm" class="create-form hidden">
@@ -58,10 +56,24 @@ export const ADMIN_HTML = `<!doctype html>
       </form>
       <div id="projects" class="project-grid"><div class="empty">Загрузка проектов…</div></div>
     </section>
+    </div>
 
+    <div id="bindingsPanel" class="admin-panel" role="tabpanel" aria-labelledby="bindingsTab">
+    <section class="hero">
+      <div>
+        <span class="eyebrow">TELEGRAM ROUTING</span>
+        <h1>Привязки топиков</h1>
+        <p>Связывайте Telegram-топики с проектами и следите за наблюдаемой активностью участников.</p>
+      </div>
+      <dl class="metrics binding-metrics" aria-label="Сводка привязок топиков">
+        <div><dt id="topicCount">—</dt><dd>топиков</dd></div>
+        <div><dt id="bindingCount">—</dt><dd>привязано</dd></div>
+        <div><dt id="userCount">—</dt><dd>пользователей</dd></div>
+      </dl>
+    </section>
     <section class="section" aria-labelledby="bindingsTitle">
       <div class="section-heading binding-heading">
-        <div><span class="eyebrow">TELEGRAM ROUTING</span><h2 id="bindingsTitle">Привязки топиков</h2></div>
+        <div><span class="eyebrow">TELEGRAM TOPICS</span><h2 id="bindingsTitle">Маршрутизация топиков</h2></div>
         <label class="search"><span>⌕</span><input id="topicSearch" placeholder="Найти группу или топик" autocomplete="off"></label>
       </div>
       <p class="section-note">SUMMING видит топик и пользователя после первого доступного боту сообщения. После новой привязки бот уведомит владельца проекта прямо в выбранном топике. Telegram Bot API не отдаёт полный список молчащих участников. Перепривязка и отвязка доступны только без активных задач; отвязка удаляет локальный Codex-контекст и историю запусков, но оставляет обнаруженный Telegram-топик в списке.</p>
@@ -253,12 +265,13 @@ export const ADMIN_CSS = `
 .portal-route{grid-column:1/-1;display:grid;grid-template-columns:minmax(150px,1fr) auto;align-items:end;gap:8px;padding:9px;border:1px solid var(--border);border-radius:7px;background:var(--surface2)}.portal-route label>span{display:block;margin-bottom:5px;color:var(--muted);font-size:8px;text-transform:uppercase}.portal-route input[type=text]{width:100%;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);padding:8px;font:10px var(--mono)}.portal-default{display:flex!important;align-items:center;gap:7px;padding:8px;color:var(--text)!important;white-space:nowrap}.portal-delivery-meta{margin:10px 0 0;color:var(--muted);font:10px/1.5 var(--mono)}.portal-delivery-text{margin:9px 0 0;font-size:11px;line-height:1.45;white-space:pre-wrap}.portal-delivery-actions{display:flex;gap:7px;margin-top:11px}.portal-delivery-actions button{border:1px solid var(--border);border-radius:6px;background:transparent;color:var(--text);padding:7px 9px;font-size:10px;cursor:pointer}.portal-delivery-actions button.retry{border-color:var(--accent);color:var(--accent-light)}
 .sync-state.uncertain,.sync-state.dead-letter{border-color:var(--danger);color:var(--danger)}.sync-state.pending,.sync-state.sending,.sync-state.failed{border-color:var(--accent);color:var(--accent-light)}
 @media(max-width:520px){.portal-route{grid-template-columns:1fr}.portal-default{padding-left:0}.portal-delivery-actions{display:grid;grid-template-columns:1fr 1fr}.portal-delivery-actions button{width:100%}}
+.project-metrics{grid-template-columns:82px}.binding-metrics{grid-template-columns:repeat(3,82px)}
 `;
 
 export const ADMIN_JS = `
 (()=>{
   const $=id=>document.getElementById(id);
-  const state={overview:null,portal:null,sync:null,onboarding:null,recovery:null,modelEgress:null,token:"",initData:"",deploymentTimer:0,syncTimer:0,recoveryTimer:0,portalTimer:0,section:"overview"};
+  const state={overview:null,portal:null,sync:null,onboarding:null,recovery:null,modelEgress:null,token:"",initData:"",deploymentTimer:0,syncTimer:0,recoveryTimer:0,portalTimer:0,section:"projects"};
   const tg=window.Telegram&&window.Telegram.WebApp;
   if(tg){tg.ready();tg.expand();if(tg.colorScheme)document.documentElement.dataset.theme=tg.colorScheme}
   const refreshTelegramAuth=()=>{if(tg&&tg.initData)state.initData=tg.initData;return Boolean(state.initData)};
@@ -360,7 +373,7 @@ export const ADMIN_JS = `
   async function unbindTopic(button){const key=button.dataset.unbind;const chatId=Number(button.dataset.chat);const topicId=Number(button.dataset.topic);const binding=currentBinding(chatId,topicId);if(!binding)return;if(!confirm("Отвязать топик от "+binding.projectId+" / "+binding.workspaceId+" на этой ноде? Codex-контекст и история запусков этой привязки будут удалены. Сам Telegram-топик останется в списке."))return;button.disabled=true;button.textContent="Отвязка…";try{await api("/api/viewer/admin/bindings",{method:"DELETE",headers:{"content-type":"application/json"},body:JSON.stringify({chatId,topicId})});await loadOverview();toast("Топик отвязан")}catch(error){button.textContent="Отвязать";toast(error.message);updateBindingButton(key)}}
   function renderOverview(){const overview=state.overview;$("projectCount").textContent=overview.counts.projects;$("topicCount").textContent=overview.counts.topics;$("bindingCount").textContent=overview.counts.bindings;$("userCount").textContent=overview.counts.users;$("primaryOwnerId").value=$("primaryOwnerId").value||overview.administratorId;$("syncState").textContent="обновлено "+new Date().toLocaleTimeString("ru-RU",{hour:"2-digit",minute:"2-digit"});renderProjects();renderChats()}
   async function loadOverview(){$("refreshButton").disabled=true;try{state.overview=await api("/api/viewer/admin");renderOverview()}finally{$("refreshButton").disabled=false}}
-  function renderPortalDeliveries(){const payload=state.portal||{deliveries:[]};const deliveries=payload.deliveries||[];$("portalDeliveries").innerHTML=deliveries.map(item=>{const retry=["failed","uncertain","dead-letter"].includes(item.status)?"<button class='retry' data-portal-delivery-action='retry' data-outbox-id='"+esc(item.id)+"'>Повторить</button>":"";const cancel=["pending","failed","uncertain","dead-letter"].includes(item.status)?"<button data-portal-delivery-action='cancel' data-outbox-id='"+esc(item.id)+"'>Отменить</button>":"";const attachment=item.attachment?" · "+esc(item.attachment.fileName+" ("+item.attachment.size+" B)"):"";return "<article class='sync-card'><div class='sync-card-head'><div><h3>"+esc(item.projectId+" / "+item.workspaceId+" → "+item.portalKey)+"</h3><code>"+esc(item.transport+" · "+item.id)+"</code></div><span class='sync-state "+esc(item.status)+"'>"+esc(item.status)+"</span></div><p class='portal-delivery-meta'>попыток "+esc(item.attempts)+" · "+esc(deploymentTime(item.updatedAt))+attachment+"</p>"+(item.text?"<p class='portal-delivery-text'>"+esc(item.text)+"</p>":"")+(item.lastError?"<p class='sync-error'>"+esc(item.lastError)+"</p>":"")+((retry||cancel)?"<div class='portal-delivery-actions'>"+retry+cancel+"</div>":"")+"</article>"}).join("")||"<div class='empty'>Очередь доставки пуста.</div>";clearTimeout(state.portalTimer);if(deliveries.some(item=>["pending","sending","failed"].includes(item.status))&&state.section==="overview")state.portalTimer=setTimeout(()=>loadPortalDeliveries().catch(()=>{}),5000)}
+  function renderPortalDeliveries(){const payload=state.portal||{deliveries:[]};const deliveries=payload.deliveries||[];$("portalDeliveries").innerHTML=deliveries.map(item=>{const retry=["failed","uncertain","dead-letter"].includes(item.status)?"<button class='retry' data-portal-delivery-action='retry' data-outbox-id='"+esc(item.id)+"'>Повторить</button>":"";const cancel=["pending","failed","uncertain","dead-letter"].includes(item.status)?"<button data-portal-delivery-action='cancel' data-outbox-id='"+esc(item.id)+"'>Отменить</button>":"";const attachment=item.attachment?" · "+esc(item.attachment.fileName+" ("+item.attachment.size+" B)"):"";return "<article class='sync-card'><div class='sync-card-head'><div><h3>"+esc(item.projectId+" / "+item.workspaceId+" → "+item.portalKey)+"</h3><code>"+esc(item.transport+" · "+item.id)+"</code></div><span class='sync-state "+esc(item.status)+"'>"+esc(item.status)+"</span></div><p class='portal-delivery-meta'>попыток "+esc(item.attempts)+" · "+esc(deploymentTime(item.updatedAt))+attachment+"</p>"+(item.text?"<p class='portal-delivery-text'>"+esc(item.text)+"</p>":"")+(item.lastError?"<p class='sync-error'>"+esc(item.lastError)+"</p>":"")+((retry||cancel)?"<div class='portal-delivery-actions'>"+retry+cancel+"</div>":"")+"</article>"}).join("")||"<div class='empty'>Очередь доставки пуста.</div>";clearTimeout(state.portalTimer);if(deliveries.some(item=>["pending","sending","failed"].includes(item.status))&&state.section==="bindings")state.portalTimer=setTimeout(()=>loadPortalDeliveries().catch(()=>{}),5000)}
   async function loadPortalDeliveries(){state.portal=await api("/api/viewer/admin/project-portals");renderPortalDeliveries()}
   async function projectPortalDeliveryAction(button){const action=button.dataset.portalDeliveryAction;if(action==="retry"&&!confirm("Вы проверили внешний топик и уверены, что сообщения там нет? Повтор может создать дубль."))return;if(action==="cancel"&&!confirm("Отменить эту доставку?"))return;button.disabled=true;await api("/api/viewer/admin/project-portals/outbox/"+encodeURIComponent(button.dataset.outboxId)+"/"+action,{method:"POST"});await loadPortalDeliveries();toast(action==="retry"?"Повтор запущен":"Доставка отменена")}
   function toggleCreate(show){$("createForm").classList.toggle("hidden",!show);$("toggleCreate").classList.toggle("hidden",show);if(show)$("projectId").focus()}
@@ -404,11 +417,11 @@ export const ADMIN_JS = `
   async function confirmKnowledgeImport(button){if(!confirm("Импортировать проверенную базу и принять перенесённые записи согласий? Локально отозванные согласия останутся отозванными."))return;await api("/api/viewer/admin/knowledge/transfers/"+encodeURIComponent(button.dataset.confirmImport)+"/confirm",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({acceptConsents:true})});await loadKnowledge();toast("Импорт поставлен в очередь")}
   async function knowledgeAction(button){const action=button.dataset.syncAction,chatId=Number(button.dataset.syncChat);if(action==="unbind"&&!confirm("Отвязать группу? MTProto-аккаунт останется активным для других групп."))return;await api("/api/viewer/admin/knowledge/sources",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action,chatId})});await loadKnowledge();toast(action==="pause"?"Синхронизация приостановлена":action==="resume"?"Синхронизация продолжена":"Группа отвязана")}
   async function revokeConnector(button){const connectorId=button.dataset.revokeConnector;if(!confirm("Полностью выйти из Telegram и удалить локальную MTProto-сессию?"))return;await api("/api/viewer/admin/mtproto/connectors/"+encodeURIComponent(connectorId),{method:"DELETE"});await loadKnowledge();toast("MTProto-коннектор отозван")}
-  async function activateAdminSection(section){if(section!=="overview"&&section!=="knowledge"&&section!=="system")return;state.section=section;clearTimeout(state.deploymentTimer);clearTimeout(state.syncTimer);clearTimeout(state.recoveryTimer);document.querySelectorAll("[data-admin-section]").forEach(button=>{const active=button.dataset.adminSection===section;button.classList.toggle("active",active);button.setAttribute("aria-selected",String(active))});$("overviewPanel").classList.toggle("active",section==="overview");$("knowledgePanel").classList.toggle("active",section==="knowledge");$("systemPanel").classList.toggle("active",section==="system");if(section==="system")await loadSystem();if(section==="knowledge"){if(!state.overview)await loadOverview();await loadKnowledge()}}
-  async function refreshAdminSection(){if(state.section==="system")await loadSystem();else if(state.section==="knowledge")await loadKnowledge();else{await loadOverview();await loadPortalDeliveries()}toast("Обновлено")}
+  async function activateAdminSection(section){if(section!=="projects"&&section!=="bindings"&&section!=="knowledge"&&section!=="system")return;state.section=section;clearTimeout(state.deploymentTimer);clearTimeout(state.syncTimer);clearTimeout(state.recoveryTimer);clearTimeout(state.portalTimer);document.querySelectorAll("[data-admin-section]").forEach(button=>{const active=button.dataset.adminSection===section;button.classList.toggle("active",active);button.setAttribute("aria-selected",String(active))});$("projectsPanel").classList.toggle("active",section==="projects");$("bindingsPanel").classList.toggle("active",section==="bindings");$("knowledgePanel").classList.toggle("active",section==="knowledge");$("systemPanel").classList.toggle("active",section==="system");if((section==="projects"||section==="bindings")&&!state.overview)await loadOverview();if(section==="bindings")await loadPortalDeliveries();if(section==="system")await loadSystem();if(section==="knowledge"){if(!state.overview)await loadOverview();await loadKnowledge()}}
+  async function refreshAdminSection(){if(state.section==="system")await loadSystem();else if(state.section==="knowledge")await loadKnowledge();else if(state.section==="bindings"){await loadOverview();await loadPortalDeliveries()}else await loadOverview();toast("Обновлено")}
   function filterTopics(){const query=$("topicSearch").value.trim().toLowerCase();document.querySelectorAll("[data-topic-row]").forEach(row=>row.classList.toggle("hidden",Boolean(query&&!row.dataset.search.includes(query))));document.querySelectorAll("[data-chat-card]").forEach(card=>card.classList.toggle("hidden",Boolean(query&&![...card.querySelectorAll("[data-topic-row]")].some(row=>!row.classList.contains("hidden"))))) }
   $("refreshPortalDeliveries").addEventListener("click",()=>loadPortalDeliveries().catch(error=>toast(error.message)));$("portalDeliveries").addEventListener("click",event=>{const button=event.target.closest("[data-portal-delivery-action]");if(button)projectPortalDeliveryAction(button).catch(error=>{button.disabled=false;toast(error.message)})});
   $("toggleCreate").addEventListener("click",()=>toggleCreate(true));$("closeCreate").addEventListener("click",()=>toggleCreate(false));$("projectMode").addEventListener("change",updateMode);$("createForm").addEventListener("submit",createProject);$("connectorForm").addEventListener("submit",createConnector);$("connectorAuthForm").addEventListener("submit",submitConnectorAuth);$("consentForm").addEventListener("submit",saveConsent);$("sourceSyncForm").addEventListener("submit",startKnowledgeSync);$("knowledgeExportForm").addEventListener("submit",startKnowledgeExport);$("knowledgeImportForm").addEventListener("submit",startKnowledgeImport);$("nodeRecoveryExportForm").addEventListener("submit",startNodeRecoveryExport);$("nodeRecoveryRestoreForm").addEventListener("submit",startNodeRecoveryRestore);$("modelEgressToggle").addEventListener("change",()=>updateModelEgress().catch(error=>toast(error.message)));$("proactiveRepliesToggle").addEventListener("change",()=>updateProactiveReplies().catch(error=>toast(error.message)));$("recoveryIncludeSecrets").addEventListener("change",()=>$("recoverySecretConfirmationField").classList.toggle("hidden",$("recoveryIncludeSecrets").value!=="yes"));$("nodeRecoveryStatus").addEventListener("click",event=>{const button=event.target.closest("[data-confirm-recovery]");if(button)confirmNodeRecovery(button).catch(error=>toast(error.message))});$("knowledgeSyncStatus").addEventListener("click",event=>{const connector=event.target.closest("[data-revoke-connector]");if(connector){revokeConnector(connector).catch(error=>toast(error.message));return}const button=event.target.closest("[data-sync-action]");if(button)knowledgeAction(button).catch(error=>toast(error.message))});$("knowledgeTransferStatus").addEventListener("click",event=>{const button=event.target.closest("[data-confirm-import]");if(button)confirmKnowledgeImport(button).catch(error=>toast(error.message))});$("projects").addEventListener("submit",event=>{const form=event.target.closest("[data-owner-form]");if(!form)return;event.preventDefault();ownerManagerSubmit(form).catch(error=>toast(error.message))});$("projects").addEventListener("click",event=>{const button=event.target.closest("[data-owner-primary],[data-owner-remove]");if(button)ownerManagerClick(button).catch(error=>toast(error.message))});$("refreshButton").addEventListener("click",()=>refreshAdminSection().catch(error=>toast(error.message)));document.querySelectorAll("[data-admin-section]").forEach(button=>button.addEventListener("click",()=>activateAdminSection(button.dataset.adminSection).catch(error=>toast(error.message))));$("topicSearch").addEventListener("input",filterTopics);$("chats").addEventListener("click",event=>{const users=event.target.closest("[data-users]");if(users){toggleUsers(users);return}const copy=event.target.closest("[data-copy-user]");if(copy)copyUserId(copy)});$("requestDeployment").addEventListener("click",requestDeployment);$("refreshDeployment").addEventListener("click",refreshDeployment);updateMode();
-  loadOverview().then(()=>loadPortalDeliveries().catch(error=>{$("portalDeliveries").innerHTML="<div class='empty'>"+esc(error.message)+"</div>"})).catch(error=>{document.body.innerHTML="<main class='fatal'><img src='/logo.svg' alt=''><h1>SUMMING Admin</h1><p>"+esc(error.message)+"</p><button id='retryAdmin'>Повторить</button></main>";$("retryAdmin").addEventListener("click",()=>location.reload())});
+  loadOverview().catch(error=>{document.body.innerHTML="<main class='fatal'><img src='/logo.svg' alt=''><h1>SUMMING Admin</h1><p>"+esc(error.message)+"</p><button id='retryAdmin'>Повторить</button></main>";$("retryAdmin").addEventListener("click",()=>location.reload())});
 })();
 `;
