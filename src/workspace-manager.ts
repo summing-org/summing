@@ -237,6 +237,16 @@ export class WorkspaceManager {
     return resolveProjectMemoryPath(this.config.dataDir, projectId);
   }
 
+  projectMemoryProjectionPath(projectId: string): string {
+    return resolve(this.config.dataDir, "projects", projectId, "memory.structured.md");
+  }
+
+  writeProjectMemoryProjection(projectId: string, content: string): void {
+    const path = this.projectMemoryProjectionPath(projectId);
+    mkdirSync(resolve(path, ".."), { recursive: true, mode: 0o700 });
+    this.writeRuntimeFile(path, content);
+  }
+
   async runLockKey(
     conversation: Conversation,
     workspace: WorkspaceConfig,
@@ -295,7 +305,11 @@ export class WorkspaceManager {
       }
     }
     this.ensureProjectMemory(project);
-    const memory = readFileSync(this.projectMemoryPath(project.id), "utf8");
+    const structuredMemory = this.projectMemoryProjectionPath(project.id);
+    const memory = readFileSync(
+      existsSync(structuredMemory) ? structuredMemory : this.projectMemoryPath(project.id),
+      "utf8",
+    );
     this.migrateRuntimeDirectory(path);
     this.writeContext(path, project, workspace, memory);
     return {
@@ -851,8 +865,9 @@ export class WorkspaceManager {
         `- workspace: ${workspace.id}\n- self-change project: ${project.selfChange}\n\n` +
         `## Durable project memory\n\n${projectMemory.trimEnd()}\n\n` +
         "## Memory rule\n\n" +
-        "If this run establishes a durable project fact, append it to " +
-        "`.summing-runtime/memory/PROJECT_MEMORY.md`. Do not rewrite or delete existing memory. " +
+        "Project memory is a generated read-only projection. Never edit " +
+        "`.summing-runtime/memory/PROJECT_MEMORY.md`. Use the `project_memory` host tools to add, " +
+        "supersede, or archive structured items when a durable fact is established. " +
         "Conversation-specific details belong in the Codex thread, not in project memory. " +
         "Change SUMMING itself only when the administrator directly asks.\n\n" +
         "## Project observers\n\n" +
@@ -964,28 +979,19 @@ export class WorkspaceManager {
     }
     const base = prepared.projectMemorySnapshot;
     if (updated === base) return null;
-
-    const authority = this.projectMemoryPath(projectId);
+    const structuredAuthority = this.projectMemoryProjectionPath(projectId);
+    const authority = existsSync(structuredAuthority)
+      ? structuredAuthority
+      : this.projectMemoryPath(projectId);
     const current = readFileSync(authority, "utf8");
-    if (updated.startsWith(base)) {
-      const suffix = updated.slice(base.length);
-      if (suffix && !current.includes(suffix)) {
-        writeFileSync(authority, `${current.trimEnd()}\n${suffix.trimStart()}`, "utf8");
-      }
-      return null;
-    }
-    if (current === base) {
-      writeFileSync(authority, updated, "utf8");
-      return null;
-    }
     const conflictDir = resolve(authority, "..", "memory-conflicts");
     mkdirSync(conflictDir, { recursive: true });
     const conflict = resolve(conflictDir, `${process.hrtime.bigint()}.md`);
     writeFileSync(
       conflict,
-      "# Project memory merge conflict\n\n" +
-        "The conversation rewrote memory while another conversation changed the authority. " +
-        "No version was discarded.\n\n" +
+      "# Rejected direct project memory edit\n\n" +
+        "Project memory is a generated structured projection. Direct file edits are never merged; " +
+        "the candidate is preserved for inspection.\n\n" +
         `## Authority\n\n${current}\n\n## Conversation candidate\n\n${updated}`,
       "utf8",
     );

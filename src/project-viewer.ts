@@ -930,7 +930,35 @@ export class ProjectViewerServer {
     }
     if (request.method === "GET" && url.pathname === "/api/viewer/runs") {
       const scope = await this.scope(conversationId, telegramUser);
-      json(response, 200, { runs: await this.artifacts.list(scope.conversation.id) });
+      const runs = await this.artifacts.list(scope.conversation.id);
+      json(response, 200, {
+        runs: runs.map((run) => {
+          const deliveries = this.state.runDeliveries(run.runId);
+          const evidence = this.state.runEvidence(run.runId);
+          const attention = deliveries.filter((delivery) =>
+            !["sent", "cancelled"].includes(delivery.status)
+          );
+          return {
+            ...run,
+            delivery: {
+              total: deliveries.length,
+              sent: deliveries.filter((delivery) => delivery.status === "sent").length,
+              attention: attention.length,
+              statuses: [...new Set(attention.map((delivery) => delivery.status))],
+            },
+            evidence: {
+              total: evidence.length,
+              current: evidence.filter((item) => item.freshness === "current").length,
+              stale: evidence.filter((item) => item.freshness === "stale").length,
+              redacted: evidence.filter((item) => item.redactionKinds.length > 0).length,
+              failed: evidence.filter((item) =>
+                item.status !== "completed" || (item.exitCode !== null && item.exitCode !== 0)
+              ).length,
+              scope: "unknown",
+            },
+          };
+        }),
+      });
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/viewer/run-diff") {

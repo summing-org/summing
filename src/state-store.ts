@@ -25,6 +25,152 @@ type StoredConversationBindingMode = "project" | "external-readonly";
 export type RunAccess = "write" | "read-only";
 export type ResponseMode = "direct" | "ambient";
 
+export type RunDeliveryKind = "response" | "document" | "notice";
+export type RunDeliveryStatus =
+  | "streaming"
+  | "pending"
+  | "sending"
+  | "sent"
+  | "failed"
+  | "uncertain"
+  | "dead-letter"
+  | "cancelled";
+
+export interface RunDelivery {
+  id: number;
+  runId: number;
+  conversationId: string;
+  kind: RunDeliveryKind;
+  ordinal: number;
+  status: RunDeliveryStatus;
+  chatId: number;
+  topicId: number;
+  replyToMessageId: number | null;
+  text: string;
+  parseMode: "HTML" | "";
+  attachmentPath: string;
+  fileName: string;
+  mimeType: string;
+  attachmentSize: number;
+  attachmentSha256: string;
+  payloadDigest: string;
+  telegramMessageId: number | null;
+  attempts: number;
+  nextAttemptAt: number;
+  lastError: string;
+  createdAt: number;
+  updatedAt: number;
+  sentAt: number | null;
+}
+
+export interface RunDeliveryInput {
+  kind: RunDeliveryKind;
+  ordinal: number;
+  chatId: number;
+  topicId: number;
+  replyToMessageId?: number | null;
+  text?: string;
+  parseMode?: "HTML" | "";
+  attachmentPath?: string;
+  fileName?: string;
+  mimeType?: string;
+  attachmentSize?: number;
+  attachmentSha256?: string;
+  telegramMessageId?: number | null;
+}
+
+export type RunEvidenceFreshness = "current" | "stale" | "unknown";
+
+export interface RunEvidence {
+  id: number;
+  runId: number;
+  itemId: string;
+  kind: "command";
+  sequence: number;
+  command: string;
+  commandDigest: string;
+  cwd: string;
+  status: string;
+  exitCode: number | null;
+  durationMs: number | null;
+  outputDigest: string;
+  outputExcerpt: string;
+  redactionKinds: string[];
+  freshness: RunEvidenceFreshness;
+  freshnessReason: string;
+  scope: "unknown";
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface RunCommandEvidenceInput {
+  itemId: string;
+  command: string;
+  commandDigest: string;
+  cwd: string;
+  status: string;
+  exitCode: number | null;
+  durationMs: number | null;
+  outputDigest: string;
+  outputExcerpt: string;
+  redactionKinds: string[];
+}
+
+export interface RunReview {
+  id: number;
+  runId: number;
+  conversationId: string;
+  sourceThreadId: string;
+  reviewThreadId: string;
+  turnId: string;
+  targetType: "uncommittedChanges";
+  delivery: "detached";
+  status: string;
+  findings: string;
+  beforeRevision: string;
+  afterRevision: string;
+  workspaceChanged: boolean;
+  error: string;
+  startedAt: number;
+  completedAt: number | null;
+}
+
+export interface ProjectRunHistory {
+  id: number;
+  conversationId: string;
+  projectId: string;
+  workspaceId: string;
+  actorUserId: number;
+  turnId: string | null;
+  status: string;
+  access: RunAccess;
+  responseMode: ResponseMode;
+  requestText: string;
+  response: string;
+  error: string;
+  retryOfRunId: number | null;
+  startedAt: number;
+  completedAt: number | null;
+}
+
+export type ProjectMemoryKind = "fact" | "decision" | "preference" | "constraint" | "note";
+export type ProjectMemoryStatus = "active" | "superseded" | "archived";
+
+export interface ProjectMemoryItem {
+  id: number;
+  projectId: string;
+  kind: ProjectMemoryKind;
+  status: ProjectMemoryStatus;
+  text: string;
+  contentDigest: string;
+  source: "user" | "codex" | "legacy";
+  sourceRunId: number | null;
+  createdBy: number;
+  supersedesId: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface ProjectPortalOptions {
   portalKey?: string;
   isDefault?: boolean;
@@ -46,6 +192,7 @@ export interface PendingInput {
   responseMode: ResponseMode;
   attachments: StoredAttachment[];
   audioTranscript: AudioTranscript | null;
+  retryOfRunId: number | null;
   createdAt: number;
 }
 
@@ -353,6 +500,190 @@ function storedAttachments(value: unknown): StoredAttachment[] {
     });
   }
   return attachments;
+}
+
+function runDeliveryDigest(input: RunDeliveryInput): string {
+  return createHash("sha256").update(JSON.stringify({
+    kind: input.kind,
+    ordinal: input.ordinal,
+    chatId: input.chatId,
+    topicId: input.topicId,
+    replyToMessageId: input.replyToMessageId ?? null,
+    text: input.text ?? "",
+    parseMode: input.parseMode ?? "",
+    attachmentPath: input.attachmentPath ?? "",
+    fileName: input.fileName ?? "",
+    mimeType: input.mimeType ?? "",
+    attachmentSize: input.attachmentSize ?? 0,
+    attachmentSha256: input.attachmentSha256 ?? "",
+  })).digest("hex");
+}
+
+function runDelivery(row: Row): RunDelivery {
+  return {
+    id: Number(row.id),
+    runId: Number(row.run_id),
+    conversationId: String(row.conversation_id),
+    kind: String(row.kind) as RunDeliveryKind,
+    ordinal: Number(row.ordinal),
+    status: String(row.status) as RunDeliveryStatus,
+    chatId: Number(row.chat_id),
+    topicId: Number(row.topic_id),
+    replyToMessageId:
+      row.reply_to_message_id === null ? null : Number(row.reply_to_message_id),
+    text: String(row.text),
+    parseMode: String(row.parse_mode) as RunDelivery["parseMode"],
+    attachmentPath: String(row.attachment_path),
+    fileName: String(row.file_name),
+    mimeType: String(row.mime_type),
+    attachmentSize: Number(row.attachment_size),
+    attachmentSha256: String(row.attachment_sha256),
+    payloadDigest: String(row.payload_digest),
+    telegramMessageId:
+      row.telegram_message_id === null ? null : Number(row.telegram_message_id),
+    attempts: Number(row.attempts),
+    nextAttemptAt: Number(row.next_attempt_at),
+    lastError: String(row.last_error),
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at),
+    sentAt: row.sent_at === null ? null : Number(row.sent_at),
+  };
+}
+
+function runEvidence(row: Row): RunEvidence {
+  return {
+    id: Number(row.id),
+    runId: Number(row.run_id),
+    itemId: String(row.item_id),
+    kind: "command",
+    sequence: Number(row.sequence),
+    command: String(row.command),
+    commandDigest: String(row.command_digest),
+    cwd: String(row.cwd),
+    status: String(row.status),
+    exitCode: row.exit_code === null ? null : Number(row.exit_code),
+    durationMs: row.duration_ms === null ? null : Number(row.duration_ms),
+    outputDigest: String(row.output_digest),
+    outputExcerpt: String(row.output_excerpt),
+    redactionKinds: JSON.parse(String(row.redaction_kinds_json)) as string[],
+    freshness: String(row.freshness) as RunEvidenceFreshness,
+    freshnessReason: String(row.freshness_reason),
+    scope: "unknown",
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at),
+  };
+}
+
+function runReview(row: Row): RunReview {
+  return {
+    id: Number(row.id),
+    runId: Number(row.run_id),
+    conversationId: String(row.conversation_id),
+    sourceThreadId: String(row.source_thread_id),
+    reviewThreadId: String(row.review_thread_id),
+    turnId: String(row.turn_id),
+    targetType: "uncommittedChanges",
+    delivery: "detached",
+    status: String(row.status),
+    findings: String(row.findings),
+    beforeRevision: String(row.before_revision),
+    afterRevision: String(row.after_revision),
+    workspaceChanged: Number(row.workspace_changed) === 1,
+    error: String(row.error),
+    startedAt: Number(row.started_at),
+    completedAt: row.completed_at === null ? null : Number(row.completed_at),
+  };
+}
+
+function projectRunHistory(row: Row): ProjectRunHistory {
+  return {
+    id: Number(row.id),
+    conversationId: String(row.conversation_id),
+    projectId: String(row.project_id),
+    workspaceId: String(row.workspace_id),
+    actorUserId: Number(row.actor_user_id),
+    turnId: row.turn_id === null ? null : String(row.turn_id),
+    status: String(row.status),
+    access: String(row.access_mode) as RunAccess,
+    responseMode: String(row.response_mode) as ResponseMode,
+    requestText: String(row.request_text),
+    response: String(row.response),
+    error: row.error === null ? "" : String(row.error),
+    retryOfRunId: row.retry_of_run_id === null ? null : Number(row.retry_of_run_id),
+    startedAt: Number(row.started_at),
+    completedAt: row.completed_at === null ? null : Number(row.completed_at),
+  };
+}
+
+function projectMemoryItem(row: Row): ProjectMemoryItem {
+  return {
+    id: Number(row.id),
+    projectId: String(row.project_id),
+    kind: String(row.kind) as ProjectMemoryKind,
+    status: String(row.status) as ProjectMemoryStatus,
+    text: String(row.text),
+    contentDigest: String(row.content_digest),
+    source: String(row.source) as ProjectMemoryItem["source"],
+    sourceRunId: row.source_run_id === null ? null : Number(row.source_run_id),
+    createdBy: Number(row.created_by),
+    supersedesId: row.supersedes_id === null ? null : Number(row.supersedes_id),
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at),
+  };
+}
+
+function normalizedProjectMemoryText(value: string): string {
+  const normalized = value.replace(/\s+/gu, " ").trim();
+  if (!normalized || Array.from(normalized).length > 2_000) {
+    throw new Error("project memory text must contain from 1 to 2000 characters");
+  }
+  return normalized;
+}
+
+function legacyProjectMemoryItems(markdown: string): string[] {
+  const bullets = markdown.split(/\r?\n/u)
+    .map((line) => line.match(/^\s*-\s+(.+)$/u)?.[1]?.trim() ?? "")
+    .filter(Boolean)
+    .map((line) => line.replace(/^\[(?:memory:)?\d+\]\s*/iu, "").trim())
+    .filter(Boolean);
+  if (bullets.length > 0) return [...new Set(bullets)];
+  return [...new Set(markdown
+    .replace(/^# Project memory:[^\n]*$/gimu, "")
+    .replace(/<!--[^]*?-->/gu, "")
+    .split(/\n\s*\n/gu)
+    .map((paragraph) => paragraph.replace(/^#+\s+.*$/gmu, "").trim())
+    .filter(Boolean))];
+}
+
+function validateRunDeliveryInput(input: RunDeliveryInput): void {
+  if (
+    !["response", "document", "notice"].includes(input.kind) ||
+    !Number.isSafeInteger(input.ordinal) ||
+    input.ordinal < 0 ||
+    !Number.isSafeInteger(input.chatId) ||
+    !Number.isSafeInteger(input.topicId) ||
+    (input.replyToMessageId !== undefined &&
+      input.replyToMessageId !== null &&
+      (!Number.isSafeInteger(input.replyToMessageId) || input.replyToMessageId <= 0)) ||
+    (input.telegramMessageId !== undefined &&
+      input.telegramMessageId !== null &&
+      (!Number.isSafeInteger(input.telegramMessageId) || input.telegramMessageId <= 0))
+  ) {
+    throw new Error("invalid run delivery destination");
+  }
+  if (input.kind === "document") {
+    if (
+      !input.attachmentPath ||
+      !input.fileName ||
+      !Number.isSafeInteger(input.attachmentSize) ||
+      (input.attachmentSize ?? 0) <= 0 ||
+      !/^[a-f0-9]{64}$/.test(input.attachmentSha256 ?? "")
+    ) {
+      throw new Error("invalid run delivery attachment");
+    }
+  } else if (!(input.text ?? "").trim()) {
+    throw new Error("run delivery text is empty");
+  }
 }
 
 export class StateStore {
@@ -711,6 +1042,7 @@ export class StateStore {
             CHECK(response_mode IN ('direct', 'ambient')),
           attachments_json TEXT NOT NULL DEFAULT '[]',
           audio_transcript_json TEXT NOT NULL DEFAULT '',
+          retry_of_run_id INTEGER REFERENCES runs(id),
           run_id INTEGER,
           state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending', 'consumed')),
           created_at REAL NOT NULL
@@ -739,20 +1071,129 @@ export class StateStore {
         CREATE TABLE IF NOT EXISTS runs (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+          project_id TEXT NOT NULL DEFAULT '',
+          workspace_id TEXT NOT NULL DEFAULT '',
+          actor_user_id INTEGER NOT NULL DEFAULT 0,
           turn_id TEXT,
           status TEXT NOT NULL,
           access_mode TEXT NOT NULL DEFAULT 'write' CHECK(access_mode IN ('write', 'read-only')),
           response_mode TEXT NOT NULL DEFAULT 'direct'
             CHECK(response_mode IN ('direct', 'ambient')),
+          request_text TEXT NOT NULL DEFAULT '',
           prompt TEXT NOT NULL,
           response TEXT NOT NULL DEFAULT '',
           error TEXT,
+          retry_of_run_id INTEGER REFERENCES runs(id),
           started_at REAL NOT NULL,
           completed_at REAL
         );
+        CREATE TABLE IF NOT EXISTS run_deliveries (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+          conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+          kind TEXT NOT NULL CHECK(kind IN ('response', 'document', 'notice')),
+          ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+          status TEXT NOT NULL CHECK(status IN
+            ('streaming', 'pending', 'sending', 'sent', 'failed', 'uncertain',
+             'dead-letter', 'cancelled')),
+          chat_id INTEGER NOT NULL,
+          topic_id INTEGER NOT NULL,
+          reply_to_message_id INTEGER,
+          text TEXT NOT NULL DEFAULT '',
+          parse_mode TEXT NOT NULL DEFAULT '' CHECK(parse_mode IN ('', 'HTML')),
+          attachment_path TEXT NOT NULL DEFAULT '',
+          file_name TEXT NOT NULL DEFAULT '',
+          mime_type TEXT NOT NULL DEFAULT '',
+          attachment_size INTEGER NOT NULL DEFAULT 0 CHECK(attachment_size >= 0),
+          attachment_sha256 TEXT NOT NULL DEFAULT '',
+          payload_digest TEXT NOT NULL,
+          telegram_message_id INTEGER,
+          attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
+          next_attempt_at REAL NOT NULL,
+          last_error TEXT NOT NULL DEFAULT '',
+          created_at REAL NOT NULL,
+          updated_at REAL NOT NULL,
+          sent_at REAL,
+          UNIQUE(run_id, kind, ordinal)
+        );
+        CREATE INDEX IF NOT EXISTS run_deliveries_due
+          ON run_deliveries(status, next_attempt_at, id);
+        CREATE INDEX IF NOT EXISTS run_deliveries_run
+          ON run_deliveries(run_id, ordinal, id);
+        CREATE TABLE IF NOT EXISTS run_evidence (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+          item_id TEXT NOT NULL,
+          kind TEXT NOT NULL DEFAULT 'command' CHECK(kind = 'command'),
+          sequence INTEGER NOT NULL CHECK(sequence > 0),
+          command TEXT NOT NULL,
+          command_digest TEXT NOT NULL,
+          cwd TEXT NOT NULL,
+          status TEXT NOT NULL,
+          exit_code INTEGER,
+          duration_ms REAL,
+          output_digest TEXT NOT NULL,
+          output_excerpt TEXT NOT NULL,
+          redaction_kinds_json TEXT NOT NULL DEFAULT '[]',
+          freshness TEXT NOT NULL CHECK(freshness IN ('current', 'stale', 'unknown')),
+          freshness_reason TEXT NOT NULL,
+          scope TEXT NOT NULL DEFAULT 'unknown' CHECK(scope = 'unknown'),
+          created_at REAL NOT NULL,
+          updated_at REAL NOT NULL,
+          UNIQUE(run_id, item_id),
+          UNIQUE(run_id, sequence)
+        );
+        CREATE INDEX IF NOT EXISTS run_evidence_run
+          ON run_evidence(run_id, sequence, id);
+        CREATE TABLE IF NOT EXISTS run_reviews (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          run_id INTEGER NOT NULL UNIQUE REFERENCES runs(id) ON DELETE CASCADE,
+          conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+          source_thread_id TEXT NOT NULL,
+          review_thread_id TEXT NOT NULL UNIQUE,
+          turn_id TEXT NOT NULL UNIQUE,
+          target_type TEXT NOT NULL DEFAULT 'uncommittedChanges'
+            CHECK(target_type = 'uncommittedChanges'),
+          delivery TEXT NOT NULL DEFAULT 'detached' CHECK(delivery = 'detached'),
+          status TEXT NOT NULL,
+          findings TEXT NOT NULL DEFAULT '',
+          before_revision TEXT NOT NULL,
+          after_revision TEXT NOT NULL DEFAULT '',
+          workspace_changed INTEGER NOT NULL DEFAULT 0 CHECK(workspace_changed IN (0, 1)),
+          error TEXT NOT NULL DEFAULT '',
+          started_at REAL NOT NULL,
+          completed_at REAL
+        );
+        CREATE INDEX IF NOT EXISTS run_reviews_conversation
+          ON run_reviews(conversation_id, started_at DESC, id DESC);
         CREATE TABLE IF NOT EXISTS runtime_state (
           key TEXT PRIMARY KEY,
           value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS project_memory_items (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          project_id TEXT NOT NULL,
+          kind TEXT NOT NULL CHECK(kind IN ('fact', 'decision', 'preference', 'constraint', 'note')),
+          status TEXT NOT NULL DEFAULT 'active'
+            CHECK(status IN ('active', 'superseded', 'archived')),
+          text TEXT NOT NULL,
+          content_digest TEXT NOT NULL,
+          source TEXT NOT NULL CHECK(source IN ('user', 'codex', 'legacy')),
+          source_run_id INTEGER REFERENCES runs(id) ON DELETE SET NULL,
+          created_by INTEGER NOT NULL DEFAULT 0,
+          supersedes_id INTEGER REFERENCES project_memory_items(id),
+          created_at REAL NOT NULL,
+          updated_at REAL NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS project_memory_active_digest
+          ON project_memory_items(project_id, content_digest) WHERE status = 'active';
+        CREATE INDEX IF NOT EXISTS project_memory_project
+          ON project_memory_items(project_id, status, kind, id);
+        CREATE TABLE IF NOT EXISTS project_memory_migrations (
+          project_id TEXT PRIMARY KEY,
+          legacy_digest TEXT NOT NULL,
+          imported_items INTEGER NOT NULL,
+          migrated_at REAL NOT NULL
         );
         CREATE TABLE IF NOT EXISTS managed_projects (
           id TEXT PRIMARY KEY,
@@ -1080,6 +1521,11 @@ export class StateStore {
       if (!pendingColumns.some((column) => column.name === "run_id")) {
         this.db.exec("ALTER TABLE pending_inputs ADD COLUMN run_id INTEGER");
       }
+      if (!pendingColumns.some((column) => column.name === "retry_of_run_id")) {
+        this.db.exec(
+          "ALTER TABLE pending_inputs ADD COLUMN retry_of_run_id INTEGER REFERENCES runs(id)",
+        );
+      }
       this.db.exec(`
         CREATE INDEX IF NOT EXISTS pending_inputs_access_lookup
         ON pending_inputs(conversation_id, access_mode, state, id)
@@ -1129,6 +1575,21 @@ export class StateStore {
           )
       `);
       const runColumns = this.db.prepare("PRAGMA table_info(runs)").all() as Row[];
+      if (!runColumns.some((column) => column.name === "project_id")) {
+        this.db.exec("ALTER TABLE runs ADD COLUMN project_id TEXT NOT NULL DEFAULT ''");
+      }
+      if (!runColumns.some((column) => column.name === "workspace_id")) {
+        this.db.exec("ALTER TABLE runs ADD COLUMN workspace_id TEXT NOT NULL DEFAULT ''");
+      }
+      if (!runColumns.some((column) => column.name === "actor_user_id")) {
+        this.db.exec("ALTER TABLE runs ADD COLUMN actor_user_id INTEGER NOT NULL DEFAULT 0");
+      }
+      if (!runColumns.some((column) => column.name === "request_text")) {
+        this.db.exec("ALTER TABLE runs ADD COLUMN request_text TEXT NOT NULL DEFAULT ''");
+      }
+      if (!runColumns.some((column) => column.name === "retry_of_run_id")) {
+        this.db.exec("ALTER TABLE runs ADD COLUMN retry_of_run_id INTEGER REFERENCES runs(id)");
+      }
       if (!runColumns.some((column) => column.name === "access_mode")) {
         this.db.exec(
           "ALTER TABLE runs ADD COLUMN access_mode TEXT NOT NULL DEFAULT 'write' " +
@@ -1141,6 +1602,52 @@ export class StateStore {
             "CHECK(response_mode IN ('direct', 'ambient'))",
         );
       }
+      this.db.exec(`
+        UPDATE runs
+        SET project_id = COALESCE(
+              NULLIF(project_id, ''),
+              (SELECT project_id FROM conversations WHERE conversations.id = runs.conversation_id),
+              ''
+            ),
+            workspace_id = COALESCE(
+              NULLIF(workspace_id, ''),
+              (SELECT workspace_id FROM conversations WHERE conversations.id = runs.conversation_id),
+              ''
+            ),
+            request_text = CASE WHEN request_text = '' THEN prompt ELSE request_text END
+        WHERE project_id = '' OR workspace_id = '' OR request_text = ''
+      `);
+      this.db.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS run_history_fts USING fts5(
+          run_id UNINDEXED,
+          project_id UNINDEXED,
+          workspace_id UNINDEXED,
+          request_text,
+          response,
+          tokenize = 'unicode61'
+        );
+        CREATE TRIGGER IF NOT EXISTS runs_history_insert AFTER INSERT ON runs BEGIN
+          INSERT INTO run_history_fts
+            (run_id, project_id, workspace_id, request_text, response)
+          VALUES (new.id, new.project_id, new.workspace_id, new.request_text, new.response);
+        END;
+        CREATE TRIGGER IF NOT EXISTS runs_history_update
+          AFTER UPDATE OF project_id, workspace_id, request_text, response ON runs BEGIN
+          DELETE FROM run_history_fts WHERE run_id = old.id;
+          INSERT INTO run_history_fts
+            (run_id, project_id, workspace_id, request_text, response)
+          VALUES (new.id, new.project_id, new.workspace_id, new.request_text, new.response);
+        END;
+        CREATE TRIGGER IF NOT EXISTS runs_history_delete AFTER DELETE ON runs BEGIN
+          DELETE FROM run_history_fts WHERE run_id = old.id;
+        END;
+        INSERT INTO run_history_fts (run_id, project_id, workspace_id, request_text, response)
+        SELECT runs.id, runs.project_id, runs.workspace_id, runs.request_text, runs.response
+        FROM runs
+        WHERE NOT EXISTS (
+          SELECT 1 FROM run_history_fts WHERE run_history_fts.run_id = runs.id
+        );
+      `);
       this.db.exec(`
         INSERT OR IGNORE INTO telegram_chats
           (chat_id, type, title, username, is_forum, bot_status, first_seen_at, updated_at)
@@ -2791,8 +3298,11 @@ export class StateStore {
     this.transaction(() => {
       const abandoned = this.db
         .prepare(
-          "SELECT id, conversation_id, prompt, access_mode, response_mode, started_at " +
-            "FROM runs WHERE status = 'running'",
+          "SELECT runs.id, runs.conversation_id, runs.request_text, runs.access_mode, " +
+            "runs.response_mode, runs.started_at, conversations.chat_id, " +
+            "conversations.topic_id " +
+            "FROM runs JOIN conversations ON conversations.id = runs.conversation_id " +
+            "WHERE runs.status = 'running'",
         )
         .all() as Row[];
       const enqueue = this.db.prepare(`
@@ -2807,19 +3317,76 @@ export class StateStore {
         WHERE run_id = ?
       `);
       for (const row of abandoned) {
-        const restored = restoreInputs.run(row.id as SQLInputValue);
-        if (Number(restored.changes) === 0) {
-          enqueue.run(
+        const streamed = this.db.prepare(`
+          SELECT COUNT(*) AS count FROM run_deliveries
+          WHERE run_id = ? AND telegram_message_id IS NOT NULL
+        `).get(row.id as SQLInputValue) as Row;
+        const safeReadOnlyReplay = row.access_mode === "read-only" && Number(streamed.count) === 0;
+        if (safeReadOnlyReplay) {
+          const restored = restoreInputs.run(row.id as SQLInputValue);
+          if (Number(restored.changes) === 0) {
+            enqueue.run(
+              row.conversation_id as SQLInputValue,
+              row.request_text as SQLInputValue,
+              row.access_mode as SQLInputValue,
+              row.response_mode as SQLInputValue,
+              Number(row.started_at) - 0.000_001,
+            );
+          }
+        } else {
+          const notice: RunDeliveryInput = {
+            kind: "notice",
+            ordinal: 0,
+            chatId: Number(row.chat_id),
+            topicId: Number(row.topic_id),
+            text: row.access_mode === "write"
+              ? `⚠️ Run #${Number(row.id)} прерван перезапуском. ` +
+                "SUMMING не повторяет write-run автоматически: в workspace могли остаться " +
+                `частичные изменения. После проверки используйте /retry ${Number(row.id)}.`
+              : `⚠️ Read-only run #${Number(row.id)} прерван после начала Telegram-доставки. ` +
+                `Чтобы не создать дубль ответа, повторите его явно через /retry ${Number(row.id)}.`,
+          };
+          this.db.prepare(`
+            INSERT OR IGNORE INTO run_deliveries
+              (run_id, conversation_id, kind, ordinal, status, chat_id, topic_id,
+               text, parse_mode, payload_digest, attempts, next_attempt_at, last_error,
+               created_at, updated_at)
+            VALUES (?, ?, 'notice', 0, 'pending', ?, ?, ?, '', ?, 0, ?, '', ?, ?)
+          `).run(
+            row.id as SQLInputValue,
             row.conversation_id as SQLInputValue,
-            row.prompt as SQLInputValue,
-            row.access_mode as SQLInputValue,
-            row.response_mode as SQLInputValue,
-            Number(row.started_at) - 0.000_001,
+            Number(row.chat_id),
+            Number(row.topic_id),
+            notice.text!,
+            runDeliveryDigest(notice),
+            now,
+            now,
+            now,
           );
         }
       }
       this.db.prepare(`
+        UPDATE run_deliveries
+        SET status = 'uncertain',
+            last_error = 'SUMMING restarted before delivery was durably confirmed; stored payload will not be resent',
+            updated_at = ?
+        WHERE status IN ('streaming', 'pending', 'sending')
+      `).run(now);
+      this.db.prepare(`
+        UPDATE run_evidence
+        SET freshness = 'unknown',
+            freshness_reason = 'runtime restarted before the final workspace state was confirmed',
+            updated_at = ?
+        WHERE freshness = 'current'
+          AND run_id IN (SELECT id FROM runs WHERE status = 'running')
+      `).run(now);
+      this.db.prepare(`
         UPDATE runs SET status = 'interrupted', error = 'runtime restarted', completed_at = ?
+        WHERE status = 'running'
+      `).run(now);
+      this.db.prepare(`
+        UPDATE run_reviews
+        SET status = 'interrupted', error = 'runtime restarted', completed_at = ?
         WHERE status = 'running'
       `).run(now);
       this.db.prepare(`
@@ -3229,13 +3796,14 @@ export class StateStore {
     responseMode: ResponseMode = "direct",
     attachments: StoredAttachment[] = [],
     audioTranscript: AudioTranscript | null = null,
+    retryOfRunId: number | null = null,
   ): number {
     return this.transaction(() => {
       const result = this.db.prepare(`
         INSERT INTO pending_inputs
           (conversation_id, telegram_message_id, text, mode, access_mode, telegram_user_id,
-           response_mode, attachments_json, audio_transcript_json, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           response_mode, attachments_json, audio_transcript_json, retry_of_run_id, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         conversationId,
         telegramMessageId,
@@ -3246,7 +3814,79 @@ export class StateStore {
         responseMode,
         JSON.stringify(attachments),
         audioTranscript ? JSON.stringify(audioTranscript) : "",
+        retryOfRunId,
         Date.now() / 1000,
+      );
+      return Number(result.lastInsertRowid);
+    });
+  }
+
+  retryInterruptedRun(
+    conversationId: string,
+    runId: number,
+    telegramMessageId: number,
+    actorUserId: number,
+  ): number {
+    if (
+      !Number.isSafeInteger(runId) ||
+      runId <= 0 ||
+      !Number.isSafeInteger(telegramMessageId) ||
+      telegramMessageId <= 0 ||
+      !Number.isSafeInteger(actorUserId) ||
+      actorUserId <= 0
+    ) {
+      throw new Error("retry request is invalid");
+    }
+    return this.transaction(() => {
+      const run = this.db.prepare(`
+        SELECT conversation_id, request_text, access_mode, response_mode, status
+        FROM runs WHERE id = ?
+      `).get(runId) as Row | undefined;
+      if (!run || String(run.conversation_id) !== conversationId) {
+        throw new Error("interrupted run was not found in this Conversation");
+      }
+      if (run.status !== "interrupted") {
+        throw new Error(`run #${runId} is ${String(run.status)}, not interrupted`);
+      }
+      const pendingRetry = this.db.prepare(`
+        SELECT 1 FROM pending_inputs
+        WHERE conversation_id = ? AND retry_of_run_id = ? AND state = 'pending'
+        LIMIT 1
+      `).get(conversationId, runId);
+      const runningRetry = this.db.prepare(`
+        SELECT 1 FROM runs WHERE retry_of_run_id = ? AND status = 'running' LIMIT 1
+      `).get(runId);
+      if (pendingRetry || runningRetry) throw new Error(`run #${runId} is already queued`);
+      const originals = this.db.prepare(`
+        SELECT attachments_json, audio_transcript_json
+        FROM pending_inputs WHERE run_id = ? ORDER BY id
+      `).all(runId) as Row[];
+      const attachments = originals.flatMap((row) => {
+        try {
+          return storedAttachments(JSON.parse(String(row.attachments_json ?? "[]")));
+        } catch {
+          return [];
+        }
+      });
+      const audioTranscript = [...originals].reverse()
+        .map((row) => String(row.audio_transcript_json ?? ""))
+        .find(Boolean) ?? "";
+      const result = this.db.prepare(`
+        INSERT INTO pending_inputs
+          (conversation_id, telegram_message_id, text, mode, access_mode, telegram_user_id,
+           response_mode, attachments_json, audio_transcript_json, retry_of_run_id, created_at)
+        VALUES (?, ?, ?, 'followup', ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        conversationId,
+        telegramMessageId,
+        run.request_text as SQLInputValue,
+        run.access_mode as SQLInputValue,
+        actorUserId,
+        run.response_mode as SQLInputValue,
+        JSON.stringify(attachments),
+        audioTranscript,
+        runId,
+        Date.now() / 1_000,
       );
       return Number(result.lastInsertRowid);
     });
@@ -3259,7 +3899,8 @@ export class StateStore {
   ): PendingInput[] {
     const rows = this.db.prepare(`
       SELECT id, conversation_id, telegram_message_id, text, mode, access_mode,
-             telegram_user_id, response_mode, attachments_json, audio_transcript_json, created_at
+             telegram_user_id, response_mode, attachments_json, audio_transcript_json,
+             retry_of_run_id, created_at
       FROM pending_inputs
       WHERE conversation_id = ? AND mode = ? AND access_mode = ? AND state = 'pending'
       ORDER BY created_at, id
@@ -3270,7 +3911,8 @@ export class StateStore {
   pendingAll(conversationId: string): PendingInput[] {
     const rows = this.db.prepare(`
       SELECT id, conversation_id, telegram_message_id, text, mode, access_mode,
-             telegram_user_id, response_mode, attachments_json, audio_transcript_json, created_at
+             telegram_user_id, response_mode, attachments_json, audio_transcript_json,
+             retry_of_run_id, created_at
       FROM pending_inputs
       WHERE conversation_id = ? AND state = 'pending'
       ORDER BY created_at, id
@@ -3309,6 +3951,7 @@ export class StateStore {
       responseMode: String(row.response_mode) as ResponseMode,
       attachments,
       audioTranscript,
+      retryOfRunId: row.retry_of_run_id === null ? null : Number(row.retry_of_run_id),
       createdAt: Number(row.created_at),
     };
   }
@@ -3329,13 +3972,40 @@ export class StateStore {
     inputIds: number[] = [],
     access: RunAccess = "write",
     responseMode: ResponseMode = "direct",
+    actorUserId = 0,
+    retryOfRunId: number | null = null,
   ): number {
     return this.transaction(() => {
+      const conversation = this.db.prepare(`
+        SELECT project_id, workspace_id FROM conversations WHERE id = ?
+      `).get(conversationId) as Row | undefined;
+      if (!conversation) throw new Error("run conversation was not found");
+      if (!Number.isSafeInteger(actorUserId) || actorUserId < 0) {
+        throw new Error("run actor user id is invalid");
+      }
+      if (
+        retryOfRunId !== null &&
+        (!Number.isSafeInteger(retryOfRunId) || retryOfRunId <= 0)
+      ) {
+        throw new Error("retry run id is invalid");
+      }
       const result = this.db.prepare(`
         INSERT INTO runs
-          (conversation_id, status, access_mode, response_mode, prompt, started_at)
-        VALUES (?, 'running', ?, ?, ?, ?)
-      `).run(conversationId, access, responseMode, prompt, Date.now() / 1000);
+          (conversation_id, project_id, workspace_id, actor_user_id, status, access_mode,
+           response_mode, request_text, prompt, retry_of_run_id, started_at)
+        VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?)
+      `).run(
+        conversationId,
+        conversation.project_id as SQLInputValue,
+        conversation.workspace_id as SQLInputValue,
+        actorUserId,
+        access,
+        responseMode,
+        prompt,
+        prompt,
+        retryOfRunId,
+        Date.now() / 1000,
+      );
       if (inputIds.length > 0) {
         const placeholders = inputIds.map(() => "?").join(",");
         this.db.prepare(
@@ -3365,6 +4035,688 @@ export class StateStore {
         UPDATE runs SET status = ?, response = ?, error = ?, completed_at = ? WHERE id = ?
       `).run(status, response, error, Date.now() / 1000, runId);
     });
+  }
+
+  finishRunWithDeliveries(
+    runId: number,
+    status: string,
+    response: string,
+    error: string | null,
+    deliveries: RunDeliveryInput[],
+  ): RunDelivery[] {
+    for (const delivery of deliveries) validateRunDeliveryInput(delivery);
+    const now = Date.now() / 1_000;
+    return this.transaction(() => {
+      const row = this.db.prepare(`
+        SELECT conversation_id, status FROM runs WHERE id = ?
+      `).get(runId) as Row | undefined;
+      if (!row) throw new Error("run was not found");
+      if (String(row.status) !== "running") {
+        throw new Error(`run ${runId} is already ${String(row.status)}`);
+      }
+      this.db.prepare(`
+        UPDATE runs SET status = ?, response = ?, error = ?, completed_at = ? WHERE id = ?
+      `).run(status, response, error, now, runId);
+      const upsert = this.db.prepare(`
+        INSERT INTO run_deliveries
+          (run_id, conversation_id, kind, ordinal, status, chat_id, topic_id,
+           reply_to_message_id, text, parse_mode, attachment_path, file_name, mime_type,
+           attachment_size, attachment_sha256, payload_digest, telegram_message_id,
+           attempts, next_attempt_at, last_error, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, '', ?, ?)
+        ON CONFLICT(run_id, kind, ordinal) DO UPDATE SET
+          status = CASE
+            WHEN run_deliveries.status = 'sent' THEN 'sent'
+            ELSE 'pending'
+          END,
+          chat_id = excluded.chat_id,
+          topic_id = excluded.topic_id,
+          reply_to_message_id = excluded.reply_to_message_id,
+          text = excluded.text,
+          parse_mode = excluded.parse_mode,
+          attachment_path = excluded.attachment_path,
+          file_name = excluded.file_name,
+          mime_type = excluded.mime_type,
+          attachment_size = excluded.attachment_size,
+          attachment_sha256 = excluded.attachment_sha256,
+          payload_digest = excluded.payload_digest,
+          telegram_message_id = COALESCE(
+            run_deliveries.telegram_message_id,
+            excluded.telegram_message_id
+          ),
+          next_attempt_at = excluded.next_attempt_at,
+          last_error = '',
+          updated_at = excluded.updated_at
+      `);
+      const keys = new Set<string>();
+      for (const delivery of deliveries) {
+        keys.add(`${delivery.kind}:${delivery.ordinal}`);
+        upsert.run(
+          runId,
+          row.conversation_id as SQLInputValue,
+          delivery.kind,
+          delivery.ordinal,
+          delivery.chatId,
+          delivery.topicId,
+          delivery.replyToMessageId ?? null,
+          delivery.text ?? "",
+          delivery.parseMode ?? "",
+          delivery.attachmentPath ?? "",
+          delivery.fileName ?? "",
+          delivery.mimeType ?? "",
+          delivery.attachmentSize ?? 0,
+          delivery.attachmentSha256 ?? "",
+          runDeliveryDigest(delivery),
+          delivery.telegramMessageId ?? null,
+          now,
+          now,
+          now,
+        );
+      }
+      const existing = this.db.prepare(`
+        SELECT id, kind, ordinal FROM run_deliveries
+        WHERE run_id = ? AND status = 'streaming'
+      `).all(runId) as Row[];
+      const cancel = this.db.prepare(`
+        UPDATE run_deliveries SET status = 'cancelled', updated_at = ? WHERE id = ?
+      `);
+      for (const delivery of existing) {
+        if (!keys.has(`${String(delivery.kind)}:${Number(delivery.ordinal)}`)) {
+          cancel.run(now, delivery.id as SQLInputValue);
+        }
+      }
+      return this.runDeliveries(runId);
+    });
+  }
+
+  recordRunStream(
+    runId: number,
+    destination: {
+      chatId: number;
+      topicId: number;
+      replyToMessageId: number | null;
+    },
+    chunks: Array<{ text: string; telegramMessageId: number | null }>,
+  ): void {
+    const now = Date.now() / 1_000;
+    this.transaction(() => {
+      const row = this.db.prepare(`
+        SELECT conversation_id, status FROM runs WHERE id = ?
+      `).get(runId) as Row | undefined;
+      if (!row || row.status !== "running") return;
+      const keep = new Set<number>();
+      const upsert = this.db.prepare(`
+        INSERT INTO run_deliveries
+          (run_id, conversation_id, kind, ordinal, status, chat_id, topic_id,
+           reply_to_message_id, text, parse_mode, payload_digest, telegram_message_id,
+           attempts, next_attempt_at, last_error, created_at, updated_at)
+        VALUES (?, ?, 'response', ?, 'streaming', ?, ?, ?, ?, 'HTML', ?, ?, 0, ?, '', ?, ?)
+        ON CONFLICT(run_id, kind, ordinal) DO UPDATE SET
+          text = excluded.text,
+          payload_digest = excluded.payload_digest,
+          telegram_message_id = COALESCE(
+            excluded.telegram_message_id,
+            run_deliveries.telegram_message_id
+          ),
+          updated_at = excluded.updated_at
+        WHERE run_deliveries.status = 'streaming'
+      `);
+      for (const [ordinal, chunk] of chunks.entries()) {
+        const input: RunDeliveryInput = {
+          kind: "response",
+          ordinal,
+          chatId: destination.chatId,
+          topicId: destination.topicId,
+          replyToMessageId: destination.replyToMessageId,
+          text: chunk.text,
+          parseMode: "HTML",
+          telegramMessageId: chunk.telegramMessageId,
+        };
+        validateRunDeliveryInput(input);
+        keep.add(ordinal);
+        upsert.run(
+          runId,
+          row.conversation_id as SQLInputValue,
+          ordinal,
+          destination.chatId,
+          destination.topicId,
+          destination.replyToMessageId,
+          chunk.text,
+          runDeliveryDigest(input),
+          chunk.telegramMessageId,
+          now,
+          now,
+          now,
+        );
+      }
+      const stale = this.db.prepare(`
+        SELECT id, ordinal FROM run_deliveries
+        WHERE run_id = ? AND kind = 'response' AND status = 'streaming'
+      `).all(runId) as Row[];
+      const cancel = this.db.prepare(`
+        UPDATE run_deliveries SET status = 'cancelled', updated_at = ? WHERE id = ?
+      `);
+      for (const delivery of stale) {
+        if (!keep.has(Number(delivery.ordinal))) cancel.run(now, delivery.id as SQLInputValue);
+      }
+    });
+  }
+
+  runDeliveries(runId: number): RunDelivery[] {
+    return (this.db.prepare(`
+      SELECT * FROM run_deliveries WHERE run_id = ? ORDER BY kind, ordinal, id
+    `).all(runId) as Row[]).map(runDelivery);
+  }
+
+  recordRunCommandEvidence(runId: number, input: RunCommandEvidenceInput): RunEvidence {
+    if (
+      !Number.isSafeInteger(runId) || runId <= 0 ||
+      !input.itemId.trim() ||
+      !/^[a-f0-9]{64}$/.test(input.commandDigest) ||
+      !/^[a-f0-9]{64}$/.test(input.outputDigest) ||
+      (input.exitCode !== null && !Number.isSafeInteger(input.exitCode)) ||
+      (input.durationMs !== null && (!Number.isFinite(input.durationMs) || input.durationMs < 0)) ||
+      input.outputExcerpt.length > 4_096 ||
+      input.redactionKinds.some((kind) => !/^[a-z0-9-]{1,80}$/.test(kind))
+    ) {
+      throw new Error("invalid run command evidence");
+    }
+    const now = Date.now() / 1_000;
+    return this.transaction(() => {
+      const existing = this.db.prepare(`
+        SELECT * FROM run_evidence WHERE run_id = ? AND item_id = ?
+      `).get(runId, input.itemId) as Row | undefined;
+      if (existing) return runEvidence(existing);
+      const run = this.db.prepare("SELECT status FROM runs WHERE id = ?").get(runId) as
+        | Row
+        | undefined;
+      if (!run) throw new Error("run was not found");
+      if (String(run.status) !== "running") throw new Error("run is not active");
+      this.db.prepare(`
+        UPDATE run_evidence
+        SET freshness = 'stale',
+            freshness_reason = 'a later command completed in the same run',
+            updated_at = ?
+        WHERE run_id = ? AND freshness = 'current'
+      `).run(now, runId);
+      const sequenceRow = this.db.prepare(`
+        SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence FROM run_evidence WHERE run_id = ?
+      `).get(runId) as Row;
+      this.db.prepare(`
+        INSERT INTO run_evidence
+          (run_id, item_id, sequence, command, command_digest, cwd, status, exit_code,
+           duration_ms, output_digest, output_excerpt, redaction_kinds_json,
+           freshness, freshness_reason, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'current',
+                'no later observable workspace event in this run', ?, ?)
+      `).run(
+        runId,
+        input.itemId.trim(),
+        Number(sequenceRow.sequence),
+        input.command,
+        input.commandDigest,
+        input.cwd,
+        input.status,
+        input.exitCode,
+        input.durationMs,
+        input.outputDigest,
+        input.outputExcerpt,
+        JSON.stringify([...new Set(input.redactionKinds)].sort()),
+        now,
+        now,
+      );
+      return runEvidence(this.db.prepare(`
+        SELECT * FROM run_evidence WHERE run_id = ? AND item_id = ?
+      `).get(runId, input.itemId) as Row);
+    });
+  }
+
+  markRunEvidenceStale(runId: number, reason: string): void {
+    if (!Number.isSafeInteger(runId) || runId <= 0) return;
+    const normalized = reason.trim().slice(0, 240) || "a later workspace event was observed";
+    const now = Date.now() / 1_000;
+    this.db.prepare(`
+      UPDATE run_evidence
+      SET freshness = 'stale', freshness_reason = ?, updated_at = ?
+      WHERE run_id = ? AND freshness = 'current'
+    `).run(normalized, now, runId);
+  }
+
+  runEvidence(runId: number): RunEvidence[] {
+    if (!Number.isSafeInteger(runId) || runId <= 0) return [];
+    return (this.db.prepare(`
+      SELECT * FROM run_evidence WHERE run_id = ? ORDER BY sequence, id
+    `).all(runId) as Row[]).map(runEvidence);
+  }
+
+  startRunReview(
+    runId: number,
+    sourceThreadId: string,
+    reviewThreadId: string,
+    turnId: string,
+    beforeRevision: string,
+  ): RunReview {
+    if (
+      !Number.isSafeInteger(runId) || runId <= 0 ||
+      !sourceThreadId.trim() || !reviewThreadId.trim() || !turnId.trim() ||
+      !beforeRevision.trim()
+    ) {
+      throw new Error("invalid run review");
+    }
+    const now = Date.now() / 1_000;
+    return this.transaction(() => {
+      const run = this.db.prepare(`
+        SELECT conversation_id, status FROM runs WHERE id = ?
+      `).get(runId) as Row | undefined;
+      if (!run || String(run.status) !== "running") throw new Error("run is not active");
+      this.db.prepare(`
+        INSERT INTO run_reviews
+          (run_id, conversation_id, source_thread_id, review_thread_id, turn_id,
+           status, before_revision, started_at)
+        VALUES (?, ?, ?, ?, ?, 'running', ?, ?)
+      `).run(
+        runId,
+        run.conversation_id as SQLInputValue,
+        sourceThreadId,
+        reviewThreadId,
+        turnId,
+        beforeRevision,
+        now,
+      );
+      return this.runReview(runId)!;
+    });
+  }
+
+  finishRunReview(
+    runId: number,
+    status: string,
+    findings: string,
+    afterRevision: string,
+    workspaceChanged: boolean,
+    error: string | null,
+  ): RunReview {
+    const now = Date.now() / 1_000;
+    this.db.prepare(`
+      UPDATE run_reviews
+      SET status = ?, findings = ?, after_revision = ?, workspace_changed = ?,
+          error = ?, completed_at = ?
+      WHERE run_id = ? AND status = 'running'
+    `).run(
+      status.slice(0, 80),
+      findings,
+      afterRevision,
+      workspaceChanged ? 1 : 0,
+      error?.slice(0, 1_000) ?? "",
+      now,
+      runId,
+    );
+    const review = this.runReview(runId);
+    if (!review) throw new Error("run review was not found");
+    return review;
+  }
+
+  runReview(runId: number): RunReview | null {
+    if (!Number.isSafeInteger(runId) || runId <= 0) return null;
+    const row = this.db.prepare("SELECT * FROM run_reviews WHERE run_id = ?").get(runId) as
+      | Row
+      | undefined;
+    return row ? runReview(row) : null;
+  }
+
+  conversationRunReviews(conversationId: string, limit = 20): RunReview[] {
+    const count = Math.max(1, Math.min(100, Math.trunc(limit)));
+    return (this.db.prepare(`
+      SELECT * FROM run_reviews WHERE conversation_id = ?
+      ORDER BY started_at DESC, id DESC LIMIT ?
+    `).all(conversationId, count) as Row[]).map(runReview);
+  }
+
+  projectRun(
+    projectId: string,
+    workspaceId: string,
+    runId: number,
+  ): ProjectRunHistory | null {
+    if (!Number.isSafeInteger(runId) || runId <= 0) return null;
+    const row = this.db.prepare(`
+      SELECT * FROM runs WHERE id = ? AND project_id = ? AND workspace_id = ?
+    `).get(runId, projectId, workspaceId) as Row | undefined;
+    return row ? projectRunHistory(row) : null;
+  }
+
+  recentProjectRuns(
+    projectId: string,
+    workspaceId: string,
+    limit = 10,
+    beforeRunId?: number,
+    excludeRunId?: number,
+  ): ProjectRunHistory[] {
+    const count = Math.max(1, Math.min(50, Math.trunc(limit)));
+    const rows = this.db.prepare(`
+      SELECT * FROM runs
+      WHERE project_id = ? AND workspace_id = ?
+        AND (? IS NULL OR id < ?)
+        AND (? IS NULL OR id <> ?)
+      ORDER BY id DESC LIMIT ?
+    `).all(
+      projectId,
+      workspaceId,
+      beforeRunId ?? null,
+      beforeRunId ?? null,
+      excludeRunId ?? null,
+      excludeRunId ?? null,
+      count,
+    ) as Row[];
+    return rows.map(projectRunHistory);
+  }
+
+  searchProjectRuns(
+    projectId: string,
+    workspaceId: string,
+    query: string,
+    limit = 10,
+    excludeRunId?: number,
+  ): ProjectRunHistory[] {
+    const terms = query.trim().split(/\s+/u).filter(Boolean).slice(0, 20);
+    if (terms.length === 0) return [];
+    const match = terms.map((term) => `"${term.replaceAll('"', '""')}"`).join(" AND ");
+    const count = Math.max(1, Math.min(50, Math.trunc(limit)));
+    const rows = this.db.prepare(`
+      SELECT runs.*
+      FROM run_history_fts
+      JOIN runs ON runs.id = CAST(run_history_fts.run_id AS INTEGER)
+      WHERE run_history_fts MATCH ?
+        AND runs.project_id = ? AND runs.workspace_id = ?
+        AND (? IS NULL OR runs.id <> ?)
+      ORDER BY bm25(run_history_fts), runs.id DESC
+      LIMIT ?
+    `).all(
+      match,
+      projectId,
+      workspaceId,
+      excludeRunId ?? null,
+      excludeRunId ?? null,
+      count,
+    ) as Row[];
+    return rows.map(projectRunHistory);
+  }
+
+  initializeProjectMemory(projectId: string, legacyMarkdown: string): number {
+    if (!projectId.trim()) throw new Error("project id is required");
+    const legacyDigest = createHash("sha256").update(legacyMarkdown).digest("hex");
+    const now = Date.now() / 1_000;
+    return this.transaction(() => {
+      const migrated = this.db.prepare(`
+        SELECT project_id FROM project_memory_migrations WHERE project_id = ?
+      `).get(projectId) as Row | undefined;
+      if (migrated) return 0;
+      const insert = this.db.prepare(`
+        INSERT OR IGNORE INTO project_memory_items
+          (project_id, kind, status, text, content_digest, source, source_run_id,
+           created_by, supersedes_id, created_at, updated_at)
+        VALUES (?, 'note', 'active', ?, ?, 'legacy', NULL, 0, NULL, ?, ?)
+      `);
+      let imported = 0;
+      for (const candidate of legacyProjectMemoryItems(legacyMarkdown)) {
+        if (Array.from(candidate).length > 2_000) continue;
+        const text = normalizedProjectMemoryText(candidate);
+        const digest = createHash("sha256").update(text).digest("hex");
+        imported += Number(insert.run(projectId, text, digest, now, now).changes);
+      }
+      this.db.prepare(`
+        INSERT INTO project_memory_migrations
+          (project_id, legacy_digest, imported_items, migrated_at)
+        VALUES (?, ?, ?, ?)
+      `).run(projectId, legacyDigest, imported, now);
+      return imported;
+    });
+  }
+
+  rememberProjectMemory(
+    projectId: string,
+    kind: ProjectMemoryKind,
+    textValue: string,
+    source: ProjectMemoryItem["source"],
+    createdBy: number,
+    sourceRunId: number | null = null,
+  ): ProjectMemoryItem {
+    if (!projectId.trim() || !["fact", "decision", "preference", "constraint", "note"].includes(kind)) {
+      throw new Error("invalid project memory scope or kind");
+    }
+    if (!Number.isSafeInteger(createdBy) || createdBy < 0) {
+      throw new Error("invalid project memory actor");
+    }
+    const text = normalizedProjectMemoryText(textValue);
+    const digest = createHash("sha256").update(text).digest("hex");
+    const now = Date.now() / 1_000;
+    return this.transaction(() => {
+      this.db.prepare(`
+        INSERT OR IGNORE INTO project_memory_items
+          (project_id, kind, status, text, content_digest, source, source_run_id,
+           created_by, supersedes_id, created_at, updated_at)
+        VALUES (?, ?, 'active', ?, ?, ?, ?, ?, NULL, ?, ?)
+      `).run(projectId, kind, text, digest, source, sourceRunId, createdBy, now, now);
+      const row = this.db.prepare(`
+        SELECT * FROM project_memory_items
+        WHERE project_id = ? AND content_digest = ? AND status = 'active'
+      `).get(projectId, digest) as Row;
+      return projectMemoryItem(row);
+    });
+  }
+
+  supersedeProjectMemory(
+    projectId: string,
+    itemId: number,
+    kind: ProjectMemoryKind,
+    textValue: string,
+    source: "user" | "codex",
+    createdBy: number,
+    sourceRunId: number | null = null,
+  ): ProjectMemoryItem {
+    if (
+      !Number.isSafeInteger(itemId) || itemId <= 0 ||
+      !["fact", "decision", "preference", "constraint", "note"].includes(kind) ||
+      !Number.isSafeInteger(createdBy) || createdBy < 0
+    ) {
+      throw new Error("invalid project memory replacement");
+    }
+    const text = normalizedProjectMemoryText(textValue);
+    const digest = createHash("sha256").update(text).digest("hex");
+    const now = Date.now() / 1_000;
+    return this.transaction(() => {
+      const previous = this.db.prepare(`
+        SELECT * FROM project_memory_items
+        WHERE id = ? AND project_id = ? AND status = 'active'
+      `).get(itemId, projectId) as Row | undefined;
+      if (!previous) throw new Error("active project memory item was not found");
+      this.db.prepare(`
+        UPDATE project_memory_items SET status = 'superseded', updated_at = ? WHERE id = ?
+      `).run(now, itemId);
+      const result = this.db.prepare(`
+        INSERT INTO project_memory_items
+          (project_id, kind, status, text, content_digest, source, source_run_id,
+           created_by, supersedes_id, created_at, updated_at)
+        VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        projectId,
+        kind,
+        text,
+        digest,
+        source,
+        sourceRunId,
+        createdBy,
+        itemId,
+        now,
+        now,
+      );
+      return projectMemoryItem(this.db.prepare(`
+        SELECT * FROM project_memory_items WHERE id = ?
+      `).get(result.lastInsertRowid) as Row);
+    });
+  }
+
+  archiveProjectMemory(projectId: string, itemId: number): ProjectMemoryItem {
+    if (!Number.isSafeInteger(itemId) || itemId <= 0) {
+      throw new Error("invalid project memory item id");
+    }
+    const now = Date.now() / 1_000;
+    const result = this.db.prepare(`
+      UPDATE project_memory_items SET status = 'archived', updated_at = ?
+      WHERE id = ? AND project_id = ? AND status = 'active'
+    `).run(now, itemId, projectId);
+    if (Number(result.changes) === 0) throw new Error("active project memory item was not found");
+    return projectMemoryItem(this.db.prepare(`
+      SELECT * FROM project_memory_items WHERE id = ?
+    `).get(itemId) as Row);
+  }
+
+  projectMemoryItems(
+    projectId: string,
+    includeInactive = false,
+    limit = 200,
+  ): ProjectMemoryItem[] {
+    const count = Math.max(1, Math.min(1_000, Math.trunc(limit)));
+    return (this.db.prepare(`
+      SELECT * FROM project_memory_items
+      WHERE project_id = ? AND (? = 1 OR status = 'active')
+      ORDER BY CASE kind
+        WHEN 'constraint' THEN 1 WHEN 'decision' THEN 2 WHEN 'preference' THEN 3
+        WHEN 'fact' THEN 4 ELSE 5 END, id
+      LIMIT ?
+    `).all(projectId, includeInactive ? 1 : 0, count) as Row[]).map(projectMemoryItem);
+  }
+
+  projectMemoryProjection(projectId: string, projectName: string): string {
+    const labels: Record<ProjectMemoryKind, string> = {
+      constraint: "Constraints",
+      decision: "Decisions",
+      preference: "Preferences",
+      fact: "Facts",
+      note: "Notes",
+    };
+    const items = this.projectMemoryItems(projectId);
+    const lines = [
+      `# Project memory: ${projectName}`,
+      "",
+      "<!-- SUMMING structured memory projection; generated from local state. -->",
+      "<!-- Use the project_memory host tools; do not edit this file. -->",
+    ];
+    for (const kind of ["constraint", "decision", "preference", "fact", "note"] as const) {
+      const section = items.filter((item) => item.kind === kind);
+      if (section.length === 0) continue;
+      lines.push("", `## ${labels[kind]}`, "");
+      for (const item of section) lines.push(`- [memory:${item.id}] ${item.text}`);
+    }
+    lines.push("");
+    return lines.join("\n");
+  }
+
+  runDelivery(id: number): RunDelivery | null {
+    if (!Number.isSafeInteger(id) || id <= 0) return null;
+    const row = this.db.prepare("SELECT * FROM run_deliveries WHERE id = ?").get(id) as
+      | Row
+      | undefined;
+    return row ? runDelivery(row) : null;
+  }
+
+  conversationRunDeliveries(conversationId: string, limit = 20): RunDelivery[] {
+    const count = Math.max(1, Math.min(100, Math.trunc(limit)));
+    return (this.db.prepare(`
+      SELECT * FROM run_deliveries
+      WHERE conversation_id = ?
+      ORDER BY updated_at DESC, id DESC LIMIT ?
+    `).all(conversationId, count) as Row[]).map(runDelivery);
+  }
+
+  claimRunDeliveries(
+    runId: number,
+    limit = 20,
+    now = Date.now() / 1_000,
+  ): RunDelivery[] {
+    const count = Math.max(1, Math.min(100, Math.trunc(limit)));
+    if (!Number.isSafeInteger(runId) || runId <= 0) {
+      throw new Error("run id is invalid");
+    }
+    return this.transaction(() => {
+      const rows = this.db.prepare(`
+        SELECT id FROM run_deliveries
+        WHERE run_id = ? AND status IN ('pending', 'failed') AND next_attempt_at <= ?
+        ORDER BY next_attempt_at, id LIMIT ?
+      `).all(runId, now, count) as Row[];
+      const claim = this.db.prepare(`
+        UPDATE run_deliveries
+        SET status = 'sending', attempts = attempts + 1, updated_at = ?
+        WHERE id = ? AND status IN ('pending', 'failed')
+      `);
+      const claimed: RunDelivery[] = [];
+      for (const row of rows) {
+        const result = claim.run(now, row.id as SQLInputValue);
+        if (Number(result.changes) === 0) continue;
+        const delivery = this.runDelivery(Number(row.id));
+        if (delivery) claimed.push(delivery);
+      }
+      return claimed;
+    });
+  }
+
+  markRunDeliverySent(id: number, telegramMessageId: number): RunDelivery {
+    if (!Number.isSafeInteger(telegramMessageId) || telegramMessageId <= 0) {
+      throw new Error("invalid Telegram message id");
+    }
+    const now = Date.now() / 1_000;
+    this.db.prepare(`
+      UPDATE run_deliveries
+      SET status = 'sent', telegram_message_id = ?, last_error = '', sent_at = ?, updated_at = ?
+      WHERE id = ? AND status = 'sending'
+    `).run(telegramMessageId, now, now, id);
+    const delivery = this.runDelivery(id);
+    if (!delivery) throw new Error("run delivery was not found");
+    return delivery;
+  }
+
+  markRunDeliveryFailed(id: number, error: string, permanent = false): RunDelivery {
+    const delivery = this.runDelivery(id);
+    if (!delivery) throw new Error("run delivery was not found");
+    const now = Date.now() / 1_000;
+    const deadLetter = permanent || delivery.attempts >= 5;
+    const delay = Math.min(300, 5 * (2 ** Math.max(0, delivery.attempts - 1)));
+    this.db.prepare(`
+      UPDATE run_deliveries
+      SET status = ?, last_error = ?, next_attempt_at = ?, updated_at = ?
+      WHERE id = ? AND status = 'sending'
+    `).run(
+      deadLetter ? "dead-letter" : "failed",
+      error.trim().slice(0, 500) || "Telegram delivery failed",
+      now + delay,
+      now,
+      id,
+    );
+    return this.runDelivery(id)!;
+  }
+
+  markRunDeliveryUncertain(id: number, error: string): RunDelivery {
+    const now = Date.now() / 1_000;
+    this.db.prepare(`
+      UPDATE run_deliveries
+      SET status = 'uncertain', last_error = ?, updated_at = ?
+      WHERE id = ? AND status IN ('streaming', 'sending')
+    `).run(error.trim().slice(0, 500) || "Telegram delivery outcome is uncertain", now, id);
+    const delivery = this.runDelivery(id);
+    if (!delivery) throw new Error("run delivery was not found");
+    return delivery;
+  }
+
+  cancelRunDelivery(id: number): RunDelivery {
+    const delivery = this.runDelivery(id);
+    if (!delivery || !["streaming", "pending", "failed", "uncertain", "dead-letter"].includes(
+      delivery.status,
+    )) {
+      throw new Error("run delivery is not cancellable");
+    }
+    const now = Date.now() / 1_000;
+    this.db.prepare(`
+      UPDATE run_deliveries SET status = 'cancelled', updated_at = ? WHERE id = ?
+    `).run(now, id);
+    return this.runDelivery(id)!;
   }
 
   telegramOffset(): number | null {

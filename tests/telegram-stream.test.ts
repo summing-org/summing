@@ -280,6 +280,40 @@ test("a final edit removes obsolete messages left by a longer stream", async () 
   }
 });
 
+test("a stream reports each durable rendered state after Telegram accepts it", async () => {
+  const api = new TelegramAPI("token");
+  const observed: Array<{ chunks: string[]; messageIds: number[] }> = [];
+  api.sendChatAction = async () => undefined;
+  api.sendMessage = async () => 101;
+  api.editMessage = async () => undefined;
+  const stream = new TelegramStream(api, -10042, 17, 0, 1_000, {
+    firstMessageDelayMilliseconds: 0,
+    firstMessageMaxWaitMilliseconds: 0,
+    minimumEditIntervalMilliseconds: 0,
+  });
+  stream.observeRendered((chunks, messageIds) => {
+    observed.push({ chunks: [...chunks], messageIds: [...messageIds] });
+  });
+  try {
+    stream.append("Первая часть");
+    await wait(5);
+    stream.append(" и финал");
+    await stream.flush();
+
+    assert.deepEqual(observed[0], {
+      chunks: ["Первая часть"],
+      messageIds: [101],
+    });
+    assert.deepEqual(observed.at(-1), {
+      chunks: ["Первая часть и финал"],
+      messageIds: [101],
+    });
+  } finally {
+    stream.stopTyping();
+    await api.close();
+  }
+});
+
 test("work log duration and retention stay bounded", () => {
   assert.equal(formatWorkLogDuration(0), "1 сек");
   assert.equal(formatWorkLogDuration(125_000), "2 мин 5 сек");

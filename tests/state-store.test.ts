@@ -820,7 +820,7 @@ test("Team Space pause and retention prevent covert indefinite collection", () =
   }
 });
 
-test("restart recovers active state and steer", () => {
+test("restart interrupts write work without replay and preserves an explicit retry path", () => {
   const { root, path, store } = tempStore();
   const conversation = store.bind(1, 2, "demo", "app");
   const runId = store.startRun(conversation.id, "work");
@@ -834,10 +834,155 @@ test("restart recovers active state and steer", () => {
     assert.deepEqual(recovered.pending(conversation.id, "steer"), []);
     assert.deepEqual(
       recovered.pending(conversation.id, "followup").map((item) => item.text),
-      ["work", "continue safely"],
+      ["continue safely"],
     );
+    const delivery = recovered.runDeliveries(runId).find((item) => item.kind === "notice");
+    assert.equal(delivery?.status, "uncertain");
+    assert.match(delivery?.text ?? "", new RegExp(`/retry ${runId}`));
+    recovered.retryInterruptedRun(conversation.id, runId, 11, 42);
+    const retry = recovered.pending(conversation.id, "followup")
+      .find((item) => item.retryOfRunId === runId);
+    assert.equal(retry?.text, "work");
+    assert.equal(retry?.senderId, 42);
   } finally {
     recovered.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("run delivery finalization is durable and restart never resends stored payloads", () => {
+  const { root, path, store } = tempStore();
+  const conversation = store.bind(1, 3, "demo", "app");
+  const runId = store.startRun(conversation.id, "prepare answer", [], "write", "direct", 42);
+  const deliveries = store.finishRunWithDeliveries(runId, "completed", "done", null, [{
+    kind: "response",
+    ordinal: 0,
+    chatId: conversation.chatId,
+    topicId: conversation.topicId,
+    replyToMessageId: 15,
+    text: "<b>done</b>",
+    parseMode: "HTML",
+  }]);
+  assert.equal(deliveries[0]?.status, "pending");
+  const claimed = store.claimRunDeliveries(runId);
+  assert.equal(claimed[0]?.status, "sending");
+  store.close();
+
+  const recovered = new StateStore(path);
+  try {
+    const uncertain = recovered.runDeliveries(runId)[0]!;
+    assert.equal(uncertain.status, "uncertain");
+    assert.match(uncertain.lastError, /will not be resent/);
+    assert.deepEqual(recovered.claimRunDeliveries(runId), []);
+  } finally {
+    recovered.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("project run history is full-text searchable without indexing effective prompts or crossing scope", () => {
+  const { root, store } = tempStore();
+  try {
+    const demo = store.bind(1, 1, "demo", "app");
+    const otherWorkspace = store.bind(1, 2, "demo", "worker");
+    const otherProject = store.bind(1, 3, "other", "app");
+    const first = store.startRun(demo.id, "prepare migration checklist", [], "write", "direct", 7);
+    store.setRunPrompt(first, "effective prompt with private-observer-only-marker");
+    store.finishRun(first, "completed", "migration completed safely");
+    const second = store.startRun(demo.id, "write release notes", [], "write", "direct", 7);
+    store.finishRun(second, "completed", "release notes ready");
+    const workspaceRun = store.startRun(
+      otherWorkspace.id,
+      "migration in worker",
+      [],
+      "write",
+      "direct",
+      7,
+    );
+    store.finishRun(workspaceRun, "completed", "worker migration");
+    const projectRun = store.startRun(
+      otherProject.id,
+      "migration in other project",
+      [],
+      "write",
+      "direct",
+      7,
+    );
+    store.finishRun(projectRun, "completed", "other migration");
+
+    assert.deepEqual(
+      store.searchProjectRuns("demo", "app", "migration").map((run) => run.id),
+      [first],
+    );
+    assert.deepEqual(
+      store.searchProjectRuns("demo", "app", "private-observer-only-marker"),
+      [],
+    );
+    assert.deepEqual(
+      store.recentProjectRuns("demo", "app").map((run) => run.id),
+      [second, first],
+    );
+    assert.equal(store.projectRun("demo", "app", workspaceRun), null);
+    assert.equal(store.projectRun("demo", "app", projectRun), null);
+    assert.equal(store.projectRun("demo", "app", first)?.requestText, "prepare migration checklist");
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("structured project memory migrates legacy notes and preserves lifecycle provenance", () => {
+  const { root, store } = tempStore();
+  try {
+    assert.equal(store.initializeProjectMemory(
+      "demo",
+      "# Project memory: Demo\n\n- Legacy fact\n- Legacy decision\n",
+    ), 2);
+    assert.equal(store.initializeProjectMemory("demo", "- ignored second migration\n"), 0);
+    const constraint = store.rememberProjectMemory(
+      "demo",
+      "constraint",
+      "All API timestamps use UTC",
+      "user",
+      42,
+    );
+    assert.equal(
+      store.rememberProjectMemory(
+        "demo",
+        "constraint",
+        "All API timestamps use UTC",
+        "user",
+        42,
+      ).id,
+      constraint.id,
+    );
+    const replacement = store.supersedeProjectMemory(
+      "demo",
+      constraint.id,
+      "constraint",
+      "All external timestamps use RFC 3339 UTC",
+      "user",
+      42,
+    );
+    assert.equal(replacement.supersedesId, constraint.id);
+    assert.equal(
+      store.projectMemoryItems("demo", true).find((item) => item.id === constraint.id)?.status,
+      "superseded",
+    );
+    store.archiveProjectMemory("demo", replacement.id);
+    assert.equal(
+      store.projectMemoryItems("demo", true).find((item) => item.id === replacement.id)?.status,
+      "archived",
+    );
+    assert.deepEqual(
+      store.projectMemoryItems("demo").map((item) => item.text),
+      ["Legacy fact", "Legacy decision"],
+    );
+    assert.match(store.projectMemoryProjection("demo", "Demo"), /memory:\d+.*Legacy fact/);
+    assert.doesNotMatch(store.projectMemoryProjection("demo", "Demo"), /RFC 3339/);
+    assert.deepEqual(store.projectMemoryItems("other"), []);
+  } finally {
+    store.close();
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -945,6 +1090,10 @@ test("migrates existing conversations to separate read-only state", () => {
     INSERT INTO pending_inputs
       (conversation_id, telegram_message_id, text, mode, created_at)
     VALUES ('legacy', 9, 'existing owner input', 'followup', 1);
+    INSERT INTO runs
+      (id, conversation_id, status, prompt, response, started_at, completed_at)
+    VALUES (4, 'legacy', 'completed', 'legacy migration request',
+            'legacy migration response', 1, 2);
   `);
   legacy.close();
 
@@ -971,6 +1120,11 @@ test("migrates existing conversations to separate read-only state", () => {
     );
     assert.equal(migrated.pendingAll("legacy").at(-1)?.senderId, 99);
     assert.equal(migrated.pendingAll("legacy").at(-1)?.responseMode, "ambient");
+    assert.equal(migrated.projectRun("demo", "app", 4)?.requestText, "legacy migration request");
+    assert.deepEqual(
+      migrated.searchProjectRuns("demo", "app", "migration").map((run) => run.id),
+      [4],
+    );
   } finally {
     migrated.close();
     rmSync(root, { recursive: true, force: true });

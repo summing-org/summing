@@ -108,7 +108,10 @@ test("owners control projects while group participants get read-only Q&A", async
     await send(42, "/help", 42, "private");
     assert.match(replies.at(-1) ?? "", /\*Помощь по SUMMING\*/);
     assert.match(replies.at(-1) ?? "", /Пример: `\/bind shop backend`/);
-    assert.match(replies.at(-1) ?? "", /Пример: `\/remember Все даты в API передаём в UTC`/);
+    assert.match(
+      replies.at(-1) ?? "",
+      /Пример: `\/remember constraint: Все даты в API передаём в UTC`/,
+    );
     assert.doesNotMatch(replies.at(-1) ?? "", /Только для администратора|project_create/);
     assert.equal(replyOptions.at(-1)?.parseMode, "MarkdownV2");
 
@@ -296,6 +299,25 @@ test("owners control projects while group participants get read-only Q&A", async
     startedConversation = "";
 
     const bound = runtime.state.byTopic(-100, 5)!;
+    await send(42, "/remember constraint: Все даты UTC", -100, "supergroup", 5);
+    const remembered = runtime.state.projectMemoryItems("alpha")[0]!;
+    assert.equal(remembered.kind, "constraint");
+    assert.equal(remembered.text, "Все даты UTC");
+    assert.match(replies.at(-1) ?? "", new RegExp(`memory:${remembered.id}`));
+    await send(
+      42,
+      `/remember_replace ${remembered.id} decision: API принимает RFC 3339`,
+      -100,
+      "supergroup",
+      5,
+    );
+    const replacement = runtime.state.projectMemoryItems("alpha")[0]!;
+    assert.equal(replacement.kind, "decision");
+    assert.equal(replacement.supersedesId, remembered.id);
+    await send(42, "/remember_list", -100, "supergroup", 5);
+    assert.match(replies.at(-1) ?? "", /API принимает RFC 3339/);
+    await send(42, `/remember_forget ${replacement.id}`, -100, "supergroup", 5);
+    assert.deepEqual(runtime.state.projectMemoryItems("alpha"), []);
     const humanAddressedMessageId = await send(
       42,
       "@TON1K_01 текущий топик настроен на проект summing",
@@ -701,12 +723,20 @@ test("owners control projects while group participants get read-only Q&A", async
     assert.ok(Array.isArray(writeOptions.dynamicTools));
     assert.deepEqual(
       (writeOptions.dynamicTools as Array<{ name: string }>).map((tool) => tool.name),
-      ["runner", "service", "repository", "project_context", "project_portal"],
+      [
+        "runner",
+        "service",
+        "repository",
+        "project_context",
+        "project_history",
+        "project_memory",
+        "project_portal",
+      ],
     );
     assert.equal(typeof writeOptions.dynamicToolHandler, "function");
     assert.equal(
       runtime.state.get(bound.id).codexThreadCapability,
-      "runner-repository-project-portal-v4",
+      "runner-repository-project-portal-history-memory-v6",
     );
     assert.equal(runtime.state.get(bound.id).previousCodexThreadId, "thr-legacy");
 

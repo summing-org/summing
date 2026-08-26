@@ -150,6 +150,8 @@ test("thread and turn requests use official v2 shapes", async (context) => {
             thread: { id: "thread-1" },
             runtimeWorkspaceRoots: params.runtimeWorkspaceRoots,
           }
+        : method === "review/start"
+          ? { reviewThreadId: "thread-review", turn: { id: "turn-review" } }
         : { turn: { id: "turn-1" } };
     }
   }
@@ -224,7 +226,6 @@ test("thread and turn requests use official v2 shapes", async (context) => {
           "/tmp/project/workspace": "write",
           "/tmp/project/workspace/.git": "read",
           "/tmp/project/workspace/.summing-runtime": "read",
-          "/tmp/project/workspace/.summing-runtime/memory": "write",
           "/tmp/project/workspace/.summing-runtime/tmp": "write",
           "/tmp/project/workspace/.summing-runtime/attachments": "read",
           "/tmp/project/workspace/.summing-runtime/outbox": "write",
@@ -415,7 +416,7 @@ test("thread and turn requests use official v2 shapes", async (context) => {
   assert.equal(emptyFilesystem["/tmp/empty-project"], "write");
   assert.equal(emptyFilesystem["/tmp/empty-project/.git"], "read");
   assert.equal(emptyFilesystem["/tmp/empty-project/.summing-runtime"], "read");
-  assert.equal(emptyFilesystem["/tmp/empty-project/.summing-runtime/memory"], "write");
+  assert.equal(emptyFilesystem["/tmp/empty-project/.summing-runtime/memory"], undefined);
   assert.equal(emptyFilesystem["/tmp/empty-project/.summing-runtime/tmp"], "write");
   assert.equal(emptyFilesystem["/tmp/empty-project/.summing-runtime/attachments"], "read");
   assert.equal(emptyFilesystem["/tmp/empty-project/.summing-runtime/outbox"], "write");
@@ -456,6 +457,19 @@ test("thread and turn requests use official v2 shapes", async (context) => {
     }),
     /workspace-less Codex context cannot declare filesystem roots/,
   );
+
+  assert.deepEqual(
+    await client.startReview("thread-1", { type: "uncommittedChanges" }, "detached"),
+    { reviewThreadId: "thread-review", turnId: "turn-review" },
+  );
+  assert.deepEqual(client.calls.at(-1), [
+    "review/start",
+    {
+      threadId: "thread-1",
+      target: { type: "uncommittedChanges" },
+      delivery: "detached",
+    },
+  ]);
 
   await client.unsubscribeThread("thread-1");
   assert.deepEqual(client.calls.at(-1), ["thread/unsubscribe", { threadId: "thread-1" }]);

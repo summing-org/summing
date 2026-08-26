@@ -335,8 +335,10 @@ test("conversation gets a persistent worktree and project memory", async () => {
       /outside private spool/,
     );
     writeFileSync(localMemory, `${readFileSync(localMemory, "utf8")}\n- durable fact\n`);
-    assert.equal(await manager.mergeProjectMemory("demo", prepared), null);
-    assert.match(readFileSync(manager.projectMemoryPath("demo"), "utf8"), /durable fact/);
+    const rejectedMemoryEdit = await manager.mergeProjectMemory("demo", prepared);
+    assert.ok(rejectedMemoryEdit);
+    assert.match(readFileSync(rejectedMemoryEdit, "utf8"), /Rejected direct project memory edit/);
+    assert.doesNotMatch(readFileSync(manager.projectMemoryPath("demo"), "utf8"), /durable fact/);
 
     const outside = join(root, "outside-secret");
     writeFileSync(outside, "must not enter project memory\n");

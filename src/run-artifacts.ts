@@ -1,4 +1,5 @@
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, open, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { GitInspector } from "./git-inspector.js";
 
@@ -10,6 +11,15 @@ export interface RunArtifact {
   startedAt: string;
   completedAt: string;
   changed: boolean;
+}
+
+export interface StagedRunDocument {
+  ordinal: number;
+  path: string;
+  fileName: string;
+  mimeType: string;
+  size: number;
+  sha256: string;
 }
 
 interface PendingArtifact extends Omit<RunArtifact, "afterRevision" | "completedAt" | "changed"> {
@@ -46,7 +56,11 @@ export class RunArtifactStore {
     });
   }
 
-  async complete(runId: number, conversationId: string, inspector: GitInspector): Promise<void> {
+  async complete(
+    runId: number,
+    conversationId: string,
+    inspector: GitInspector,
+  ): Promise<RunArtifact> {
     const directory = this.directory(conversationId, runId);
     const metadataPath = resolve(directory, "metadata.json");
     const pending = JSON.parse(await readFile(metadataPath, "utf8")) as PendingArtifact;
@@ -63,6 +77,55 @@ export class RunArtifactStore {
     };
     await writeFile(resolve(directory, "changes.patch"), patch, { mode: 0o600 });
     await writeFile(metadataPath, `${JSON.stringify(artifact, null, 2)}\n`, { mode: 0o600 });
+    return artifact;
+  }
+
+  async stageDocuments(
+    runId: number,
+    conversationId: string,
+    documents: Array<{
+      fileName: string;
+      mimeType: string;
+      data: Uint8Array;
+    }>,
+  ): Promise<StagedRunDocument[]> {
+    const directory = resolve(this.directory(conversationId, runId), "deliveries");
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    const staged: StagedRunDocument[] = [];
+    for (const [ordinal, document] of documents.entries()) {
+      const data = Uint8Array.from(document.data);
+      const sha256 = createHash("sha256").update(data).digest("hex");
+      const path = resolve(directory, `${ordinal}-${sha256}.bin`);
+      const temporaryPath = `${path}.${process.pid}-${randomUUID()}.tmp`;
+      const handle = await open(temporaryPath, "wx", 0o600);
+      try {
+        await handle.writeFile(data);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      try {
+        await rename(temporaryPath, path);
+      } catch (error) {
+        await rm(temporaryPath, { force: true });
+        throw error;
+      }
+      staged.push({
+        ordinal,
+        path,
+        fileName: document.fileName,
+        mimeType: document.mimeType,
+        size: data.byteLength,
+        sha256,
+      });
+    }
+    const directoryHandle = await open(directory, "r");
+    try {
+      await directoryHandle.sync();
+    } finally {
+      await directoryHandle.close();
+    }
+    return staged;
   }
 
   async list(conversationId: string, limit = 20): Promise<RunArtifact[]> {

@@ -43,7 +43,8 @@ test("help describes everyday commands with examples", () => {
   assert.match(help, /Пример: `\/bind shop backend`/);
   assert.match(help, /Пример: `\/steer Не меняй публичный API`/);
   assert.match(help, /Voice и audio транскрибируются через OpenAI gpt\\-transcribe/);
-  assert.match(help, /Пример: `\/remember Все даты в API передаём в UTC`/);
+  assert.match(help, /Пример: `\/remember constraint: Все даты в API передаём в UTC`/);
+  assert.match(help, /`\/remember_forget <id>`/);
   assert.match(help, /`\/publish <обновление>`/);
   assert.match(help, /`\/memory_me`/);
   assert.match(help, /`\/memory_forget_me`/);

@@ -134,6 +134,17 @@ interface TurnOptions
   outputSchema?: JsonRecord;
 }
 
+export type CodexReviewTarget =
+  | { type: "uncommittedChanges" }
+  | { type: "baseBranch"; branch: string }
+  | { type: "commit"; sha: string; title: string | null }
+  | { type: "custom"; instructions: string };
+
+export interface CodexReviewStart {
+  reviewThreadId: string;
+  turnId: string;
+}
+
 export class CodexAppServer extends EventEmitter {
   private process: ChildProcessWithoutNullStreams | null = null;
   private readonly pending = new Map<number, PendingRequest>();
@@ -529,6 +540,23 @@ export class CodexAppServer extends EventEmitter {
     return turn.id;
   }
 
+  async startReview(
+    threadId: string,
+    target: CodexReviewTarget = { type: "uncommittedChanges" },
+    delivery: "inline" | "detached" = "detached",
+  ): Promise<CodexReviewStart> {
+    const result = this.record(await this.request("review/start", {
+      threadId,
+      target,
+      delivery,
+    }));
+    const turn = this.record(result.turn);
+    if (typeof result.reviewThreadId !== "string" || typeof turn.id !== "string") {
+      throw new CodexProtocolError("review/start did not return review thread and turn ids");
+    }
+    return { reviewThreadId: result.reviewThreadId, turnId: turn.id };
+  }
+
   private runtimeWorkspaceRoots(
     cwd: string,
     options: Pick<
@@ -567,7 +595,6 @@ export class CodexAppServer extends EventEmitter {
     const workspacePath = resolve(cwd);
     const gitPointerPath = resolve(cwd, ".git");
     const runtimePath = resolve(cwd, ".summing-runtime");
-    const runtimeMemoryPath = resolve(runtimePath, "memory");
     const runtimeTempPath = resolve(cwd, ".summing-runtime", "tmp");
     const runtimeAttachmentsPath = resolve(runtimePath, "attachments");
     const runtimeOutboxPath = resolve(runtimePath, "outbox");
@@ -605,9 +632,6 @@ export class CodexAppServer extends EventEmitter {
       filesystem[workspacePath] = "write";
       filesystem[gitPointerPath] = "read";
       filesystem[runtimePath] = "read";
-      // Keep write grants directory-scoped: older App Server builds probe writable
-      // paths for project metadata and cannot probe through a regular file.
-      filesystem[runtimeMemoryPath] = "write";
       filesystem[runtimeTempPath] = "write";
       filesystem[runtimeAttachmentsPath] = "read";
       filesystem[runtimeOutboxPath] = "write";

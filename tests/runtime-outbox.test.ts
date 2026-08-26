@@ -7,6 +7,7 @@ import test from "node:test";
 import { ProjectConfig, RuntimeConfig, type WorkspaceConfig } from "../src/config.js";
 import { SummingRuntime } from "../src/runtime.js";
 import type { PendingInput } from "../src/state-store.js";
+import { TelegramError } from "../src/telegram-api.js";
 
 test("a successful editor run uploads generated outbox files to its Telegram reply", async () => {
   const root = mkdtempSync(join(tmpdir(), "summing-runtime-outbox-"));
@@ -114,6 +115,53 @@ test("a successful editor run uploads generated outbox files to its Telegram rep
             threadId,
             turnId: "turn-outbox",
             item: {
+              id: "command-outbox-secret",
+              type: "commandExecution",
+              command: "npm run test",
+              cwd,
+              status: "completed",
+              aggregatedOutput: "api_key=abc123abc123abc123abc123",
+              exitCode: 0,
+              durationMs: 125,
+            },
+          },
+        });
+        await routeCodexEvent({
+          method: "item/completed",
+          params: {
+            threadId,
+            turnId: "turn-outbox",
+            item: {
+              id: "change-outbox",
+              type: "fileChange",
+              status: "completed",
+              changes: [],
+            },
+          },
+        });
+        await routeCodexEvent({
+          method: "item/completed",
+          params: {
+            threadId,
+            turnId: "turn-outbox",
+            item: {
+              id: "command-outbox-final",
+              type: "commandExecution",
+              command: "npm run lint",
+              cwd,
+              status: "failed",
+              aggregatedOutput: "one lint error",
+              exitCode: 1,
+              durationMs: 250,
+            },
+          },
+        });
+        await routeCodexEvent({
+          method: "item/completed",
+          params: {
+            threadId,
+            turnId: "turn-outbox",
+            item: {
               id: "answer-outbox",
               type: "agentMessage",
               phase: "final_answer",
@@ -165,6 +213,79 @@ test("a successful editor run uploads generated outbox files to its Telegram rep
     }]);
     assert.ok(messages.some((message) => message.includes("PDF приложен")));
     assert.equal(messages.some((message) => message.includes("не отправлена")), false);
+    const evidence = runtime.state.runEvidence(1);
+    assert.equal(evidence.length, 2);
+    assert.deepEqual(
+      evidence.map((item) => [item.itemId, item.freshness, item.exitCode]),
+      [
+        ["command-outbox-secret", "stale", 0],
+        ["command-outbox-final", "current", 1],
+      ],
+    );
+    assert.equal(evidence[0]?.outputExcerpt, "[redacted]");
+    assert.deepEqual(evidence[0]?.redactionKinds, ["credential-assignment"]);
+    assert.equal(evidence[1]?.outputExcerpt, "one lint error");
+  } finally {
+    runtime.state.close();
+    await runtime.telegram.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an ambiguous direct delivery is never retried automatically", async () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-runtime-delivery-uncertain-"));
+  const repository = join(root, "repository");
+  mkdirSync(repository);
+  const project = new ProjectConfig(
+    "demo",
+    "Demo",
+    "repo",
+    new Map([["repo", { id: "repo", path: repository }]]),
+  );
+  const runtime = new SummingRuntime(new RuntimeConfig(
+    join(root, "data"),
+    join(root, "codex"),
+    join(root, "worktrees"),
+    "telegram-token",
+    1,
+    "codex",
+    8765,
+    2,
+    0.5,
+    "",
+    "medium",
+    true,
+    new Map([["demo", project]]),
+  ));
+  const conversation = runtime.state.bind(42, 0, "demo", "repo");
+  const runId = runtime.state.startRun(conversation.id, "answer", [], "write", "direct", 42);
+  const delivery = runtime.state.finishRunWithDeliveries(
+    runId,
+    "completed",
+    "answer",
+    null,
+    [{
+      kind: "response",
+      ordinal: 0,
+      chatId: 42,
+      topicId: 0,
+      text: "answer",
+    }],
+  )[0]!;
+  let sends = 0;
+  runtime.telegram.sendMessage = async () => {
+    sends += 1;
+    throw new TelegramError("Telegram sendMessage transport failed");
+  };
+  const drain = (runtime as unknown as {
+    drainRunDeliveries(runId: number): Promise<void>;
+  }).drainRunDeliveries.bind(runtime);
+  try {
+    await drain(runId);
+    assert.equal(sends, 1);
+    assert.equal(runtime.state.runDelivery(delivery.id)?.status, "uncertain");
+    await drain(runId);
+    assert.equal(sends, 1);
   } finally {
     runtime.state.close();
     await runtime.telegram.close();
