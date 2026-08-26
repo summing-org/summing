@@ -246,6 +246,8 @@ test("conversation gets a persistent worktree and project memory", async () => {
     writeFileSync(outboxOutside, "outside\n");
     writeFileSync(join(outbox, "report.pdf"), Uint8Array.from([1, 2, 3, 4]));
     writeFileSync(join(outbox, "too-large.txt"), "x".repeat(17));
+    mkdirSync(join(outbox, ".agents"));
+    mkdirSync(join(outbox, ".codex"));
     mkdirSync(join(outbox, "nested"));
     symlinkSync(outboxOutside, join(outbox, "outside-link.txt"));
     linkSync(outboxOutside, join(outbox, "outside-hardlink.txt"));
@@ -269,6 +271,13 @@ test("conversation gets a persistent worktree and project memory", async () => {
     assert.ok(collected.warnings.some((warning) => warning.includes("nested")));
     assert.ok(collected.warnings.some((warning) => warning.includes("outside-link.txt")));
     assert.ok(collected.warnings.some((warning) => warning.includes("outside-hardlink.txt")));
+    assert.equal(collected.warnings.some((warning) => warning.includes(".agents")), false);
+    assert.equal(collected.warnings.some((warning) => warning.includes(".codex")), false);
+    writeFileSync(join(outbox, ".codex", "metadata.json"), "{}\n");
+    const collectedWithNonEmptyServiceDirectory = manager.collectOutbox(prepared);
+    assert.ok(
+      collectedWithNonEmptyServiceDirectory.warnings.some((warning) => warning.includes(".codex")),
+    );
     await manager.prepare(conversation, project, workspace);
     assert.deepEqual(readdirSync(outbox), []);
     const localMemory = join(
@@ -303,6 +312,9 @@ test("conversation gets a persistent worktree and project memory", async () => {
     const portalDocument = manager.portalDocument(prepared, materialized[0]!.relativePath);
     assert.equal(portalDocument.fileName, "99-7-source.zip");
     assert.equal(Buffer.from(portalDocument.data).toString("utf8"), "PK test archive");
+    const previewPath = join(prepared.path, "preview.mp4");
+    writeFileSync(previewPath, Uint8Array.from([0, 0, 0, 20, 0x66, 0x74, 0x79, 0x70]));
+    assert.equal(manager.portalDocument(prepared, "preview.mp4").mimeType, "video/mp4");
     writeFileSync(join(prepared.path, ".env.portal"), "API_TOKEN=secret\n");
     await assert.rejects(
       async () => manager.portalDocument(prepared, ".env.portal"),

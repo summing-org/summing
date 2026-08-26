@@ -62,6 +62,7 @@ const LEGACY_IDENTITY = "Sum" + "mate";
 const LEGACY_RUNTIME_DIRECTORY = `.${LEGACY_IDENTITY.toLowerCase()}-runtime`;
 const LEGACY_BRANCH_PREFIX = LEGACY_IDENTITY.toLowerCase();
 const MAX_OUTBOX_DOCUMENTS = 10;
+const EMPTY_SERVICE_OUTBOX_DIRECTORIES = new Set([".agents", ".codex"]);
 
 const OUTBOX_MIME_TYPES = new Map([
   [".csv", "text/csv"],
@@ -71,6 +72,7 @@ const OUTBOX_MIME_TYPES = new Map([
   [".jpg", "image/jpeg"],
   [".json", "application/json"],
   [".md", "text/markdown"],
+  [".mp4", "video/mp4"],
   [".pdf", "application/pdf"],
   [".png", "image/png"],
   [".pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"],
@@ -90,6 +92,28 @@ function telegramFileName(value: string): string {
 
 function outboxMimeType(fileName: string): string {
   return OUTBOX_MIME_TYPES.get(extname(fileName).toLowerCase()) ?? "application/octet-stream";
+}
+
+function isEmptyServiceOutboxDirectory(outbox: string, entryName: string): boolean {
+  if (!EMPTY_SERVICE_OUTBOX_DIRECTORIES.has(entryName)) {
+    return false;
+  }
+  const path = resolve(outbox, entryName);
+  try {
+    const before = lstatSync(path);
+    if (before.isSymbolicLink() || !before.isDirectory()) {
+      return false;
+    }
+    const empty = readdirSync(path).length === 0;
+    const after = lstatSync(path);
+    return empty &&
+      !after.isSymbolicLink() &&
+      after.isDirectory() &&
+      before.dev === after.dev &&
+      before.ino === after.ino;
+  } catch {
+    return false;
+  }
 }
 
 function sensitivePortalFile(relativePath: string): boolean {
@@ -431,6 +455,9 @@ export class WorkspaceManager {
     )) {
       const displayName = telegramFileName(entry.name);
       if (!entry.isFile()) {
+        if (entry.isDirectory() && isEmptyServiceOutboxDirectory(outbox, entry.name)) {
+          continue;
+        }
         warnings.push(`${displayName}: разрешены только обычные файлы без каталогов и symlink`);
         continue;
       }
