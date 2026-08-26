@@ -49,6 +49,7 @@ export function helpMessage(isAdministrator: boolean): string {
     command("/new", "начать новый контекст в topic"),
     command("/remember <факт>", "сохранить факт в общей памяти проекта"),
     example("/remember Все даты в API передаём в UTC"),
+    command("/publish <обновление>", "опубликовать безопасное обновление наблюдателям Workspace"),
     command("/memory", "показать состояние и знания текущего Team Space"),
     command("/memory_me", "показать сохранённые обо мне события и выводы"),
     command(
@@ -76,8 +77,8 @@ export function helpMessage(isAdministrator: boolean): string {
         "привязать топик из личного чата",
       ),
       command(
-        "/bind_external_topic <chat_id> <topic_id> <project> [workspace] [portalKey] [default]",
-        "привязать именованный внешний read-only портал проекта",
+        "/bind_observer_topic <chat_id> <topic_id> <project> [workspace]",
+        "привязать read-only топик-наблюдатель проекта",
       ),
       example("/bind_topic -1001234567890 42 summing repo"),
       command("/project_create <project> <primary_owner_id> <repo>", "создать локальный Git-проект"),

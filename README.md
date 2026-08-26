@@ -96,8 +96,8 @@ Team Space: создаётся при подключении командног�
   создаёт или клонирует управляемые репозитории и выполняет bind/rebind без ручного
   ввода `chat_id`, `topic_id` и slash-команд, а в системных настройках показывает
   фазу и историю deployment, упавшие тесты и безопасный хвост журнала, а также
-  позволяет запросить обновление SUMMING; после новой привязки
-  бот упоминает владельца проекта в выбранном топике и сообщает Project/Repository;
+  позволяет запросить обновление SUMMING. Для каждого Project/Workspace выбирается
+  один основной рабочий топик и любое число read-only топиков-наблюдателей;
 - отдельный rootless Docker runner собирает неизменяемые Git snapshots и явно
   разделяет конечные jobs (`build`, `validate`, `dry-run`, `run`) и долгоживущие
   именованные services, активируемые из точного завершённого Release;
@@ -108,26 +108,24 @@ Team Space: создаётся при подключении командног�
   удаление/очистка артефактов используют отдельное подтверждение в следующем
   сообщении. Автоматические commit/merge/push, force push, Claudexor, swarm,
   произвольные MCP/marketplaces, local models и автономная Evolution отсутствуют.
-- администратор может пометить Telegram-топик как постоянный внешний read-only
-  портал Project через Mini App или `/bind_external_topic`. Все сообщения и
-  reply-связи сохраняются в обычной истории Team Space; отдельные feedback-сессии,
-  кнопки approve/reject и управляющие текстовые команды не создаются. Бот отвечает
-  только на прямое упоминание или reply, читает Project и историю портала без права
-  что-либо менять. Внутренний Project-агент получает read-only поиск с пагинацией
-  по всей доступной истории внешних порталов. Комментарий заказчика — контекст,
-  а не команда на изменение, запуск или публикацию;
-- универсальный Project portal transport позволяет внутреннему авторизованному
-  агенту по явной просьбе владельца отправить во внешний портал текст и до десяти
-  файлов из workspace, включая долговечно сохранённые входящие вложения или
-  runner-артефакты. Несколько destinations получают логические `portalKey`
-  (`main`, `reports`, `legal`), ровно один default; Telegram IDs скрыты от агента,
-  а schema остаётся transport-neutral. Сообщение сначала попадает в ограниченную
+- основной топик — единственное место Project/Workspace, где owners и Codex запускают
+  изменения. Топик-наблюдатель всегда read-only даже для owner: прямое упоминание или
+  reply открывает Q&A по опубликованному снимку Project и локальной истории, а обычный
+  комментарий становится недоверенным feedback. Последние consent-visible комментарии
+  bounded-пакетом добавляются к следующему owner-run, но никогда автоматически не
+  превращаются в требования, решения или задачи. `/publish <обновление>` явно и
+  одинаково публикует безопасный текст во все observer-топики текущего Workspace;
+- Git-worktree наблюдателя перед Q&A fast-forward-ится к опубликованному `HEAD`
+  исходного Project checkout и отказывается продолжать при divergence или локальных
+  изменениях. Надёжный transport остаётся внутренней инфраструктурой: targeted replies,
+  входящие файлы и legacy runner-маршруты по-прежнему используют логические `portalKey`,
+  но ключ/default больше не входят в обычный bind UI. Сообщение сначала попадает в ограниченную
   постоянную outbox-очередь с idempotency key, SHA-256, retry/dead-letter и
   администраторскими Retry/Cancel. Рестарт во время отправки создаёт `uncertain`,
   который никогда не повторяется автоматически. Входящие файлы после secret scan
   хранятся AES-256-GCM до raw-retention и доступны только авторизованному Project
   turn по `artifactId`. Dry-run использует тот же транспорт через обычный
-  `portal-messages.json` с необязательным `portalKey`, без report bridge, кнопок
+  `portal-messages.json` с необязательным legacy `portalKey`, без report bridge, кнопок
   согласования и callback state machine.
 
 ## Требования
@@ -360,8 +358,9 @@ Runtime сохраняет событие `my_chat_member`, поэтому до�
 список существующих forum topics: конкретный `topic_id` регистрируется, когда бот
 впервые получает сообщение или service-event из этого топика. После этого
 администратор может из личного чата выполнить
-`/bind_topic <chat_id> <topic_id> <project> [workspace]`. Список и удалённая
-привязка недоступны в группах и другим пользователям.
+`/bind_topic <chat_id> <topic_id> <project> [workspace]` для primary либо
+`/bind_observer_topic <chat_id> <topic_id> <project> [workspace]` для observer.
+Список и удалённая привязка недоступны в группах и другим пользователям.
 
 ## Управление
 
@@ -373,13 +372,15 @@ Runtime сохраняет событие `my_chat_member`, поэтому до�
 | `/project_create <project> <primary_owner_id> <repo>` | Создать локальный проект; только администратор в личном чате. |
 | `/project_clone <project> <primary_owner_id> <repo> <git_url>` | Клонировать проект; только администратор в личном чате. |
 | `/topics` | Показать обнаруженные группы, топики и bindings; только администратор в личном чате. |
-| `/bind_topic <chat_id> <topic_id> <project> [workspace]` | Привязать обнаруженный топик из личного чата администратора. |
+| `/bind_topic <chat_id> <topic_id> <project> [workspace]` | Назначить основной рабочий топик из личного чата администратора. |
+| `/bind_observer_topic <chat_id> <topic_id> <project> [workspace]` | Привязать read-only топик-наблюдатель. |
 | `/projects` | Показать доступные отправителю проекты. |
 | `/bind` | Связать текущий topic с Project/Workspace. |
 | `/status` | Проверить версию SUMMING, Codex, account, binding и runs. |
 | `/sync_status [chat_id]` | Краткий статус всех knowledge-sync источников или подробный статус группы; только администратор в личном чате. |
 | `/files` | Открыть Project Viewer, Git Pull/Push, diff, runner jobs и логи. |
 | `/steer` | Добавить указание в активный turn. |
+| `/publish <обновление>` | Из primary опубликовать безопасный текст всем observers текущего Workspace. |
 | Reply на stream | То же, без команды. |
 | `/cancel` | Прервать активный turn topic. |
 | `/new` | Начать новый Codex thread в topic. |

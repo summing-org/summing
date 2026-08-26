@@ -90,7 +90,7 @@ test("binding, input queues, and Telegram offset", () => {
   }
 });
 
-test("external read-only bindings expose their durable topic history to the Project", () => {
+test("observer bindings expose durable feedback to the Project", () => {
   const { root, store } = tempStore();
   try {
     const conversation = store.bind(
@@ -98,9 +98,9 @@ test("external read-only bindings expose their durable topic history to the Proj
       9,
       "ash-telegrams",
       "repo",
-      "external-readonly",
+      "observer",
     );
-    assert.equal(conversation.bindingMode, "external-readonly");
+    assert.equal(conversation.role, "observer");
     const event = store.recordTeamEvent({
       provider: "telegram",
       externalSpaceId: "-100500",
@@ -117,9 +117,9 @@ test("external read-only bindings expose their durable topic history to the Proj
       administratorUserId: 1,
     });
     assert.ok(event);
-    assert.equal(store.externalProjectSources("ash-telegrams")[0]?.id, event.sourceId);
+    assert.equal(store.observerProjectSources("ash-telegrams")[0]?.id, event.sourceId);
     assert.deepEqual(
-      store.externalProjectEvents({ projectId: "ash-telegrams", query: "аналитики" })
+      store.observerProjectEvents({ projectId: "ash-telegrams", query: "аналитики" })
         .map((item) => [item.externalEventId, item.replyToExternalEventId, item.text]),
       [["78061", "78032", "Нужен лёгкий контент без отраслевой аналитики."]],
     );
@@ -129,8 +129,8 @@ test("external read-only bindings expose their durable topic history to the Proj
     assert.equal(store.projectPortalReplyMessageId(portal, event.id), 78061);
 
     const rebound = store.bind(-100500, 9, "ash-telegrams", "repo");
-    assert.equal(rebound.bindingMode, "project");
-    assert.deepEqual(store.externalProjectSources("ash-telegrams"), []);
+    assert.equal(rebound.role, "primary");
+    assert.deepEqual(store.observerProjectSources("ash-telegrams"), []);
   } finally {
     store.close();
     rmSync(root, { recursive: true, force: true });
@@ -140,11 +140,11 @@ test("external read-only bindings expose their durable topic history to the Proj
 test("Project portals resolve stable logical keys and exactly one default", () => {
   const { root, store } = tempStore();
   try {
-    const main = store.bind(-100500, 9, "ash-telegrams", "repo", "external-readonly", {
+    const main = store.bind(-100500, 9, "ash-telegrams", "repo", "observer", {
       portalKey: "main",
       isDefault: true,
     });
-    const reports = store.bind(-100500, 10, "ash-telegrams", "repo", "external-readonly", {
+    const reports = store.bind(-100500, 10, "ash-telegrams", "repo", "observer", {
       portalKey: "reports",
       isDefault: false,
     });
@@ -153,7 +153,7 @@ test("Project portals resolve stable logical keys and exactly one default", () =
       store.resolveProjectPortal("ash-telegrams", "repo", "reports")?.portalId,
       reports.id,
     );
-    store.bind(-100500, 10, "ash-telegrams", "repo", "external-readonly", {
+    store.bind(-100500, 10, "ash-telegrams", "repo", "observer", {
       portalKey: "reports",
       isDefault: true,
     });
@@ -164,10 +164,27 @@ test("Project portals resolve stable logical keys and exactly one default", () =
     );
     assert.equal(store.resolveProjectPortal("ash-telegrams", "repo")?.portalKey, "reports");
     assert.throws(
-      () => store.bind(-100500, 11, "ash-telegrams", "repo", "external-readonly", {
+      () => store.bind(-100500, 11, "ash-telegrams", "repo", "observer", {
         portalKey: "Reports!",
       }),
       /portalKey/,
+    );
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("one Project workspace has one primary topic and any number of observers", () => {
+  const { root, store } = tempStore();
+  try {
+    const primary = store.bind(-100500, 9, "demo", "repo", "primary");
+    const observer = store.bind(-100501, 10, "demo", "repo", "observer");
+    assert.equal(primary.role, "primary");
+    assert.equal(observer.role, "observer");
+    assert.throws(
+      () => store.bind(-100502, 11, "demo", "repo", "primary"),
+      /у Project\/Workspace уже есть основной рабочий топик/,
     );
   } finally {
     store.close();

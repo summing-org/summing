@@ -204,7 +204,7 @@ test("owners control projects while group participants get read-only Q&A", async
     assert.match(replies.at(-1) ?? "", /только администратору/);
     await send(1, "/bind_topic -300 44 summing repo", 1, "private");
     assert.equal(runtime.state.byTopic(-300, 44)?.projectId, "summing");
-    assert.match(replies.at(-1) ?? "", /Топик привязан/);
+    assert.match(replies.at(-1) ?? "", /Основной рабочий топик привязан/);
     await send(1, "/topics", 1, "private");
     assert.match(replies.at(-1) ?? "", /topic_id: 44 «Backend» → summing\/repo/);
     await send(1, "/bind_topic -300 44 summing repo", -300, "supergroup", 44);
@@ -228,7 +228,7 @@ test("owners control projects while group participants get read-only Q&A", async
     await send(42, "/bind alpha", -100, "supergroup", 5);
     assert.equal(runtime.state.byTopic(-100, 5)?.projectId, "alpha");
     const ownerNotice = replies.findIndex((reply) =>
-      reply.includes("проекту <b>alpha</b>, где вы назначены владельцем")
+      reply.includes("основным рабочим столом проекта <b>alpha</b>")
     );
     assert.notEqual(ownerNotice, -1);
     assert.equal(replyChats[ownerNotice], -100);
@@ -268,10 +268,19 @@ test("owners control projects while group participants get read-only Q&A", async
       },
     });
 
-    await send(1, "/bind_external_topic -300 44 alpha repo", 1, "private");
+    await send(1, "/bind_observer_topic -300 44 alpha repo", 1, "private");
     const externalPortal = runtime.state.byTopic(-300, 44)!;
-    assert.equal(externalPortal.bindingMode, "external-readonly");
-    assert.match(replies.at(-1) ?? "", /Внешний read-only портал проекта привязан/);
+    assert.equal(externalPortal.role, "observer");
+    assert.match(replies.at(-1) ?? "", /Топик-наблюдатель проекта привязан/);
+    await send(42, "/publish Исправление авторизации принято и опубликовано.", -100, "supergroup", 5);
+    const publishedIndex = replies.findIndex((reply) =>
+      reply.includes("📣 Обновление проекта «alpha»") &&
+      reply.includes("Исправление авторизации принято")
+    );
+    assert.notEqual(publishedIndex, -1);
+    assert.equal(replyChats[publishedIndex], -300);
+    assert.equal(replyOptions[publishedIndex]?.topicId, 44);
+    assert.match(replies.at(-1) ?? "", /Обновление опубликовано: 1\/1/);
     startedConversation = "";
     await send(42, "Обсудим детали отчёта", -300, "supergroup", 44);
     assert.equal(startedConversation, "");
@@ -282,7 +291,7 @@ test("owners control projects while group participants get read-only Q&A", async
       [["read-only", "direct"]],
     );
     await send(1, "/cancel", -300, "supergroup", 44);
-    assert.match(replies.at(-1) ?? "", /Во внешнем портале команды отключены/);
+    assert.match(replies.at(-1) ?? "", /В топике-наблюдателе команды отключены/);
     runtime.state.consume(runtime.state.pendingAll(externalPortal.id).map((item) => item.id));
     startedConversation = "";
 

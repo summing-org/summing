@@ -82,7 +82,7 @@ test("upgrades the previous identity, worktree branch, and runtime directory to 
       topicId: 2,
       projectId: "summing",
       workspaceId: "repo",
-      bindingMode: "project",
+      role: "primary",
       codexThreadId: null,
       codexThreadCapability: "",
       previousCodexThreadId: null,
@@ -202,7 +202,7 @@ test("conversation gets a persistent worktree and project memory", async () => {
       topicId: 2,
       projectId: "demo",
       workspaceId: "app",
-      bindingMode: "project",
+      role: "primary",
       codexThreadId: null,
       codexThreadCapability: "",
       previousCodexThreadId: null,
@@ -337,6 +337,68 @@ test("conversation gets a persistent worktree and project memory", async () => {
     assert.doesNotMatch(
       readFileSync(manager.projectMemoryPath("demo"), "utf8"),
       /must not enter project memory/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("observer worktree follows the published repository HEAD by fast-forward", async () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-observer-workspace-"));
+  try {
+    const source = join(root, "repo");
+    mkdirSync(source);
+    git(source, "init");
+    git(source, "config", "user.email", "test@example.com");
+    git(source, "config", "user.name", "Test");
+    writeFileSync(join(source, "README.md"), "published v1\n");
+    git(source, "add", "README.md");
+    git(source, "commit", "-m", "published v1");
+    const workspace: WorkspaceConfig = { id: "repo", path: source };
+    const project = new ProjectConfig("demo", "Demo", "repo", new Map([["repo", workspace]]));
+    const config = new RuntimeConfig(
+      join(root, "data"),
+      join(root, "codex"),
+      join(root, "worktrees"),
+      "token",
+      1,
+      "codex",
+      8765,
+      2,
+      1,
+      "",
+      "medium",
+      true,
+      new Map([["demo", project]]),
+    );
+    const manager = new WorkspaceManager(config);
+    manager.initialize();
+    const conversation: Conversation = {
+      id: "tg-observer",
+      chatId: -100,
+      topicId: 9,
+      projectId: "demo",
+      workspaceId: "repo",
+      role: "observer",
+      codexThreadId: null,
+      codexThreadCapability: "",
+      previousCodexThreadId: null,
+      readOnlyCodexThreadId: null,
+      activeTurnId: null,
+      streamMessageId: null,
+      worktreePath: null,
+    };
+    const first = await manager.prepare(conversation, project, workspace);
+    assert.equal(readFileSync(join(first.path, "README.md"), "utf8"), "published v1\n");
+
+    writeFileSync(join(source, "README.md"), "published v2\n");
+    git(source, "add", "README.md");
+    git(source, "commit", "-m", "published v2");
+    const second = await manager.prepare(conversation, project, workspace);
+    assert.equal(readFileSync(join(second.path, "README.md"), "utf8"), "published v2\n");
+    assert.equal(
+      gitOutput(second.readableRoot, "rev-parse", "HEAD"),
+      gitOutput(source, "rev-parse", "HEAD"),
     );
   } finally {
     rmSync(root, { recursive: true, force: true });

@@ -10,8 +10,9 @@ test("administrator Mini App separates projects, topic bindings and global setti
   assert.match(ADMIN_HTML, /id="topicSearch"/);
   assert.match(ADMIN_HTML, /id="userCount"/);
   assert.match(ADMIN_HTML, /Привязки топиков/);
-  assert.match(ADMIN_HTML, /Telegram Bot API не отдаёт полный список/);
-  assert.match(ADMIN_HTML, /уведомит владельца проекта прямо в выбранном топике/);
+  assert.match(ADMIN_HTML, /один основной рабочий топик/);
+  assert.match(ADMIN_HTML, /read-only топиков-наблюдателей/);
+  assert.match(ADMIN_HTML, /Доставка наблюдателям/);
   assert.match(ADMIN_HTML, /Настройки SUMMING/);
   assert.match(ADMIN_HTML, /data-admin-section="projects"/);
   assert.match(ADMIN_HTML, /data-admin-section="bindings"/);
@@ -52,6 +53,8 @@ test("administrator Mini App separates projects, topic bindings and global setti
   assert.match(ADMIN_JS, /Сделать primary/);
   assert.match(ADMIN_JS, /Добавить owner/);
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/bindings/);
+  assert.match(ADMIN_JS, /data-role/);
+  assert.doesNotMatch(ADMIN_JS, /data-portal-key|data-portal-default/);
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/users/);
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/deployment/);
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/deployment\/refresh/);

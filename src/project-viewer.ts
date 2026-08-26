@@ -782,40 +782,22 @@ export class ProjectViewerServer {
       }
       const project = this.projects.project(body?.projectId as string);
       const workspace = project.workspace(String(body?.workspaceId ?? ""));
-      const bindingMode = String(body?.bindingMode ?? "project");
-      if (!new Set(["project", "external-readonly"]).has(bindingMode)) {
-        throw new ViewerHttpError(400, "некорректный bindingMode");
+      const legacyBindingMode = String(body?.bindingMode ?? "");
+      if (body?.role === undefined && legacyBindingMode &&
+          !new Set(["project", "external-readonly"]).has(legacyBindingMode)) {
+        throw new ViewerHttpError(400, "некорректная legacy-роль топика");
+      }
+      const role = body?.role === undefined
+        ? legacyBindingMode === "external-readonly" ? "observer" : "primary"
+        : String(body.role);
+      if (!new Set(["primary", "observer"]).has(role)) {
+        throw new ViewerHttpError(400, "некорректная роль топика");
       }
       const current = this.state.byTopic(chatId, topicId);
-      const currentPortal = current?.bindingMode === "external-readonly"
-        ? this.state.projectPortal(current.projectId, current.workspaceId, current.id)
-        : null;
-      const requestedPortalKey = bindingMode === "external-readonly"
-        ? String(body?.portalKey ?? currentPortal?.portalKey ?? "").trim().toLowerCase()
-        : "";
-      const requestedDefault = bindingMode === "external-readonly"
-        ? body?.isDefault === undefined
-          ? currentPortal?.isDefault
-          : body.isDefault === true
-        : false;
-      if (
-        bindingMode === "external-readonly" &&
-        requestedPortalKey &&
-        !/^[a-z][a-z0-9_-]{0,47}$/.test(requestedPortalKey)
-      ) {
-        throw new ViewerHttpError(
-          400,
-          "portalKey: 1-48 символов, строчные латинские буквы, цифры, _ и -",
-        );
-      }
       if (
         current?.projectId === project.id &&
         current.workspaceId === workspace.id &&
-        current.bindingMode === bindingMode &&
-        (bindingMode !== "external-readonly" || (
-          (!requestedPortalKey || currentPortal?.portalKey === requestedPortalKey) &&
-          (requestedDefault === undefined || currentPortal?.isDefault === requestedDefault)
-        ))
+        current.role === role
       ) {
         json(response, 200, { conversation: current });
         return;
@@ -838,13 +820,7 @@ export class ProjectViewerServer {
           topicId,
           project.id,
           workspace.id,
-          bindingMode as "project" | "external-readonly",
-          bindingMode === "external-readonly"
-            ? {
-                ...(requestedPortalKey ? { portalKey: requestedPortalKey } : {}),
-                ...(requestedDefault === undefined ? {} : { isDefault: requestedDefault }),
-              }
-            : {},
+          role as "primary" | "observer",
         );
       } catch (error) {
         throw new ViewerHttpError(409, error instanceof Error ? error.message : String(error));
@@ -1248,24 +1224,7 @@ export class ProjectViewerServer {
                 conversationId: conversation.id,
                 projectId: conversation.projectId,
                 workspaceId: conversation.workspaceId,
-                bindingMode: conversation.bindingMode,
-                ...(conversation.bindingMode === "external-readonly"
-                  ? (() => {
-                      const portal = this.state.projectPortal(
-                        conversation.projectId,
-                        conversation.workspaceId,
-                        conversation.id,
-                      );
-                      return portal
-                        ? {
-                            portalId: portal.portalId,
-                            portalKey: portal.portalKey,
-                            portalDefault: portal.isDefault,
-                            portalTransport: portal.transport,
-                          }
-                        : {};
-                    })()
-                  : {}),
+                role: conversation.role,
                 busy:
                   conversation.activeTurnId !== null ||
                   this.state.pendingAll(conversation.id).length > 0 ||

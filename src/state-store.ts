@@ -10,7 +10,7 @@ export interface Conversation {
   topicId: number;
   projectId: string;
   workspaceId: string;
-  bindingMode: ConversationBindingMode;
+  role: ConversationRole;
   codexThreadId: string | null;
   codexThreadCapability: string;
   previousCodexThreadId: string | null;
@@ -20,7 +20,8 @@ export interface Conversation {
   worktreePath: string | null;
 }
 
-export type ConversationBindingMode = "project" | "external-readonly";
+export type ConversationRole = "primary" | "observer";
+type StoredConversationBindingMode = "project" | "external-readonly";
 export type RunAccess = "write" | "read-only";
 export type ResponseMode = "direct" | "ambient";
 
@@ -2390,7 +2391,7 @@ export class StateStore {
     });
   }
 
-  externalProjectSources(projectId: string): TeamSource[] {
+  observerProjectSources(projectId: string): TeamSource[] {
     return (this.db.prepare(`
       SELECT DISTINCT source.*
       FROM conversations conversation
@@ -2470,7 +2471,7 @@ export class StateStore {
     return Number.isSafeInteger(messageId) && messageId > 0 ? messageId : null;
   }
 
-  externalProjectEvents(input: {
+  observerProjectEvents(input: {
     projectId: string;
     sourceId?: string;
     query?: string;
@@ -2962,11 +2963,14 @@ export class StateStore {
     topicId: number,
     projectId: string,
     workspaceId: string,
-    bindingMode: ConversationBindingMode = "project",
+    role: ConversationRole = "primary",
     portalOptions: ProjectPortalOptions = {},
   ): Conversation {
     const now = Date.now() / 1000;
     const conversationId = StateStore.conversationId(chatId, topicId);
+    const bindingMode: StoredConversationBindingMode = role === "observer"
+      ? "external-readonly"
+      : "project";
     this.transaction(() => {
       const old = this.db
         .prepare("SELECT project_id, workspace_id, binding_mode FROM conversations WHERE id = ?")
@@ -2981,6 +2985,19 @@ export class StateStore {
           String(old.binding_mode ?? "project") !== bindingMode
         ),
       );
+      if (role === "primary") {
+        const existingPrimary = this.db.prepare(`
+          SELECT id FROM conversations
+          WHERE project_id = ? AND workspace_id = ? AND binding_mode = 'project' AND id <> ?
+          ORDER BY created_at, id LIMIT 1
+        `).get(projectId, workspaceId, conversationId) as Row | undefined;
+        if (existingPrimary) {
+          throw new Error(
+            "у Project/Workspace уже есть основной рабочий топик; " +
+              "сначала сделайте его наблюдателем или отвяжите",
+          );
+        }
+      }
       this.db.prepare(`
         INSERT INTO conversations
           (id, chat_id, topic_id, project_id, workspace_id, binding_mode, created_at, updated_at)
@@ -3021,7 +3038,7 @@ export class StateStore {
         this.db.prepare("DELETE FROM project_portal_bindings WHERE id = ?")
           .run(oldPortal.id as SQLInputValue);
       }
-      if (bindingMode === "external-readonly") {
+      if (role === "observer") {
         const portalKey = portalOptions.portalKey === undefined
           ? oldPortal && oldPortal.project_id === projectId && oldPortal.workspace_id === workspaceId
             ? String(oldPortal.portal_key)
@@ -3064,7 +3081,7 @@ export class StateStore {
       }
       if (oldPortal && (
         oldPortal.project_id !== projectId || oldPortal.workspace_id !== workspaceId ||
-        bindingMode !== "external-readonly"
+        role !== "observer"
       )) {
         this.ensureProjectPortalDefault(
           String(oldPortal.project_id),
@@ -3117,7 +3134,9 @@ export class StateStore {
       topicId: Number(row.topic_id),
       projectId: String(row.project_id),
       workspaceId: String(row.workspace_id),
-      bindingMode: String(row.binding_mode ?? "project") as ConversationBindingMode,
+      role: String(row.binding_mode ?? "project") === "external-readonly"
+        ? "observer"
+        : "primary",
       codexThreadId: row.codex_thread_id === null ? null : String(row.codex_thread_id),
       codexThreadCapability: String(row.codex_thread_capability ?? ""),
       previousCodexThreadId:

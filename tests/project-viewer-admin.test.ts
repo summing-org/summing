@@ -376,16 +376,14 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
         topicId: 44,
         projectId: "client",
         workspaceId: "backend",
-        bindingMode: "external-readonly",
-        portalKey: "reports",
-        isDefault: true,
+        role: "observer",
       }),
     });
     assert.equal(bound.status, 200, await bound.text());
     const conversation = state.byTopic(-300, 44)!;
     assert.equal(conversation.projectId, "client");
-    assert.equal(conversation.bindingMode, "external-readonly");
-    assert.equal(state.projectPortal("client", "backend", conversation.id)?.portalKey, "reports");
+    assert.equal(conversation.role, "observer");
+    assert.equal(state.projectPortal("client", "backend", conversation.id)?.portalKey, "main");
     assert.equal(state.projectPortal("client", "backend", conversation.id)?.isDefault, true);
     assert.deepEqual(bindingNotifications, [[-300, 44]]);
 
@@ -397,7 +395,7 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
         topicId: 44,
         projectId: "client",
         workspaceId: "backend",
-        bindingMode: "external-readonly",
+        role: "observer",
       }),
     });
     assert.equal(unchanged.status, 200, await unchanged.text());
@@ -449,7 +447,7 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
           binding: {
             projectId: string;
             workspaceId: string;
-            bindingMode: "project" | "external-readonly";
+            role: "primary" | "observer";
             busy: boolean;
           } | null;
         }>;
@@ -477,7 +475,7 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
       conversationId: state.byTopic(-300, 44)?.id,
       projectId: "summing",
       workspaceId: "repo",
-      bindingMode: "project",
+      role: "primary",
       busy: false,
     });
 

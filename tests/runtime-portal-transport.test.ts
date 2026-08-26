@@ -40,11 +40,11 @@ function fixture(): {
 test("runner messages use the same durable Project portal transport", async () => {
   const { root, runtime } = fixture();
   const internal = runtime.state.bind(1, 0, "demo", "repo");
-  runtime.state.bind(-100500, 9, "demo", "repo", "external-readonly", {
+  runtime.state.bind(-100500, 9, "demo", "repo", "observer", {
     portalKey: "main",
     isDefault: true,
   });
-  runtime.state.bind(-100501, 10, "demo", "repo", "external-readonly", {
+  runtime.state.bind(-100501, 10, "demo", "repo", "observer", {
     portalKey: "reports",
     isDefault: false,
   });
@@ -118,7 +118,7 @@ test("runner messages use the same durable Project portal transport", async () =
 test("portal history reports hidden comments without exposing their author or contents", async () => {
   const { root, runtime } = fixture();
   const internal = runtime.state.bind(1, 0, "demo", "repo");
-  runtime.state.bind(-100500, 9, "demo", "repo", "external-readonly", {
+  runtime.state.bind(-100500, 9, "demo", "repo", "observer", {
     portalKey: "main",
     isDefault: true,
   });
@@ -194,10 +194,90 @@ test("portal history reports hidden comments without exposing their author or co
   }
 });
 
+test("owner context hears observer feedback while observer context also sees published updates", async () => {
+  const { root, runtime } = fixture();
+  const primary = runtime.state.bind(1, 0, "demo", "repo", "primary");
+  runtime.state.bind(-100500, 9, "demo", "repo", "observer");
+  const published = runtime.state.recordTeamEvent({
+    provider: "telegram",
+    externalSpaceId: "-100500",
+    externalThreadId: "9",
+    spaceName: "Observer group",
+    sourceTitle: "Observer table",
+    externalEventId: "900",
+    eventKind: "message",
+    senderExternalId: "123",
+    senderDisplayName: "@summing_bot",
+    text: "Published project update",
+    occurredAt: 100,
+    administratorUserId: 1,
+  });
+  const feedback = runtime.state.recordTeamEvent({
+    provider: "telegram",
+    externalSpaceId: "-100500",
+    externalThreadId: "9",
+    spaceName: "Observer group",
+    sourceTitle: "Observer table",
+    externalEventId: "901",
+    eventKind: "message",
+    senderExternalId: "42",
+    senderDisplayName: "Observer",
+    text: "Please keep the previous export format",
+    occurredAt: 110,
+    administratorUserId: 1,
+  });
+  assert.ok(published);
+  assert.ok(feedback);
+  runtime.knowledgeSync.store.grantConsent({
+    sourceId: StateStore.teamSourceId("telegram", "-100500", "0"),
+    telegramUserId: 42,
+    proof: "observer feedback test consent",
+  });
+  const context = {
+    projectId: "demo",
+    workspaceId: "repo",
+    conversationId: primary.id,
+    actorUserId: 1,
+    turnId: "turn-observer-feedback",
+  };
+  try {
+    const ownerFeedback = await runtime.projectContextTool(
+      context,
+      "search",
+      { limit: 20, includePublished: false },
+    ) as { events: Array<{ text: string; sourceTitle: string }> };
+    assert.deepEqual(ownerFeedback.events, [{
+      eventId: feedback.id,
+      sourceId: feedback.sourceId,
+      sourceTitle: "Observer table",
+      telegramMessageId: "901",
+      replyToTelegramMessageId: null,
+      author: "Observer",
+      telegramUserId: "42",
+      occurredAt: 110,
+      text: "Please keep the previous export format",
+      attachments: [],
+    }]);
+    const observerFeed = await runtime.projectContextTool(
+      context,
+      "search",
+      { limit: 20, includePublished: true },
+    ) as { events: Array<{ text: string }> };
+    assert.deepEqual(
+      observerFeed.events.map((event) => event.text),
+      ["Please keep the previous export format", "Published project update"],
+    );
+  } finally {
+    runtime.state.close();
+    await runtime.telegram.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("an authorized Project agent can forward an incoming workspace attachment", async () => {
   const { root, repository, runtime } = fixture();
   const internal = runtime.state.bind(1, 0, "demo", "repo");
-  const portal = runtime.state.bind(-100500, 9, "demo", "repo", "external-readonly");
+  const portal = runtime.state.bind(-100500, 9, "demo", "repo", "observer");
   const attachmentDirectory = join(repository, ".summing-runtime", "attachments");
   mkdirSync(attachmentDirectory, { recursive: true });
   const attachmentPath = join(attachmentDirectory, "42-7-customer-brief.pdf");
