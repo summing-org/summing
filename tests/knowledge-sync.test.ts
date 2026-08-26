@@ -150,6 +150,114 @@ test("group consent grants every observed human and applies to every Telegram to
   }
 });
 
+test("Admin overview explains skipped messages by observed Telegram author", async () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-skipped-authors-"));
+  const state = new StateStore(join(root, "state.sqlite3"));
+  const service = new KnowledgeSyncService(
+    { ...enabledConfig(root), enabled: false },
+    state,
+    "",
+    async () => {},
+    root,
+    1,
+  );
+  const connectorId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const chatId = -100700;
+  const sourceId = StateStore.teamSourceId("telegram", String(chatId), "0");
+  try {
+    state.recordTelegramChat({
+      chatId,
+      type: "supergroup",
+      title: "Operations",
+      isForum: false,
+    });
+    state.recordTelegramTopic(chatId, 0, "general");
+    state.recordTelegramTopicUser(chatId, 0, {
+      userId: 42,
+      username: "customer",
+      firstName: "Customer",
+      lastName: "One",
+      observedAt: 100,
+    });
+    service.store.createConnector({
+      id: connectorId,
+      apiId: 123,
+      encryptedApiHash: "encrypted",
+      phoneMask: "+79***1234",
+      databaseDirectory: join(root, "tdlib"),
+      now: 100,
+    });
+    service.store.updateConnector(connectorId, "ready");
+    service.store.bindSource({
+      sourceId,
+      connectorId,
+      telegramChatId: chatId,
+      title: "Operations",
+      now: 101,
+    });
+    service.store.startSync(sourceId, connectorId, 102);
+    service.store.recordUnknownAuthor(sourceId, 42, 103);
+    service.store.recordUnknownAuthor(sourceId, 42, 104);
+    service.store.recordUnknownAuthor(sourceId, 99, 105);
+    service.store.incrementProgress(sourceId, {
+      discovered: 4,
+      skipped: 4,
+      unknownAuthors: 2,
+    }, 105, 106);
+
+    const overview = service.overview() as {
+      statuses: Array<{
+        skippedByAuthor: {
+          totalAuthors: number;
+          attributedMessages: number;
+          unattributedMessages: number;
+          items: Array<{
+            telegramUserId: number;
+            displayName: string;
+            username: string;
+            messageCount: number;
+            reason: string;
+            profileObserved: boolean;
+          }>;
+        };
+      }>;
+    };
+    const breakdown = overview.statuses[0]!.skippedByAuthor;
+    assert.equal(breakdown.totalAuthors, 2);
+    assert.equal(breakdown.attributedMessages, 3);
+    assert.equal(breakdown.unattributedMessages, 1);
+    assert.deepEqual(breakdown.items.map((item) => ({
+      id: item.telegramUserId,
+      name: item.displayName,
+      username: item.username,
+      messages: item.messageCount,
+      reason: item.reason,
+      observed: item.profileObserved,
+    })), [
+      {
+        id: 42,
+        name: "Customer One",
+        username: "customer",
+        messages: 2,
+        reason: "missing-consent",
+        observed: true,
+      },
+      {
+        id: 99,
+        name: "Telegram user 99",
+        username: "",
+        messages: 1,
+        reason: "missing-consent",
+        observed: false,
+      },
+    ]);
+  } finally {
+    await service.close();
+    state.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("disabled knowledge sync does not require production S3 credentials or an MTProto key", async () => {
   const root = mkdtempSync(join(tmpdir(), "summing-disabled-knowledge-sync-"));
   const state = new StateStore(join(root, "state.sqlite3"));

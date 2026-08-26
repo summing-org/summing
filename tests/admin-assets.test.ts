@@ -71,6 +71,10 @@ test("administrator Mini App separates projects, topic bindings and global setti
   assert.match(ADMIN_JS, /Подключение к Telegram запущено/);
   assert.doesNotMatch(ADMIN_JS, /Ожидается код Telegram/);
   assert.match(ADMIN_JS, /Не отправлено уведомление о sync/);
+  assert.match(ADMIN_JS, /Пропуски по авторам/);
+  assert.match(ADMIN_JS, /status\.skippedByAuthor/);
+  assert.match(ADMIN_JS, /МЕДИА ОШИБКИ/);
+  assert.match(ADMIN_JS, /before-history-boundary/);
   assert.match(ADMIN_JS, /state!=="paused"&&status\.collector\.state!=="failed"/);
   assert.match(ADMIN_JS, /deploymentActive/);
   assert.match(ADMIN_JS, /renderDeploymentFailure/);
@@ -95,5 +99,7 @@ test("administrator Mini App separates projects, topic bindings and global setti
   assert.match(ADMIN_CSS, /\.admin-panel\.active/);
   assert.match(ADMIN_CSS, /\.owner-manager/);
   assert.match(ADMIN_CSS, /\.onboarding-step/);
+  assert.match(ADMIN_CSS, /\.source-sync-card \.sync-counters/);
+  assert.match(ADMIN_CSS, /\.skipped-author-grid/);
   assert.match(ADMIN_CSS, /\.unbind-button/);
 });

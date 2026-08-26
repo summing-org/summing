@@ -14,8 +14,10 @@ import {
   type IngestionJob,
   type KnowledgeTransferMode,
   type KnowledgeTransferRecord,
+  type SkippedAuthorStatus,
   type SyncStageName,
   type SyncStatus,
+  type TeamConsentRecord,
 } from "./knowledge-sync-store.js";
 import {
   KnowledgeTransferManager,
@@ -34,7 +36,11 @@ import {
   createObjectStore,
   type ObjectStore,
 } from "./object-store.js";
-import { StateStore, type TeamEventAttachment } from "./state-store.js";
+import {
+  StateStore,
+  type TeamEventAttachment,
+  type TelegramObservedUserRecord,
+} from "./state-store.js";
 
 interface TdAttachment {
   fileId: number;
@@ -199,6 +205,34 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function skippedAuthorReason(
+  consent: TeamConsentRecord | null,
+  author: SkippedAuthorStatus,
+): "missing-consent" | "revoked-consent" | "incomplete-scope" |
+  "before-history-boundary" | "not-authorized-at-event-time" {
+  if (!consent) return "missing-consent";
+  if (consent.status === "revoked") return "revoked-consent";
+  if (!["history", "future", "model_egress"].every((scope) => consent.scope.includes(scope))) {
+    return "incomplete-scope";
+  }
+  if (consent.historicalFrom !== null && author.lastSeenAt < consent.historicalFrom) {
+    return "before-history-boundary";
+  }
+  return "not-authorized-at-event-time";
+}
+
+function skippedAuthorDisplayName(
+  telegramUserId: number,
+  user: TelegramObservedUserRecord | undefined,
+): string {
+  const fullName = user ? [user.firstName, user.lastName].filter(Boolean).join(" ").trim() : "";
+  if (fullName) return fullName;
+  if (user?.username) return `@${user.username}`;
+  return telegramUserId < 0
+    ? `Telegram chat ${telegramUserId}`
+    : `Telegram user ${telegramUserId}`;
+}
+
 function directoryBytes(path: string): number {
   let total = 0;
   let entries;
@@ -340,6 +374,32 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
   }
 
   overview(): Record<string, unknown> {
+    const statuses = this.store.listSyncStatuses().map((status) => {
+      const observedUsers = new Map(
+        this.state.listTelegramChatUsers(status.telegramChatId)
+          .map((user) => [user.userId, user]),
+      );
+      return {
+        ...status,
+        skippedByAuthor: {
+          ...status.skippedByAuthor,
+          items: status.skippedByAuthor.items.map((author) => {
+            const user = observedUsers.get(author.telegramUserId);
+            return {
+              ...author,
+              displayName: skippedAuthorDisplayName(author.telegramUserId, user),
+              username: user?.username ?? "",
+              isBot: user?.isBot ?? false,
+              profileObserved: Boolean(user),
+              reason: skippedAuthorReason(
+                this.store.consent(status.sourceId, author.telegramUserId),
+                author,
+              ),
+            };
+          }),
+        },
+      };
+    });
     return {
       enabled: this.config.enabled,
       telegramTermsReviewed: this.config.telegramTermsReviewed,
@@ -359,7 +419,7 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
         authorization: this.mtproto?.authorizationStatus(connector.id) ?? null,
       })),
       consents: this.store.consentSummary(),
-      statuses: this.store.listSyncStatuses(),
+      statuses,
       notifications: this.store.outboxFailures(),
       transfers: this.store.listKnowledgeTransfers().map((transfer) => ({
         ...transfer,
@@ -1694,6 +1754,14 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
       `Authors: consented=${status.counters.consentedAuthors}, unknown=${status.counters.unknownAuthors}`,
       ...(status.unknownAuthorIds.length > 0
         ? [`Unknown author IDs: ${status.unknownAuthorIds.join(", ")}`]
+        : []),
+      ...(status.skippedByAuthor.items.length > 0
+        ? [`Skipped by author: ${status.skippedByAuthor.items.slice(0, 20)
+          .map((author) => `${author.telegramUserId}=${author.messageCount}`)
+          .join(", ")}${status.skippedByAuthor.truncated ? ", …" : ""}`]
+        : []),
+      ...(status.skippedByAuthor.unattributedMessages > 0
+        ? [`Skipped without active author record: ${status.skippedByAuthor.unattributedMessages}`]
         : []),
       `Media: uploaded=${status.counters.mediaUploaded}, pending=${status.counters.mediaPending}, failed=${status.counters.mediaFailed}`,
       `Object store: ${this.objectStore.backend}; S3/media backlog=${Math.max(

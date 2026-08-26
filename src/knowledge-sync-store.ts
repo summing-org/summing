@@ -103,6 +103,21 @@ export interface SyncCounters {
   mediaFailed: number;
 }
 
+export interface SkippedAuthorStatus {
+  telegramUserId: number;
+  messageCount: number;
+  firstSeenAt: number;
+  lastSeenAt: number;
+}
+
+export interface SkippedAuthorBreakdown {
+  totalAuthors: number;
+  attributedMessages: number;
+  unattributedMessages: number;
+  truncated: boolean;
+  items: SkippedAuthorStatus[];
+}
+
 export interface SyncStatus {
   sourceId: string;
   connectorId: string;
@@ -128,6 +143,7 @@ export interface SyncStatus {
   };
   counters: SyncCounters;
   unknownAuthorIds: number[];
+  skippedByAuthor: SkippedAuthorBreakdown;
   stages: Record<SyncStageName, SyncStageStatus>;
   warning: string;
   lastError: string;
@@ -2135,6 +2151,20 @@ export class KnowledgeSyncStore {
       };
     }
     const lastEventAt = row.last_event_at === null ? null : Number(row.last_event_at);
+    const skippedMessages = Number(row.skipped_count ?? 0);
+    const skippedAuthorTotals = this.db.prepare(`
+      SELECT COUNT(*) AS author_count, COALESCE(SUM(message_count), 0) AS message_count
+      FROM team_sync_unknown_authors WHERE source_id = ?
+    `).get(sourceId) as Row;
+    const skippedAuthorRows = this.db.prepare(`
+      SELECT telegram_user_id, message_count, first_seen_at, last_seen_at
+      FROM team_sync_unknown_authors
+      WHERE source_id = ?
+      ORDER BY message_count DESC, last_seen_at DESC, telegram_user_id
+      LIMIT 100
+    `).all(sourceId) as Row[];
+    const skippedAuthorCount = Number(skippedAuthorTotals.author_count ?? 0);
+    const attributedSkippedMessages = Number(skippedAuthorTotals.message_count ?? 0);
     return {
       sourceId: String(row.source_id),
       connectorId: String(row.connector_id),
@@ -2165,7 +2195,7 @@ export class KnowledgeSyncStore {
       counters: {
         discovered: Number(row.discovered_count ?? 0),
         accepted: Number(row.accepted_count ?? 0),
-        skipped: Number(row.skipped_count ?? 0),
+        skipped: skippedMessages,
         consentedAuthors: Number(row.consented_authors ?? 0),
         unknownAuthors: Number(row.unknown_authors ?? 0),
         mediaDiscovered: Number(row.media_discovered ?? 0),
@@ -2177,6 +2207,18 @@ export class KnowledgeSyncStore {
         SELECT telegram_user_id FROM team_sync_unknown_authors
         WHERE source_id = ? ORDER BY telegram_user_id LIMIT 500
       `).all(sourceId) as Row[]).map((author) => Number(author.telegram_user_id)),
+      skippedByAuthor: {
+        totalAuthors: skippedAuthorCount,
+        attributedMessages: attributedSkippedMessages,
+        unattributedMessages: Math.max(0, skippedMessages - attributedSkippedMessages),
+        truncated: skippedAuthorCount > skippedAuthorRows.length,
+        items: skippedAuthorRows.map((author) => ({
+          telegramUserId: Number(author.telegram_user_id),
+          messageCount: Number(author.message_count),
+          firstSeenAt: Number(author.first_seen_at),
+          lastSeenAt: Number(author.last_seen_at),
+        })),
+      },
       stages,
       warning: String(row.warning ?? ""),
       lastError: String(row.last_error ?? ""),

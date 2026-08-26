@@ -81,6 +81,18 @@ test("knowledge sync persists checkpoints, consent, stages, jobs and one complet
       mediaPending: 3,
       mediaFailed: 0,
     });
+    assert.deepEqual(status.skippedByAuthor, {
+      totalAuthors: 1,
+      attributedMessages: 2,
+      unattributedMessages: 0,
+      truncated: false,
+      items: [{
+        telegramUserId: 77,
+        messageCount: 2,
+        firstSeenAt: 103,
+        lastSeenAt: 104,
+      }],
+    });
     const outbox = store.claimOutbox(10, 112);
     assert.equal(outbox.length, 1);
     store.finishOutbox(outbox[0]!.id);
