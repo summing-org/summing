@@ -111,6 +111,51 @@ test("knowledge sync persists checkpoints, consent, stages, jobs and one complet
   }
 });
 
+test("legacy failed media jobs are requeued once with balanced progress counters", () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-sync-legacy-media-"));
+  const store = new KnowledgeSyncStore(join(root, "core.sqlite"));
+  const connectorId = "55555555-5555-4555-8555-555555555555";
+  try {
+    store.createConnector({
+      id: connectorId,
+      apiId: 1,
+      encryptedApiHash: "secret",
+      phoneMask: "***",
+      databaseDirectory: join(root, "tdlib"),
+    });
+    store.bindSource({ sourceId: "source", connectorId, telegramChatId: -100, title: "T" });
+    store.startSync("source", connectorId);
+    store.incrementProgress("source", {
+      mediaDiscovered: 1,
+      mediaPending: 1,
+    });
+    store.enqueueJob("source", "media", "99:7", {
+      connectorId,
+      fileId: 7,
+      telegramMessageId: 99,
+    });
+    for (let attempt = 1; attempt <= 10; attempt += 1) {
+      const job = store.claimJobs(1, Number.MAX_SAFE_INTEGER)[0]!;
+      assert.equal(job.attempts, attempt);
+      assert.equal(store.retryJob(job.id, "File not found", job.attempts), attempt === 10);
+    }
+    store.incrementProgress("source", { mediaPending: -1, mediaFailed: 1 });
+    assert.equal(store.syncStatus("source")!.counters.mediaPending, 0);
+    assert.equal(store.syncStatus("source")!.counters.mediaFailed, 1);
+
+    assert.equal(store.requeueLegacyMediaJobs("source"), 1);
+    assert.equal(store.syncStatus("source")!.counters.mediaPending, 1);
+    assert.equal(store.syncStatus("source")!.counters.mediaFailed, 0);
+    const repaired = store.claimJobs(1, Number.MAX_SAFE_INTEGER)[0]!;
+    assert.equal(repaired.payload.mediaSchemaVersion, 2);
+    assert.equal(repaired.payload.fileId, 7);
+    assert.equal(store.requeueLegacyMediaJobs("source"), 0);
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("group consent admits unknown authors while individual revocation remains authoritative", () => {
   const root = mkdtempSync(join(tmpdir(), "summing-sync-group-consent-"));
   const store = new KnowledgeSyncStore(join(root, "core.sqlite"));

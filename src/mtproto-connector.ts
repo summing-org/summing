@@ -31,7 +31,21 @@ export interface MtprotoUpdateHandler {
   (connectorId: string, update: Record<string, unknown>): void | Promise<void>;
 }
 
+export interface MtprotoFileReference {
+  fileId: number;
+  remoteFileId: string;
+  uniqueFileId: string;
+  size: number;
+}
+
 const HISTORY_REQUEST_INTERVAL_MS = 500;
+
+export const MTPROTO_PERSISTENCE_PARAMETERS = Object.freeze({
+  use_message_database: false,
+  use_chat_info_database: false,
+  use_file_database: true,
+  use_secret_chats: false,
+});
 
 function positiveInteger(value: unknown): number | null {
   const parsed = typeof value === "number" ? value : Number(value);
@@ -162,6 +176,21 @@ function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
+}
+
+function fileReference(value: unknown): MtprotoFileReference {
+  const file = record(value);
+  const remote = record(file.remote);
+  const fileId = Number(file.id ?? 0);
+  if (!Number.isSafeInteger(fileId) || fileId <= 0) {
+    throw new Error("TDLib returned an invalid file identifier");
+  }
+  return {
+    fileId,
+    remoteFileId: String(remote.id ?? ""),
+    uniqueFileId: String(remote.unique_id ?? ""),
+    size: Number(file.size ?? file.expected_size ?? 0),
+  };
 }
 
 export class MtprotoConnectorManager {
@@ -349,10 +378,11 @@ export class MtprotoConnectorManager {
       filesDirectory,
       databaseEncryptionKey: this.vault.databaseKey(connector.id),
       tdlibParameters: {
-        use_message_database: false,
-        use_chat_info_database: false,
-        use_file_database: false,
-        use_secret_chats: false,
+        // Media jobs are durable and can outlive this process. TDLib's numeric
+        // file identifiers are only safe across restarts when its file database
+        // is enabled; stable remote identifiers are persisted in every new job
+        // as a second recovery path.
+        ...MTPROTO_PERSISTENCE_PARAMETERS,
         system_language_code: "ru",
         application_version: "SUMMING",
         device_model: "SUMMING server",
@@ -385,6 +415,19 @@ export class MtprotoConnectorManager {
     request: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
     return this.historyScheduler.run(connectorId, () => this.invoke(connectorId, request));
+  }
+
+  async resolveRemoteFile(
+    connectorId: string,
+    remoteFileId: string,
+  ): Promise<MtprotoFileReference> {
+    const remoteId = remoteFileId.trim();
+    if (!remoteId) throw new Error("Telegram remote file identifier is missing");
+    return fileReference(await this.invoke(connectorId, {
+      _: "getRemoteFile",
+      remote_file_id: remoteId,
+      file_type: null,
+    }));
   }
 
   async downloadFile(connectorId: string, fileId: number): Promise<string> {

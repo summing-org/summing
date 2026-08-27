@@ -4,11 +4,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  MTPROTO_PERSISTENCE_PARAMETERS,
   MtprotoHistoryScheduler,
   MtprotoSecretVault,
   mtprotoFloodWaitSeconds,
   mtprotoRetryDelaySeconds,
 } from "../src/mtproto-connector.js";
+
+test("MTProto persists file references used by durable media jobs", () => {
+  assert.deepEqual(MTPROTO_PERSISTENCE_PARAMETERS, {
+    use_message_database: false,
+    use_chat_info_database: false,
+    use_file_database: true,
+    use_secret_chats: false,
+  });
+});
 
 test("MTProto vault encrypts API secrets and derives a distinct TDLib key per connector", () => {
   const root = mkdtempSync(join(tmpdir(), "summing-mtproto-vault-"));

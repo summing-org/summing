@@ -45,11 +45,15 @@ import {
 
 interface TdAttachment {
   fileId: number;
+  remoteFileId: string;
+  uniqueFileId: string;
   fileName: string;
   mimeType: string;
   size: number;
   kind: string;
 }
+
+const MEDIA_JOB_SCHEMA_VERSION = 2;
 
 interface AdminStartInput {
   connectorId: string;
@@ -132,11 +136,22 @@ function tdMessageText(message: Record<string, unknown>): string {
   return "[Сообщение Telegram]";
 }
 
-function tdFile(value: unknown): { id: number; size: number } | null {
+function tdFile(value: unknown): {
+  id: number;
+  remoteFileId: string;
+  uniqueFileId: string;
+  size: number;
+} | null {
   const file = objectRecord(value);
   const id = Number(file.id ?? 0);
   if (!id) return null;
-  return { id, size: Number(file.size ?? file.expected_size ?? 0) };
+  const remote = objectRecord(file.remote);
+  return {
+    id,
+    remoteFileId: String(remote.id ?? ""),
+    uniqueFileId: String(remote.unique_id ?? ""),
+    size: Number(file.size ?? file.expected_size ?? 0),
+  };
 }
 
 function tdAttachments(message: Record<string, unknown>): TdAttachment[] {
@@ -153,6 +168,8 @@ function tdAttachments(message: Record<string, unknown>): TdAttachment[] {
     if (!file) return;
     result.push({
       fileId: file.id,
+      remoteFileId: file.remoteFileId,
+      uniqueFileId: file.uniqueFileId,
       kind,
       fileName: String(fileName || `${kind}-${file.id}`),
       mimeType: String(mimeType || "application/octet-stream"),
@@ -204,6 +221,19 @@ function stableTextHash(text: string): string {
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+async function mediaStage<T>(
+  stage: "telegram-resolve" | "telegram-download" | "object-store-put" | "object-store-delete",
+  operation: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    throw new Error(`media[${stage}]: ${errorText(error)}`, {
+      ...(error instanceof Error ? { cause: error } : {}),
+    });
+  }
 }
 
 function skippedAuthorReason(
@@ -350,6 +380,14 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
     if (!this.config.enabled || !this.mtproto) return;
     mkdirSync(this.config.spoolRoot, { recursive: true, mode: 0o700 });
     await this.mtproto.restore();
+    for (const binding of this.store.listBindings()) {
+      if (this.store.connector(binding.connectorId)?.state !== "ready") continue;
+      const requeued = this.store.requeueLegacyMediaJobs(binding.sourceId);
+      if (requeued > 0) {
+        console.info(`requeued ${requeued} legacy Telegram media jobs for ${binding.sourceId}`);
+        this.refreshStages(binding.sourceId);
+      }
+    }
     for (const status of this.store.listSyncStatuses()) {
       if (status.collector.state === "backfilling") this.startBackfill(status.sourceId);
     }
@@ -1069,20 +1107,30 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
       },
     });
     for (const attachment of attachments) {
+      const attachmentIdentity = attachment.uniqueFileId || (
+        attachment.remoteFileId
+          ? createHash("sha256").update(attachment.remoteFileId).digest("hex").slice(0, 32)
+          : String(attachment.fileId)
+      );
       this.store.enqueueJob(
         binding.sourceId,
         "media",
-        `${messageId}:${attachment.fileId}:${revision}`,
+        `${messageId}:${attachmentIdentity}:${revision}`,
         {
-        connectorId: binding.connectorId,
-        fileId: attachment.fileId,
-        fileName: attachment.fileName,
-        mimeType: attachment.mimeType,
-        size: attachment.size,
-        refId: `${chatId}:${messageId}:${attachment.fileId}`,
-        telegramMessageId: messageId,
-        telegramUserId: effectiveSenderId,
-        occurredAt,
+          mediaSchemaVersion: MEDIA_JOB_SCHEMA_VERSION,
+          connectorId: binding.connectorId,
+          chatId,
+          fileId: attachment.fileId,
+          remoteFileId: attachment.remoteFileId,
+          uniqueFileId: attachment.uniqueFileId,
+          kind: attachment.kind,
+          fileName: attachment.fileName,
+          mimeType: attachment.mimeType,
+          size: attachment.size,
+          refId: `${chatId}:${messageId}:${attachmentIdentity}`,
+          telegramMessageId: messageId,
+          telegramUserId: effectiveSenderId,
+          occurredAt,
         },
       );
     }
@@ -1313,9 +1361,87 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
     }
   }
 
+  private async resolveMediaAttachment(job: IngestionJob): Promise<TdAttachment> {
+    if (!this.mtproto) throw new Error("MTProto is disabled");
+    const connectorId = String(job.payload.connectorId ?? "");
+    const fromPayload = (fileId: number, remoteFileId: string, uniqueFileId: string): TdAttachment => ({
+      fileId,
+      remoteFileId,
+      uniqueFileId,
+      kind: String(job.payload.kind ?? "document"),
+      fileName: String(job.payload.fileName ?? "telegram-file"),
+      mimeType: String(job.payload.mimeType ?? "application/octet-stream"),
+      size: Number(job.payload.size ?? 0),
+    });
+    const remoteFileId = String(job.payload.remoteFileId ?? "").trim();
+    let remoteError: unknown = null;
+    if (remoteFileId) {
+      try {
+        const resolved = await this.mtproto.resolveRemoteFile(connectorId, remoteFileId);
+        return fromPayload(
+          resolved.fileId,
+          resolved.remoteFileId || remoteFileId,
+          resolved.uniqueFileId || String(job.payload.uniqueFileId ?? ""),
+        );
+      } catch (error) {
+        remoteError = error;
+      }
+    }
+
+    const binding = this.store.binding(job.sourceId);
+    const chatId = Number(job.payload.chatId ?? binding?.telegramChatId ?? 0);
+    const messageId = Number(job.payload.telegramMessageId ?? 0);
+    if (!binding || !chatId || !messageId) {
+      throw new Error("durable Telegram message coordinates are missing from the media job");
+    }
+    try {
+      const message = await this.mtproto.invoke(connectorId, {
+        _: "getMessage",
+        chat_id: chatId,
+        message_id: messageId,
+      });
+      if (Number(message.id ?? 0) !== messageId) {
+        throw new Error(`Telegram message ${messageId} is no longer available`);
+      }
+      const attachments = tdAttachments(message);
+      const uniqueFileId = String(job.payload.uniqueFileId ?? "");
+      const fileName = String(job.payload.fileName ?? "");
+      const mimeType = String(job.payload.mimeType ?? "");
+      const size = Number(job.payload.size ?? 0);
+      const selected = (
+        (uniqueFileId
+          ? attachments.find((attachment) => attachment.uniqueFileId === uniqueFileId)
+          : undefined) ??
+        (remoteFileId
+          ? attachments.find((attachment) => attachment.remoteFileId === remoteFileId)
+          : undefined) ??
+        attachments.find((attachment) =>
+          attachment.fileName === fileName &&
+          attachment.mimeType === mimeType &&
+          (!size || attachment.size === size)) ??
+        (attachments.length === 1 ? attachments[0] : undefined)
+      );
+      if (!selected) {
+        throw new Error(`Telegram message ${messageId} no longer contains the queued attachment`);
+      }
+      return selected;
+    } catch (messageError) {
+      if (remoteError) {
+        throw new Error(
+          `remote file lookup failed: ${errorText(remoteError)}; ` +
+          `message refresh failed: ${errorText(messageError)}`,
+        );
+      }
+      throw messageError;
+    }
+  }
+
   private async processMediaJob(job: IngestionJob): Promise<void> {
     if (job.payload.action === "delete-object") {
-      await this.objectStore.delete(String(job.payload.objectKey));
+      await mediaStage(
+        "object-store-delete",
+        () => this.objectStore.delete(String(job.payload.objectKey)),
+      );
       return;
     }
     if (!this.mtproto) throw new Error("MTProto is disabled");
@@ -1330,9 +1456,29 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
       }
       return;
     }
-    const path = await this.mtproto.downloadFile(
-      String(job.payload.connectorId),
-      Number(job.payload.fileId),
+    const attachment = await mediaStage(
+      "telegram-resolve",
+      () => this.resolveMediaAttachment(job),
+    );
+    job.payload = {
+      ...job.payload,
+      mediaSchemaVersion: MEDIA_JOB_SCHEMA_VERSION,
+      chatId: Number(job.payload.chatId ?? this.store.binding(job.sourceId)?.telegramChatId ?? 0),
+      fileId: attachment.fileId,
+      remoteFileId: attachment.remoteFileId,
+      uniqueFileId: attachment.uniqueFileId,
+      kind: attachment.kind,
+      fileName: attachment.fileName,
+      mimeType: attachment.mimeType,
+      size: attachment.size,
+    };
+    this.store.updateRunningJobPayload(job.id, job.payload);
+    const path = await mediaStage(
+      "telegram-download",
+      () => this.mtproto!.downloadFile(
+        String(job.payload.connectorId),
+        attachment.fileId,
+      ),
     );
     try {
       const spoolBytes = directoryBytes(this.config.spoolRoot);
@@ -1350,17 +1496,17 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
         }
         return;
       }
-      const stored = await this.objects.ingest({
-        sourceId: job.sourceId,
-        refType: "telegram_attachment",
-        refId: String(job.payload.refId),
-        filePath: path,
-        fileName: String(job.payload.fileName),
-        mimeType: String(job.payload.mimeType),
-        ...(Number(job.payload.telegramUserId ?? 0)
-          ? { telegramUserId: Number(job.payload.telegramUserId) }
-          : {}),
-      });
+      const stored = await mediaStage("object-store-put", () => this.objects.ingest({
+          sourceId: job.sourceId,
+          refType: "telegram_attachment",
+          refId: String(job.payload.refId),
+          filePath: path,
+          fileName: String(job.payload.fileName),
+          mimeType: String(job.payload.mimeType),
+          ...(Number(job.payload.telegramUserId ?? 0)
+            ? { telegramUserId: Number(job.payload.telegramUserId) }
+            : {}),
+        }));
       if (
         (telegramMessageId && this.store.messageDeleted(job.sourceId, telegramMessageId)) ||
         (telegramUserId && !this.store.consentGranted(job.sourceId, telegramUserId))

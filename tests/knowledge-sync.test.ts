@@ -347,6 +347,229 @@ test("granting signed group consent runs a durable recovery backfill for existin
   }
 });
 
+test("Telegram media jobs persist stable remote identifiers", async () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-stable-media-job-"));
+  const state = new StateStore(join(root, "state.sqlite3"));
+  const config = enabledConfig(root);
+  writeFileSync(config.mtprotoMasterKeyPath, randomBytes(32), { mode: 0o600 });
+  const service = new KnowledgeSyncService(config, state, "", async () => {}, root, 1);
+  config.enabled = false;
+  const connectorId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  const chatId = -100910;
+  const sourceId = StateStore.teamSourceId("telegram", String(chatId), "0");
+  try {
+    state.recordTelegramChat({ chatId, type: "supergroup", title: "Media", isForum: false });
+    service.grantGroupConsent({ chatId, proof: "signed media agreement" });
+    service.store.createConnector({
+      id: connectorId,
+      apiId: 123,
+      encryptedApiHash: "encrypted",
+      phoneMask: "***",
+      databaseDirectory: join(root, "tdlib"),
+    });
+    const binding = service.store.bindSource({
+      sourceId,
+      connectorId,
+      telegramChatId: chatId,
+      title: "Media",
+    });
+    service.store.startSync(sourceId, connectorId);
+    const processMessage = (service as unknown as {
+      processMessage: (
+        source: typeof binding,
+        message: Record<string, unknown>,
+        kind: "message" | "edit",
+      ) => Promise<void>;
+    }).processMessage.bind(service);
+    await processMessage(binding, {
+      chat_id: chatId,
+      id: 10,
+      date: 100,
+      sender_id: { _: "messageSenderUser", user_id: 1 },
+      content: {
+        _: "messageDocument",
+        caption: { text: "document" },
+        document: {
+          file_name: "report.pdf",
+          mime_type: "application/pdf",
+          document: {
+            id: 7,
+            size: 12,
+            remote: { id: "remote-file-7", unique_id: "unique-file-7" },
+          },
+        },
+      },
+    }, "message");
+
+    const jobs = service.store.claimJobs(10, Number.MAX_SAFE_INTEGER);
+    const media = jobs.find((job) => job.kind === "media")!;
+    assert.equal(media.dedupeKey, "10:unique-file-7:0");
+    assert.deepEqual({
+      version: media.payload.mediaSchemaVersion,
+      chatId: media.payload.chatId,
+      fileId: media.payload.fileId,
+      remoteFileId: media.payload.remoteFileId,
+      uniqueFileId: media.payload.uniqueFileId,
+      refId: media.payload.refId,
+    }, {
+      version: 2,
+      chatId,
+      fileId: 7,
+      remoteFileId: "remote-file-7",
+      uniqueFileId: "unique-file-7",
+      refId: `${chatId}:10:unique-file-7`,
+    });
+    jobs.forEach((job) => service.store.finishJob(job.id));
+  } finally {
+    await service.close();
+    state.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("legacy media jobs refresh their TDLib file id from the original message", async () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-refresh-media-job-"));
+  const state = new StateStore(join(root, "state.sqlite3"));
+  const config = enabledConfig(root);
+  writeFileSync(config.mtprotoMasterKeyPath, randomBytes(32), { mode: 0o600 });
+  const service = new KnowledgeSyncService(config, state, "", async () => {}, root, 1);
+  config.enabled = false;
+  const connectorId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+  const chatId = -100920;
+  const sourceId = StateStore.teamSourceId("telegram", String(chatId), "0");
+  const downloaded = join(root, "downloaded.pdf");
+  try {
+    writeFileSync(downloaded, "durable media");
+    state.recordTelegramChat({ chatId, type: "supergroup", title: "Media", isForum: false });
+    service.grantGroupConsent({ chatId, proof: "signed media agreement" });
+    service.store.createConnector({
+      id: connectorId,
+      apiId: 123,
+      encryptedApiHash: "encrypted",
+      phoneMask: "***",
+      databaseDirectory: join(root, "tdlib"),
+    });
+    service.store.bindSource({ sourceId, connectorId, telegramChatId: chatId, title: "Media" });
+    service.store.startSync(sourceId, connectorId);
+    service.store.incrementProgress(sourceId, { mediaDiscovered: 1, mediaPending: 1 });
+    service.store.enqueueJob(sourceId, "media", "20:old:0", {
+      connectorId,
+      fileId: 3,
+      fileName: "report.pdf",
+      mimeType: "application/pdf",
+      size: 13,
+      refId: `${chatId}:20:old`,
+      telegramMessageId: 20,
+      telegramUserId: 1,
+      occurredAt: 100,
+    });
+    let downloadedFileId = 0;
+    const mtproto = service.mtproto! as unknown as {
+      invoke: (connector: string, request: Record<string, unknown>) => Promise<Record<string, unknown>>;
+      downloadFile: (connector: string, fileId: number) => Promise<string>;
+    };
+    mtproto.invoke = async () => ({
+      chat_id: chatId,
+      id: 20,
+      date: 100,
+      content: {
+        _: "messageDocument",
+        document: {
+          file_name: "report.pdf",
+          mime_type: "application/pdf",
+          document: {
+            id: 88,
+            size: 13,
+            remote: { id: "remote-current", unique_id: "unique-current" },
+          },
+        },
+      },
+    });
+    mtproto.downloadFile = async (_connector, fileId) => {
+      downloadedFileId = fileId;
+      return downloaded;
+    };
+    const job = service.store.claimJobs(1, Number.MAX_SAFE_INTEGER)[0]!;
+    await (service as unknown as { processJob: (item: typeof job) => Promise<void> }).processJob(job);
+
+    assert.equal(downloadedFileId, 88);
+    assert.equal(service.store.jobStats(sourceId, "media").done, 1);
+    assert.equal(service.store.jobStats(sourceId, "media").failed, 0);
+  } finally {
+    await service.close();
+    state.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("media failures record the failing pipeline stage", async () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-media-error-stage-"));
+  const state = new StateStore(join(root, "state.sqlite3"));
+  const config = enabledConfig(root);
+  writeFileSync(config.mtprotoMasterKeyPath, randomBytes(32), { mode: 0o600 });
+  const service = new KnowledgeSyncService(config, state, "", async () => {}, root, 1);
+  config.enabled = false;
+  const connectorId = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+  const chatId = -100930;
+  const sourceId = StateStore.teamSourceId("telegram", String(chatId), "0");
+  try {
+    state.recordTelegramChat({ chatId, type: "supergroup", title: "Media", isForum: false });
+    service.grantGroupConsent({ chatId, proof: "signed media agreement" });
+    service.store.createConnector({
+      id: connectorId,
+      apiId: 123,
+      encryptedApiHash: "encrypted",
+      phoneMask: "***",
+      databaseDirectory: join(root, "tdlib"),
+    });
+    service.store.bindSource({ sourceId, connectorId, telegramChatId: chatId, title: "Media" });
+    service.store.startSync(sourceId, connectorId);
+    service.store.incrementProgress(sourceId, { mediaDiscovered: 1, mediaPending: 1 });
+    service.store.enqueueJob(sourceId, "media", "30:unique:0", {
+      mediaSchemaVersion: 2,
+      connectorId,
+      chatId,
+      fileId: 9,
+      remoteFileId: "remote-9",
+      uniqueFileId: "unique-9",
+      fileName: "voice.ogg",
+      mimeType: "audio/ogg",
+      size: 12,
+      refId: `${chatId}:30:unique-9`,
+      telegramMessageId: 30,
+      telegramUserId: 1,
+    });
+    const mtproto = service.mtproto! as unknown as {
+      resolveRemoteFile: () => Promise<{
+        fileId: number;
+        remoteFileId: string;
+        uniqueFileId: string;
+        size: number;
+      }>;
+      downloadFile: () => Promise<string>;
+    };
+    mtproto.resolveRemoteFile = async () => ({
+      fileId: 99,
+      remoteFileId: "remote-9",
+      uniqueFileId: "unique-9",
+      size: 12,
+    });
+    mtproto.downloadFile = async () => { throw new Error("Access Denied"); };
+    const job = service.store.claimJobs(1, Number.MAX_SAFE_INTEGER)[0]!;
+    await (service as unknown as { processJob: (item: typeof job) => Promise<void> }).processJob(job);
+
+    assert.equal(service.store.jobStats(sourceId, "media").pending, 1);
+    assert.equal(
+      service.store.jobStats(sourceId, "media").lastError,
+      "media[telegram-download]: Access Denied",
+    );
+  } finally {
+    await service.close();
+    state.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("Admin overview explains skipped messages by observed Telegram author", async () => {
   const root = mkdtempSync(join(tmpdir(), "summing-skipped-authors-"));
   const state = new StateStore(join(root, "state.sqlite3"));

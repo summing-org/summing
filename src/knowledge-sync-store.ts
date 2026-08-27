@@ -1702,6 +1702,14 @@ export class KnowledgeSyncStore {
     return Number(result.changes) > 0;
   }
 
+  updateRunningJobPayload(id: number, payload: Record<string, unknown>): boolean {
+    const result = this.db.prepare(`
+      UPDATE team_ingestion_jobs SET payload_json = ?, updated_at = ?
+      WHERE id = ? AND state = 'running'
+    `).run(JSON.stringify(payload), Date.now() / 1_000, id);
+    return Number(result.changes) > 0;
+  }
+
   retryJob(id: number, error: string, attempts: number): boolean {
     const terminal = attempts >= 10;
     const delay = Math.min(86_400, 2 ** Math.min(attempts, 12) * 5);
@@ -1718,14 +1726,66 @@ export class KnowledgeSyncStore {
     return terminal && Number(result.changes) > 0;
   }
 
-  requeueFailedJobs(sourceId: string): number {
+  requeueFailedJobs(sourceId: string, kind?: SyncStageName): number {
     const now = Date.now() / 1_000;
-    const result = this.db.prepare(`
-      UPDATE team_ingestion_jobs SET state = 'pending', attempts = 0,
-        next_attempt_at = ?, last_error = '', updated_at = ?
-      WHERE source_id = ? AND state = 'failed'
-    `).run(now, now, sourceId);
-    return Number(result.changes);
+    return this.transaction(() => {
+      const filter = kind ? " AND kind = ?" : "";
+      const parameters = kind ? [sourceId, kind] : [sourceId];
+      const media = this.db.prepare(`
+        SELECT COUNT(*) AS count FROM team_ingestion_jobs
+        WHERE source_id = ? AND state = 'failed' AND kind = 'media'${kind ? " AND kind = ?" : ""}
+      `).get(...parameters) as Row;
+      const result = this.db.prepare(`
+        UPDATE team_ingestion_jobs SET state = 'pending', attempts = 0,
+          next_attempt_at = ?, last_error = '', updated_at = ?
+        WHERE source_id = ? AND state = 'failed'${filter}
+      `).run(now, now, ...parameters);
+      const mediaCount = Number(media.count ?? 0);
+      if (mediaCount > 0) {
+        this.db.prepare(`
+          UPDATE team_sync_runs
+          SET media_pending = media_pending + ?,
+              media_failed = MAX(0, media_failed - ?), updated_at = ?
+          WHERE id = (
+            SELECT id FROM team_sync_runs WHERE source_id = ?
+            ORDER BY generation DESC LIMIT 1
+          )
+        `).run(mediaCount, mediaCount, now, sourceId);
+      }
+      return Number(result.changes);
+    });
+  }
+
+  requeueLegacyMediaJobs(sourceId: string): number {
+    const now = Date.now() / 1_000;
+    return this.transaction(() => {
+      const legacy = this.db.prepare(`
+        SELECT COUNT(*) AS count FROM team_ingestion_jobs
+        WHERE source_id = ? AND kind = 'media' AND state = 'failed'
+          AND COALESCE(CAST(json_extract(payload_json, '$.mediaSchemaVersion') AS INTEGER), 0) < 2
+          AND COALESCE(CAST(json_extract(payload_json, '$.telegramMessageId') AS INTEGER), 0) > 0
+      `).get(sourceId) as Row;
+      const count = Number(legacy.count ?? 0);
+      if (count === 0) return 0;
+      const result = this.db.prepare(`
+        UPDATE team_ingestion_jobs
+        SET state = 'pending', attempts = 0, next_attempt_at = ?, last_error = '',
+            payload_json = json_set(payload_json, '$.mediaSchemaVersion', 2), updated_at = ?
+        WHERE source_id = ? AND kind = 'media' AND state = 'failed'
+          AND COALESCE(CAST(json_extract(payload_json, '$.mediaSchemaVersion') AS INTEGER), 0) < 2
+          AND COALESCE(CAST(json_extract(payload_json, '$.telegramMessageId') AS INTEGER), 0) > 0
+      `).run(now, now, sourceId);
+      this.db.prepare(`
+        UPDATE team_sync_runs
+        SET media_pending = media_pending + ?,
+            media_failed = MAX(0, media_failed - ?), updated_at = ?
+        WHERE id = (
+          SELECT id FROM team_sync_runs WHERE source_id = ?
+          ORDER BY generation DESC LIMIT 1
+        )
+      `).run(count, count, now, sourceId);
+      return Number(result.changes);
+    });
   }
 
   claimOutbox(limit = 10, now = Date.now() / 1_000): SyncOutboxItem[] {
