@@ -1277,3 +1277,24 @@ test("migrates the pre-egress Team Space intervention schema", () => {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("a user can briefly mark an observed Telegram topic as a report destination", () => {
+  const { root, store } = tempStore();
+  try {
+    store.recordTelegramChat({
+      chatId: -100500,
+      type: "supergroup",
+      title: "Customer",
+      isForum: true,
+      observedAt: 1_000,
+    });
+    store.recordTelegramTopic(-100500, 67800, "Reports", 1_000);
+    const marked = store.markTelegramReportDestination(42, -100500, 67800, 1_100);
+    assert.equal(marked.name, "Reports");
+    assert.equal(store.telegramReportDestinationMark(42, 900, 1_999)?.topicId, 67800);
+    assert.equal(store.telegramReportDestinationMark(42, 900, 2_001), null);
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});

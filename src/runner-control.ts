@@ -36,6 +36,12 @@ export interface RunnerControlContext {
   turnId: string;
 }
 
+export interface RunnerScheduleDestination {
+  chatId: number;
+  topicId: number;
+  label: string;
+}
+
 export interface RunnerSchedule {
   id: string;
   projectId: string;
@@ -50,6 +56,8 @@ export interface RunnerSchedule {
   revisionRef: "master";
   overlapPolicy: "skip";
   misfireGraceMinutes: number;
+  delivery: RunnerScheduleDestination | null;
+  originConversationId: string;
   createdBy: number;
   updatedBy: number;
   createdAt: string;
@@ -106,6 +114,8 @@ export interface SchedulePlanInput {
   weekdays?: number[];
   enabled?: boolean;
   misfireGraceMinutes?: number;
+  deliveryTopic?: string;
+  clearDeliveryTopic?: boolean;
 }
 
 export interface SchedulePlan {
@@ -326,6 +336,10 @@ export class RunnerControlStore {
         revision_ref TEXT NOT NULL CHECK(revision_ref = 'master'),
         overlap_policy TEXT NOT NULL CHECK(overlap_policy = 'skip'),
         misfire_grace_minutes INTEGER NOT NULL CHECK(misfire_grace_minutes BETWEEN 0 AND 1440),
+        delivery_chat_id INTEGER,
+        delivery_topic_id INTEGER,
+        delivery_label TEXT NOT NULL DEFAULT '',
+        origin_conversation_id TEXT NOT NULL DEFAULT '',
         created_by INTEGER NOT NULL,
         updated_by INTEGER NOT NULL,
         created_at TEXT NOT NULL,
@@ -451,6 +465,23 @@ export class RunnerControlStore {
         COMMIT;
       `);
     }
+    const scheduleColumns = this.db.prepare("PRAGMA table_info(runner_schedules)").all() as Row[];
+    if (!scheduleColumns.some((column) => column.name === "delivery_chat_id")) {
+      this.db.exec("ALTER TABLE runner_schedules ADD COLUMN delivery_chat_id INTEGER");
+    }
+    if (!scheduleColumns.some((column) => column.name === "delivery_topic_id")) {
+      this.db.exec("ALTER TABLE runner_schedules ADD COLUMN delivery_topic_id INTEGER");
+    }
+    if (!scheduleColumns.some((column) => column.name === "delivery_label")) {
+      this.db.exec(
+        "ALTER TABLE runner_schedules ADD COLUMN delivery_label TEXT NOT NULL DEFAULT ''",
+      );
+    }
+    if (!scheduleColumns.some((column) => column.name === "origin_conversation_id")) {
+      this.db.exec(
+        "ALTER TABLE runner_schedules ADD COLUMN origin_conversation_id TEXT NOT NULL DEFAULT ''",
+      );
+    }
   }
 
   schedules(projectId?: string, workspaceId?: string): RunnerSchedule[] {
@@ -539,8 +570,9 @@ export class RunnerControlStore {
           INSERT INTO runner_schedules
             (id, project_id, workspace_id, name, action, local_time, time_zone,
              weekdays_json, enabled, revision_ref, overlap_policy, misfire_grace_minutes,
+             delivery_chat_id, delivery_topic_id, delivery_label, origin_conversation_id,
              created_by, updated_by, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             action = excluded.action,
@@ -551,6 +583,10 @@ export class RunnerControlStore {
             revision_ref = excluded.revision_ref,
             overlap_policy = excluded.overlap_policy,
             misfire_grace_minutes = excluded.misfire_grace_minutes,
+            delivery_chat_id = excluded.delivery_chat_id,
+            delivery_topic_id = excluded.delivery_topic_id,
+            delivery_label = excluded.delivery_label,
+            origin_conversation_id = excluded.origin_conversation_id,
             updated_by = excluded.updated_by,
             updated_at = excluded.updated_at
           WHERE runner_schedules.project_id = excluded.project_id
@@ -568,6 +604,12 @@ export class RunnerControlStore {
           schedule.revisionRef,
           schedule.overlapPolicy,
           schedule.misfireGraceMinutes,
+          schedule.delivery?.chatId ?? null,
+          schedule.delivery?.topicId ?? null,
+          schedule.delivery?.label ?? "",
+          schedule.originConversationId === undefined
+            ? context.conversationId
+            : schedule.originConversationId,
           schedule.createdBy,
           schedule.updatedBy,
           schedule.createdAt,
@@ -852,6 +894,14 @@ export class RunnerControlStore {
       revisionRef: "master",
       overlapPolicy: "skip",
       misfireGraceMinutes: Number(row.misfire_grace_minutes),
+      delivery: row.delivery_chat_id === null || row.delivery_topic_id === null
+        ? null
+        : {
+            chatId: Number(row.delivery_chat_id),
+            topicId: Number(row.delivery_topic_id),
+            label: String(row.delivery_label || `topic ${String(row.delivery_topic_id)}`),
+          },
+      originConversationId: String(row.origin_conversation_id ?? ""),
       createdBy: Number(row.created_by),
       updatedBy: Number(row.updated_by),
       createdAt: String(row.created_at),
@@ -899,6 +949,16 @@ export class RunnerControlPlane {
       conversationId: string,
       authorizedUserId: number,
     ) => Promise<boolean> = async () => false,
+    readonly deliverScheduledPortalMessages: (
+      job: RunnerJob,
+      schedule: RunnerSchedule,
+    ) => Promise<boolean> = async () => false,
+    readonly resolveScheduleDestination: (
+      context: RunnerControlContext,
+      query: string,
+    ) => RunnerScheduleDestination = () => {
+      throw new RunnerControlError("schedule delivery destination resolver is unavailable");
+    },
   ) {
     this.store = new RunnerControlStore(storePath);
   }
@@ -1375,6 +1435,12 @@ export class RunnerControlPlane {
     if (input.enabled !== undefined && typeof input.enabled !== "boolean") {
       throw new RunnerControlError("enabled must be a boolean");
     }
+    if (input.clearDeliveryTopic !== undefined && typeof input.clearDeliveryTopic !== "boolean") {
+      throw new RunnerControlError("clearDeliveryTopic must be a boolean");
+    }
+    if (input.clearDeliveryTopic && input.deliveryTopic) {
+      throw new RunnerControlError("deliveryTopic and clearDeliveryTopic cannot be combined");
+    }
     const name = String(input.name ?? existing?.name ?? "").trim();
     if (!SCHEDULE_NAME.test(name)) throw new RunnerControlError("schedule name is invalid");
     const action = String(input.action ?? existing?.action ?? "") as RunnerSchedulableAction;
@@ -1391,6 +1457,19 @@ export class RunnerControlPlane {
     if (!Number.isInteger(misfireGraceMinutes) || misfireGraceMinutes < 0 || misfireGraceMinutes > 1440) {
       throw new RunnerControlError("misfireGraceMinutes must be an integer from 0 to 1440");
     }
+    let delivery = existing?.delivery ?? null;
+    if (input.clearDeliveryTopic) delivery = null;
+    if (input.deliveryTopic !== undefined) {
+      const query = String(input.deliveryTopic).trim();
+      if (!query) throw new RunnerControlError("deliveryTopic must be a non-empty topic name");
+      if (Array.from(query).length > 200) {
+        throw new RunnerControlError("deliveryTopic is limited to 200 characters");
+      }
+      delivery = this.resolveScheduleDestination(context, query);
+    }
+    if (delivery && action !== "dry-run") {
+      throw new RunnerControlError("automatic report delivery is supported only for dry-run schedules");
+    }
     const timestamp = iso(nowMilliseconds);
     const schedule: RunnerSchedule = {
       id: existing?.id ?? randomUUID(),
@@ -1405,17 +1484,22 @@ export class RunnerControlPlane {
       revisionRef: "master",
       overlapPolicy: "skip",
       misfireGraceMinutes,
+      delivery,
+      originConversationId: existing ? existing.originConversationId : context.conversationId,
       createdBy: existing?.createdBy ?? context.actorUserId,
       updatedBy: context.actorUserId,
       createdAt: existing?.createdAt ?? timestamp,
       updatedAt: timestamp,
     };
     const days = weekdays.length === 7 ? "ежедневно" : `дни ISO ${weekdays.join(",")}`;
+    const deliverySummary = schedule.delivery
+      ? `, отчёт → ${schedule.delivery.label}`
+      : "";
     return this.store.savePlan(
       context,
       { operation: "upsert", schedule },
       `${existing ? "Изменить" : "Создать"} расписание «${name}»: ${action}, ${days} в ${time} (${timeZone}), ` +
-        `${schedule.enabled ? "включено" : "выключено"}`,
+        `${schedule.enabled ? "включено" : "выключено"}${deliverySummary}`,
       nowMilliseconds,
     );
   }
@@ -1568,6 +1652,19 @@ export class RunnerControlPlane {
           ? "failed"
           : job.status;
         if (status === execution.status) continue;
+        const schedule = this.store.schedule(
+          execution.scheduleId,
+          execution.projectId,
+          execution.workspaceId,
+        );
+        if (
+          status === "completed" &&
+          job.action === "dry-run" &&
+          (job.portalMessageCount ?? 0) > 0 &&
+          schedule
+        ) {
+          if (!(await this.deliverScheduledPortalMessages(job, schedule))) continue;
+        }
         this.store.updateExecution(
           execution.id,
           status,
@@ -1575,11 +1672,6 @@ export class RunnerControlPlane {
           this.now(),
         );
         if (TERMINAL_EXECUTION_STATUSES.has(status) && status !== "completed") {
-          const schedule = this.store.schedule(
-            execution.scheduleId,
-            execution.projectId,
-            execution.workspaceId,
-          );
           if (schedule) {
             await this.notify(
               execution.projectId,

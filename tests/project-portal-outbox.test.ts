@@ -49,6 +49,20 @@ test("Project portal outbox persists, retries, verifies and deduplicates a docum
       idempotencyKey: "turn-1-file-1",
       createdBy: 42,
     }).id, queued.id);
+    assert.equal(store.enqueue({
+      projectId: "demo",
+      workspaceId: "repo",
+      portal,
+      text: "Файл от исполнителя",
+      attachment: {
+        fileName: "brief.pdf",
+        mimeType: "application/pdf",
+        data: new TextEncoder().encode("%PDF brief"),
+      },
+      idempotencyKey: "turn-1-file-1",
+      createdBy: 42,
+      context: { kind: "runner-report", jobId: "legacy-retry" },
+    }).id, queued.id, "new reply metadata must not invalidate an already durable payload");
     const first = store.claimDue()[0]!;
     assert.equal(first.status, "sending");
     assert.equal(Buffer.from(store.attachmentData(first)!).toString("utf8"), "%PDF brief");
@@ -105,6 +119,37 @@ test("an interrupted send becomes uncertain and requires an explicit retry", () 
     assert.equal(reopened.notificationDue()[0]?.id, queued.id);
     assert.equal(reopened.retry(queued.id).status, "pending");
     assert.equal(reopened.claimDue()[0]?.attempts, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("direct topic reports retain reply-scoped project context without a portal binding", () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-project-topic-outbox-"));
+  const store = new ProjectPortalOutboxStore(root, 1_000);
+  try {
+    const queued = store.enqueueTopic({
+      projectId: "demo",
+      workspaceId: "repo",
+      destination: {
+        id: "telegram:-100500:67800",
+        chatId: -100500,
+        topicId: 67800,
+      },
+      text: "Утренний отчёт готов.",
+      idempotencyKey: "runner:job-1:report",
+      createdBy: 42,
+      context: { kind: "runner-report", jobId: "job-1", scheduleId: "schedule-1" },
+    });
+    assert.equal(queued.destinationType, "topic");
+    assert.equal(queued.portalKey, undefined);
+    const sent = store.markSent(store.claimDue()[0]!.id, 245);
+    assert.deepEqual(store.sentToTelegramMessage(-100500, 67800, 245), sent);
+    assert.deepEqual(sent.context, {
+      kind: "runner-report",
+      jobId: "job-1",
+      scheduleId: "schedule-1",
+    });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

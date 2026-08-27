@@ -1,6 +1,6 @@
-# SUMMING 9.24: архитектура, эксплуатация и разработка
+# SUMMING 9.25: архитектура, эксплуатация и разработка
 
-> Версия: **9.24.0**
+> Версия: **9.25.0**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
 > Последняя сверка с кодом: **27 августа 2026 года**.
 
@@ -1034,14 +1034,26 @@ owner-команде доступны запуск одной фиксирова
 недоверенные данные.
 
 Расписания хранятся в `runner-control.sqlite3`: action, локальное `HH:MM`, IANA
-timezone, ISO weekdays, enabled, `revisionRef=master`, `overlapPolicy=skip` и
-misfire grace. Scheduler сериализует claim каждой occurrence, не стартует при
+timezone, ISO weekdays, enabled, `revisionRef=master`, `overlapPolicy=skip`,
+misfire grace и необязательный точный Telegram destination (`chat_id/topic_id` плюс
+человекочитаемый label). Scheduler сериализует claim каждой occurrence, не стартует при
 недоступном runner и пропускает следующий occurrence, пока job этого расписания
 активен. На каждом occurrence полный SHA заново разрешается из текущего `master`.
 Create/update/delete формируют 15-минутный точный план и token; host запрещает
 применять token в том же Codex turn, поэтому требуется отдельное подтверждающее
 сообщение. Pause/resume обратимы и выполняются только по явной инструкции.
 Ошибки расписаний отправляются всем текущим owners Project.
+
+Для scheduled `dry-run` owner задаёт destination естественным названием топика.
+Runtime ищет точное имя среди уже обнаруженных Telegram topics, предпочитает текущую
+группу и сразу фиксирует numeric IDs в подтверждаемом плане. Если имя неизвестно или
+неоднозначно, owner упоминает бота непосредственно в нужном forum topic сообщением
+`@bot отчёты сюда`; краткоживущая метка позволяет повторить план без ручного копирования
+ID. Ни метка, ни доставка не создают Project binding. После завершения job scheduler
+передаёт весь `portal-messages.json` в durable outbox по сохранённым IDs до фиксации
+execution как completed. `portalKey` внутри нового scheduled batch на выбор destination
+не влияет. Расписания, созданные до появления exact destination, временно сохраняют
+legacy `portalKey/default` routing до явной перенастройки.
 
 Очередь имеет глобальный предел `SUMMING_RUNNER_MAX_PARALLEL_JOBS` (по умолчанию
 2): независимые Project выполняются параллельно, включая многочасовые scheduled
@@ -1120,7 +1132,18 @@ Workspace сначала фиксируют точные `jobId/name` в отд�
 без symlink, переносит его в приватный `.trash` на том же filesystem и обновляет
 `artifactCount`. Результат различает успешно перемещённые и неудавшиеся цели.
 
-### 9.2. Project observers: публикации, feedback и доставка
+### 9.2. Доставка отчётов и необязательные Project observers
+
+Топик доставки отчётов и Project observer — разные сущности. Для доставки достаточно
+обнаруженного Telegram topic и сохранённых numeric IDs; связывать его с Project не
+нужно. Прямой reply на отправленное runtime сообщение сопоставляется с durable outbox
+record и открывает ephemeral read-only Codex thread только для этого вопроса. Thread
+видит опубликованный Project snapshot и bounded содержимое report artifact, не получает
+network/write tools и не сохраняется как Conversation. Другие сообщения того же топика
+не получают Project context.
+
+Observer имеет смысл сохранять только когда нужен постоянный read-only Q&A, история
+публикаций и feedback loop, а не ради разовой доставки.
 
 Project/Workspace организован как основной рабочий стол `primary` и соседние
 read-only столы `observer`. Все решения, изменения, runner/service actions и
@@ -1152,12 +1175,12 @@ Workspace. Комментарии observers не пересылаются дру
 считать их требованиями. Без model-egress consent текст скрыт, но контекст сообщает
 число и время скрытых комментариев без автора и содержимого.
 
-Транспортная совместимость остаётся внутренней инфраструктурой. Legacy
-`portalKey` (`main`, `reports`, `legal`), один compatibility default и namespace
-`project_portal` используются только для точного ответа, безопасной пересылки файла
-или уже настроенного runner route; обычный bind UI их не показывает. Runner
-по-прежнему может публиковать декларативный bounded `portal-messages.json` в один
-явно настроенный legacy route:
+Транспортная совместимость остаётся внутренней инфраструктурой. Namespace
+`project_portal` и observer bindings используются для точного ответа или безопасной
+пересылки файла; обычный bind UI не показывает route key/default. Runner публикует
+декларативный bounded `portal-messages.json`. В новом расписании весь batch идёт в
+сохранённый exact destination, поэтому необязательный `portalKey` игнорируется. Он
+читается только для расписаний без destination, мигрированных со старой версии:
 
 ```json
 {
@@ -1174,8 +1197,10 @@ Workspace. Комментарии observers не пересылаются дру
 }
 ```
 
-Runtime копирует payload в filesystem outbox до Bot API call. Запись содержит
-idempotency key, SHA-256, route, actor, attempts и origin Conversation. Временная
+Runtime копирует payload в filesystem outbox до Bot API call. Route может быть
+observer binding либо прямым Telegram `chat_id/topic_id`. Запись содержит
+idempotency key, SHA-256, route, actor, attempts, origin Conversation и ограниченный
+context отчёта для распознавания прямого reply. Временная
 ошибка повторяется экспоненциально не более пяти раз; постоянная или исчерпавшая
 лимит доставка становится `dead-letter`. Если процесс перезапустился в состоянии
 `sending`, запись становится `uncertain` и никогда не повторяется автоматически:
@@ -1281,15 +1306,15 @@ SQLite хранит:
 - binding `chat_id/topic_id → project/workspace/role`; application invariant — один
   primary на Project/Workspace и любое число observers;
 - внутренние compatibility-маршруты `project/workspace/portalKey → observer destination`
-  для targeted replies, файлов и существующих runner manifests;
+  для targeted replies, файлов и только существующих runner schedules;
 - editor и read-only Codex thread id;
 - активный turn и Telegram stream message id;
 - pending steer/follow-up с `access_mode`, `response_mode`, Telegram user id и
   типизированными metadata вложений;
 - историю Run: access/response mode, prompt, response, status, error и timestamps;
 - управляемые Projects, Workspaces, primary owner и списки совладельцев;
-- обнаруженные Telegram chats/topics, наблюдаемые авторы и последний membership
-  event бота;
+- обнаруженные Telegram chats/topics, наблюдаемые авторы, краткоживущая owner-метка
+  destination для настройки отчёта и последний membership event бота;
 - Team Spaces, Sources, People и не объединяемые автоматически provider identities;
 - event journal с replies, edits, reactions, membership и attachment metadata;
 - knowledge с confidence, visibility, temporal validity, evidence и supersession;
@@ -1310,6 +1335,7 @@ SQLite хранит:
 | `managed_workspaces` | Абсолютные пути управляемых repositories. |
 | `telegram_chats` | Метаданные чата, membership status бота и последний membership event. |
 | `telegram_topics` | Обнаруженные topic id, доступные названия и timestamps. |
+| `telegram_report_destination_marks` | Последний topic, явно отмеченный owner сообщением «отчёты сюда»; используется только при подтверждении destination. |
 | `telegram_users` | Последние доступные Telegram profile metadata с устойчивым numeric user ID. |
 | `telegram_topic_users` | Activity по ключу `(chat_id, topic_id, user_id)`: счётчик сообщений и first/last seen. |
 | `team_spaces`, `team_sources` | Durable boundary команды и transport sources. |
@@ -1789,7 +1815,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "9.24.0",
+  "version": "9.25.0",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",

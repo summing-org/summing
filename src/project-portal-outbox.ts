@@ -42,6 +42,19 @@ export interface ProjectPortalOutboxAttachment {
   sha256: string;
 }
 
+export interface ProjectTopicDestination {
+  id: string;
+  chatId: number;
+  topicId: number;
+  sourceId?: string | null;
+}
+
+export interface ProjectPortalOutboxContext {
+  kind: "runner-report";
+  jobId: string;
+  scheduleId?: string | null;
+}
+
 export interface ProjectPortalOutboxRecord {
   schemaVersion: 1;
   id: string;
@@ -50,10 +63,12 @@ export interface ProjectPortalOutboxRecord {
   portalId: string;
   portalKey?: string;
   transport?: string;
+  destinationType?: "binding" | "topic";
   chatId: number;
   topicId: number;
   sourceId: string | null;
   originConversationId?: string | null;
+  context?: ProjectPortalOutboxContext | null;
   kind: ProjectPortalMessageKind;
   text: string;
   replyToEventId: number | null;
@@ -144,7 +159,8 @@ export class ProjectPortalOutboxStore {
   enqueue(input: {
     projectId: string;
     workspaceId: string;
-    portal: ProjectPortalBinding;
+    portal?: ProjectPortalBinding;
+    destination?: ProjectTopicDestination;
     text?: string;
     replyToEventId?: number | null;
     replyToMessageId?: number | null;
@@ -152,6 +168,7 @@ export class ProjectPortalOutboxStore {
     idempotencyKey: string;
     createdBy: number;
     originConversationId?: string | null;
+    context?: ProjectPortalOutboxContext | null;
   }): ProjectPortalOutboxRecord {
     const text = String(input.text ?? "").trim();
     const attachment = input.attachment ?? null;
@@ -170,11 +187,44 @@ export class ProjectPortalOutboxStore {
     ) {
       throw new ProjectPortalOutboxError("portal message idempotency scope is invalid");
     }
+    if (Boolean(input.portal) === Boolean(input.destination)) {
+      throw new ProjectPortalOutboxError("exactly one portal or topic destination is required");
+    }
     if (
-      input.portal.projectId !== input.projectId ||
-      input.portal.workspaceId !== input.workspaceId
+      input.portal && (
+        input.portal.projectId !== input.projectId ||
+        input.portal.workspaceId !== input.workspaceId
+      )
     ) {
       throw new ProjectPortalOutboxError("portal is outside the active Project workspace");
+    }
+    const route = input.portal
+      ? {
+          id: input.portal.portalId,
+          type: "binding" as const,
+          portalKey: input.portal.portalKey,
+          transport: input.portal.transport,
+          chatId: input.portal.chatId,
+          topicId: input.portal.topicId,
+          sourceId: input.portal.sourceId,
+        }
+      : {
+          id: String(input.destination!.id),
+          type: "topic" as const,
+          portalKey: undefined,
+          transport: "telegram",
+          chatId: input.destination!.chatId,
+          topicId: input.destination!.topicId,
+          sourceId: input.destination!.sourceId ?? null,
+        };
+    if (
+      !route.id ||
+      !Number.isSafeInteger(route.chatId) ||
+      route.chatId === 0 ||
+      !Number.isSafeInteger(route.topicId) ||
+      route.topicId < 0
+    ) {
+      throw new ProjectPortalOutboxError("topic destination is invalid");
     }
     const attachmentData = attachment ? Uint8Array.from(attachment.data) : null;
     if (
@@ -196,10 +246,10 @@ export class ProjectPortalOutboxStore {
     const immutablePayload = {
       projectId: input.projectId,
       workspaceId: input.workspaceId,
-      portalId: input.portal.portalId,
-      chatId: input.portal.chatId,
-      topicId: input.portal.topicId,
-      sourceId: input.portal.sourceId,
+      portalId: route.id,
+      chatId: route.chatId,
+      topicId: route.topicId,
+      sourceId: route.sourceId,
       kind: attachmentMetadata ? "document" as const : "text" as const,
       text,
       replyToEventId: input.replyToEventId ?? null,
@@ -212,7 +262,7 @@ export class ProjectPortalOutboxStore {
     const id = digest([
       input.projectId,
       input.workspaceId,
-      input.portal.portalId,
+      route.id,
       input.idempotencyKey,
     ]);
     const existing = this.get(id);
@@ -236,9 +286,11 @@ export class ProjectPortalOutboxStore {
       schemaVersion: 1,
       id,
       ...immutablePayload,
-      portalKey: input.portal.portalKey,
-      transport: input.portal.transport,
+      ...(route.portalKey ? { portalKey: route.portalKey } : {}),
+      transport: route.transport,
+      destinationType: route.type,
       originConversationId: input.originConversationId ?? null,
+      context: input.context ?? null,
       payloadDigest,
       status: "pending",
       attempts: 0,
@@ -254,6 +306,22 @@ export class ProjectPortalOutboxStore {
     };
     atomicJson(this.recordPath(id), record);
     return record;
+  }
+
+  enqueueTopic(input: {
+    projectId: string;
+    workspaceId: string;
+    destination: ProjectTopicDestination;
+    text?: string;
+    replyToEventId?: number | null;
+    replyToMessageId?: number | null;
+    attachment?: { fileName: string; mimeType: string; data: Uint8Array } | null;
+    idempotencyKey: string;
+    createdBy: number;
+    originConversationId?: string | null;
+    context?: ProjectPortalOutboxContext | null;
+  }): ProjectPortalOutboxRecord {
+    return this.enqueue(input);
   }
 
   get(id: string): ProjectPortalOutboxRecord | null {
@@ -273,11 +341,14 @@ export class ProjectPortalOutboxStore {
     ) {
       throw new ProjectPortalOutboxError("invalid portal outbox record");
     }
+    const destinationType = record.destinationType || "binding";
     return {
       ...record,
-      portalKey: record.portalKey || "main",
+      ...(destinationType === "binding" ? { portalKey: record.portalKey || "main" } : {}),
       transport: record.transport || "telegram",
+      destinationType,
       originConversationId: record.originConversationId ?? null,
+      context: record.context ?? null,
       terminalNotifiedAt: record.terminalNotifiedAt ?? null,
       terminalNotificationAttempts: record.terminalNotificationAttempts ?? 0,
       terminalNotificationNextAttemptAt: record.terminalNotificationNextAttemptAt ?? null,
@@ -298,6 +369,19 @@ export class ProjectPortalOutboxStore {
       .filter((record) => !statuses || statuses.has(record.status))
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
       .slice(0, limit);
+  }
+
+  sentToTelegramMessage(
+    chatId: number,
+    topicId: number,
+    telegramMessageId: number,
+  ): ProjectPortalOutboxRecord | null {
+    return this.records().find((record) =>
+      record.status === "sent" &&
+      record.chatId === chatId &&
+      record.topicId === topicId &&
+      record.telegramMessageId === telegramMessageId
+    ) ?? null;
   }
 
   claimDue(limit = 10): ProjectPortalOutboxRecord[] {

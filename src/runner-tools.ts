@@ -103,7 +103,9 @@ export const RUNNER_DYNAMIC_TOOLS: DynamicToolNamespaceSpec[] = [{
         "Prepare, but do not apply, a schedule create/update/delete. Show the returned Russian " +
         "summary to the user and ask for explicit confirmation. Applying in the same turn is " +
         "blocked by the host. New schedules require an explicit IANA timeZone. Weekdays use ISO " +
-        "numbers: Monday=1 through Sunday=7.",
+        "numbers: Monday=1 through Sunday=7. For a scheduled dry-run report, pass the topic name " +
+        "in deliveryTopic; the host resolves and freezes its Telegram IDs. If resolution asks the " +
+        "owner to mark a topic, retry with deliveryTopic '@marked' after the owner confirms the mark.",
       inputSchema: {
         ...OBJECT_SCHEMA,
         properties: {
@@ -121,6 +123,18 @@ export const RUNNER_DYNAMIC_TOOLS: DynamicToolNamespaceSpec[] = [{
           },
           enabled: { type: "boolean" },
           misfireGraceMinutes: { type: "integer", minimum: 0, maximum: 1440 },
+          deliveryTopic: {
+            type: "string",
+            minLength: 1,
+            maxLength: 200,
+            description:
+              "Human topic name for scheduled dry-run report delivery, or internal @marked after " +
+              "the owner marks an unknown topic by mentioning the bot there with 'отчёты сюда'.",
+          },
+          clearDeliveryTopic: {
+            type: "boolean",
+            description: "Remove automatic report delivery from this schedule.",
+          },
         },
         required: ["operation"],
       },

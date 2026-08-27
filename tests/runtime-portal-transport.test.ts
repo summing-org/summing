@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { ProjectConfig, RuntimeConfig, type WorkspaceConfig } from "../src/config.js";
 import type { RunnerJob } from "../src/project-runner-client.js";
+import type { RunnerSchedule } from "../src/runner-control.js";
 import { SummingRuntime } from "../src/runtime.js";
 import { StateStore } from "../src/state-store.js";
 
@@ -108,6 +109,136 @@ test("runner messages use the same durable Project portal transport", async () =
     const source = runtime.state.teamSourceForProvider("telegram", "-100501", "10");
     assert.ok(source);
     assert.equal(runtime.state.recentTeamEvents(source.spaceId, source.id)[0]?.externalEventId, "245");
+  } finally {
+    runtime.state.close();
+    await runtime.telegram.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("scheduled reports deliver to an observed topic without an observer binding or portalKey", async () => {
+  const { root, runtime } = fixture();
+  runtime.state.bind(1, 0, "demo", "repo");
+  runtime.state.recordTelegramChat({
+    chatId: -100700,
+    type: "supergroup",
+    title: "Customer",
+    isForum: true,
+    observedAt: 1_777_000_000,
+  });
+  runtime.state.recordTelegramTopic(-100700, 67800, "Reports", 1_777_000_000);
+  const resolved = (
+    runtime as unknown as {
+      resolveRunnerScheduleDestination(
+        context: {
+          projectId: string;
+          workspaceId: string;
+          repositoryPath: string;
+          conversationId: string;
+          actorUserId: number;
+          turnId: string;
+        },
+        query: string,
+      ): { chatId: number; topicId: number; label: string };
+    }
+  ).resolveRunnerScheduleDestination({
+    projectId: "demo",
+    workspaceId: "repo",
+    repositoryPath: "unused",
+    conversationId: runtime.state.byTopic(1, 0)!.id,
+    actorUserId: 1,
+    turnId: "turn-schedule",
+  }, "Reports");
+  assert.deepEqual(resolved, {
+    chatId: -100700,
+    topicId: 67800,
+    label: "«Customer» / «Reports»",
+  });
+  const schedule: RunnerSchedule = {
+    id: "df4fc608-e584-4263-9712-e53d779f9bd8",
+    projectId: "demo",
+    workspaceId: "repo",
+    name: "Утренний отчёт",
+    action: "dry-run",
+    time: "08:30",
+    timeZone: "Europe/Moscow",
+    weekdays: [1, 2, 3, 4, 5],
+    enabled: true,
+    revisionRef: "master",
+    overlapPolicy: "skip",
+    misfireGraceMinutes: 30,
+    delivery: {
+      chatId: -100700,
+      topicId: 67800,
+      label: "«Customer» / «Reports»",
+    },
+    originConversationId: runtime.state.byTopic(1, 0)!.id,
+    createdBy: 1,
+    updatedBy: 1,
+    createdAt: "2026-08-20T05:00:00.000Z",
+    updatedAt: "2026-08-20T05:00:00.000Z",
+  };
+  const job: RunnerJob = {
+    id: "5786a587-d5de-4da3-91dc-da90e7aef28d",
+    projectId: "demo",
+    workspaceId: "repo",
+    action: "dry-run",
+    revision: "b".repeat(40),
+    trigger: "schedule",
+    scheduleId: schedule.id,
+    status: "completed",
+    portalMessageCount: 1,
+    createdAt: "2026-08-20T05:30:00.000Z",
+  };
+  runtime.viewer.runner.portalMessages = async () => ({
+    projectId: "demo",
+    workspaceId: "repo",
+    jobId: job.id,
+    messages: [{
+      id: "report",
+      type: "document",
+      text: "Отчёт готов.",
+      artifact: "report.html",
+      portalKey: "obsolete-key",
+    }],
+    createdAt: "2026-08-20T05:31:00.000Z",
+  });
+  runtime.viewer.runner.artifact = async () => ({
+    name: "report.html",
+    bytes: 19,
+    contentType: "text/html",
+    content: "<html>report</html>",
+  });
+  const deliveries: Array<{ chatId: number; topicId?: number; fileName: string }> = [];
+  runtime.telegram.sendChatAction = async () => {};
+  runtime.telegram.sendDocument = async (chatId, _content, fileName, _contentType, options) => {
+    deliveries.push({
+      chatId,
+      fileName,
+      ...(options?.topicId === undefined ? {} : { topicId: options.topicId }),
+    });
+    return 512;
+  };
+  try {
+    const delivered = await (
+      runtime as unknown as {
+        sendScheduledRunnerPortalMessages(
+          reportJob: RunnerJob,
+          reportSchedule: RunnerSchedule,
+        ): Promise<boolean>;
+      }
+    ).sendScheduledRunnerPortalMessages(job, schedule);
+    assert.equal(delivered, true);
+    assert.deepEqual(deliveries, [{ chatId: -100700, topicId: 67800, fileName: "report.html" }]);
+    assert.equal(runtime.state.byTopic(-100700, 67800), null);
+    const record = runtime.projectPortalOutbox.list({ projectId: "demo" })[0]!;
+    assert.equal(record.destinationType, "topic");
+    assert.equal(record.portalKey, undefined);
+    assert.deepEqual(record.context, {
+      kind: "runner-report",
+      jobId: job.id,
+      scheduleId: schedule.id,
+    });
   } finally {
     runtime.state.close();
     await runtime.telegram.close();

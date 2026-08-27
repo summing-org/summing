@@ -241,6 +241,11 @@ export interface TelegramTopicRecord {
   updatedAt: number;
 }
 
+export interface TelegramReportDestinationMark extends TelegramTopicRecord {
+  markedByUserId: number;
+  markedAt: number;
+}
+
 export interface TelegramUserObservation {
   userId: number;
   username?: string;
@@ -1273,6 +1278,16 @@ export class StateStore {
           ON telegram_topic_users(chat_id, last_seen_at DESC, user_id);
         CREATE INDEX IF NOT EXISTS telegram_topic_users_topic
           ON telegram_topic_users(chat_id, topic_id, last_seen_at DESC, user_id);
+        CREATE TABLE IF NOT EXISTS telegram_report_destination_marks (
+          user_id INTEGER PRIMARY KEY,
+          chat_id INTEGER NOT NULL,
+          topic_id INTEGER NOT NULL,
+          marked_at REAL NOT NULL,
+          FOREIGN KEY(chat_id, topic_id)
+            REFERENCES telegram_topics(chat_id, topic_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS telegram_report_destination_marks_recent
+          ON telegram_report_destination_marks(marked_at DESC, user_id);
         CREATE TABLE IF NOT EXISTS team_spaces (
           id TEXT PRIMARY KEY,
           name TEXT NOT NULL,
@@ -1893,6 +1908,49 @@ export class StateStore {
           "ORDER BY updated_at DESC, topic_id",
       ).all(chatId);
     return (rows as Row[]).map((row) => this.toTelegramTopic(row));
+  }
+
+  markTelegramReportDestination(
+    userId: number,
+    chatId: number,
+    topicId: number,
+    markedAt = Date.now() / 1_000,
+  ): TelegramReportDestinationMark {
+    if (!Number.isSafeInteger(userId) || userId <= 0) {
+      throw new Error("report destination marker requires a Telegram user");
+    }
+    const topic = this.telegramTopic(chatId, topicId);
+    if (!topic) throw new Error("report destination marker requires an observed Telegram topic");
+    this.db.prepare(`
+      INSERT INTO telegram_report_destination_marks (user_id, chat_id, topic_id, marked_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(user_id) DO UPDATE SET
+        chat_id = excluded.chat_id,
+        topic_id = excluded.topic_id,
+        marked_at = excluded.marked_at
+    `).run(userId, chatId, topicId, markedAt);
+    return { ...topic, markedByUserId: userId, markedAt };
+  }
+
+  telegramReportDestinationMark(
+    userId: number,
+    maximumAgeSeconds = 15 * 60,
+    now = Date.now() / 1_000,
+  ): TelegramReportDestinationMark | null {
+    const row = this.db.prepare(`
+      SELECT topic.*, mark.user_id, mark.marked_at
+      FROM telegram_report_destination_marks mark
+      JOIN telegram_topics topic
+        ON topic.chat_id = mark.chat_id AND topic.topic_id = mark.topic_id
+      WHERE mark.user_id = ? AND mark.marked_at >= ?
+    `).get(userId, now - maximumAgeSeconds) as Row | undefined;
+    return row
+      ? {
+          ...this.toTelegramTopic(row),
+          markedByUserId: Number(row.user_id),
+          markedAt: Number(row.marked_at),
+        }
+      : null;
   }
 
   recordTelegramTopicUser(

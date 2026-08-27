@@ -47,6 +47,8 @@ function schedule(overrides: Partial<RunnerSchedule> = {}): RunnerSchedule {
     revisionRef: "master",
     overlapPolicy: "skip",
     misfireGraceMinutes: 30,
+    delivery: null,
+    originConversationId: "conversation-1",
     createdBy: 42,
     updatedBy: 42,
     createdAt: "2026-08-17T05:00:00.000Z",
@@ -122,6 +124,127 @@ test("runner control migrates legacy job watches for provision jobs", () => {
     assert.equal(store.jobWatch("provision-job")?.action, "provision");
   } finally {
     store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runner control migrates schedules created before direct report destinations", () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-runner-schedule-migration-"));
+  const databasePath = join(root, "control.sqlite3");
+  const legacy = new DatabaseSync(databasePath);
+  legacy.exec(`
+    CREATE TABLE runner_schedules (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      workspace_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      action TEXT NOT NULL,
+      local_time TEXT NOT NULL,
+      time_zone TEXT NOT NULL,
+      weekdays_json TEXT NOT NULL,
+      enabled INTEGER NOT NULL,
+      revision_ref TEXT NOT NULL,
+      overlap_policy TEXT NOT NULL,
+      misfire_grace_minutes INTEGER NOT NULL,
+      created_by INTEGER NOT NULL,
+      updated_by INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(project_id, workspace_id, name)
+    );
+    INSERT INTO runner_schedules VALUES
+      ('fef80899-e998-4c5a-8f58-cd775802a954', 'demo', 'repo', 'Legacy report',
+       'dry-run', '08:30', 'Europe/Moscow', '[1,2,3,4,5]', 1, 'master', 'skip', 30,
+       42, 42, '2026-08-17T05:00:00.000Z', '2026-08-17T05:00:00.000Z');
+  `);
+  legacy.close();
+
+  const store = new RunnerControlStore(databasePath);
+  try {
+    const migrated = store.schedules("demo", "repo")[0]!;
+    assert.equal(migrated.delivery, null);
+    assert.equal(migrated.originConversationId, "");
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("scheduled dry-run resolves and hands off its exact Telegram destination once", async () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-runner-scheduled-report-"));
+  const now = Date.parse("2026-08-20T04:01:15.000Z");
+  const job: RunnerJob = {
+    id: "51c813ba-bfe7-4669-b590-b5bfb60ce9fa",
+    projectId: "demo",
+    workspaceId: "repo",
+    action: "dry-run",
+    revision: "a".repeat(40),
+    trigger: "schedule",
+    status: "completed",
+    portalMessageCount: 1,
+    createdAt: "2026-08-20T04:00:00.000Z",
+    completedAt: "2026-08-20T04:01:00.000Z",
+  };
+  const deliveries: Array<{ jobId: string; scheduleId: string; topicId: number }> = [];
+  const runner = {
+    available: async () => true,
+    jobs: async () => [job],
+  } as unknown as ProjectRunnerClient;
+  const control = new RunnerControlPlane(
+    join(root, "control.sqlite3"),
+    {} as ProjectCatalog,
+    runner,
+    async () => {},
+    () => now,
+    15_000,
+    async () => false,
+    async (deliveredJob, deliveredSchedule) => {
+      deliveries.push({
+        jobId: deliveredJob.id,
+        scheduleId: deliveredSchedule.id,
+        topicId: deliveredSchedule.delivery!.topicId,
+      });
+      return true;
+    },
+    (_context, query) => {
+      assert.equal(query, "Отчёты заказчику");
+      return { chatId: -100500, topicId: 67800, label: "«Customer» / «Reports»" };
+    },
+  );
+  try {
+    const plan = control.planSchedule(context("turn-plan"), {
+      operation: "upsert",
+      name: "Утренний отчёт",
+      action: "dry-run",
+      time: "08:30",
+      timeZone: "Europe/Moscow",
+      weekdays: [1, 2, 3, 4, 5],
+      deliveryTopic: "Отчёты заказчику",
+    });
+    assert.match(plan.summary, /отчёт → «Customer» \/ «Reports»/);
+    const stored = control.applySchedule(context("turn-confirm"), plan.token)!;
+    assert.deepEqual(stored.delivery, {
+      chatId: -100500,
+      topicId: 67800,
+      label: "«Customer» / «Reports»",
+    });
+    assert.equal(stored.originConversationId, "conversation-1");
+
+    const execution = control.store.claimExecution(stored, {
+      key: "2026-08-20T08:30@Europe/Moscow",
+      scheduledFor: "2026-08-20T05:30:00.000Z",
+    }, now)!;
+    control.store.updateExecution(execution.id, "queued", {
+      jobId: job.id,
+      revision: job.revision,
+    }, now);
+
+    await control.tick();
+    await control.tick();
+    assert.deepEqual(deliveries, [{ jobId: job.id, scheduleId: stored.id, topicId: 67800 }]);
+    assert.equal(control.store.execution(execution.id)?.status, "completed");
+  } finally {
+    control.close();
     rmSync(root, { recursive: true, force: true });
   }
 });

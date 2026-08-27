@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -257,6 +257,14 @@ test("owners control projects while group participants get read-only Q&A", async
       senderId: number;
       text: string;
       context: Array<{ text: string; author?: "bot" }>;
+      report?: {
+        projectId: string;
+        workspaceId: string;
+        jobId: string;
+        scheduleId: string | null;
+        text: string;
+        fileName: string | null;
+      };
     }> = [];
     Object.assign(runtime, {
       telegramBotId: 500,
@@ -268,6 +276,46 @@ test("owners control projects while group participants get read-only Q&A", async
         unboundQuestions.push(question);
       },
     });
+
+    await send(42, "@summing_bot, отчёты сюда!", -300, "supergroup", 45, false, "Engineering");
+    assert.equal(runtime.state.telegramReportDestinationMark(42)?.topicId, 45);
+    assert.match(replies.at(-1) ?? "", /Топик отмечен для доставки отчётов/);
+    const report = runtime.projectPortalOutbox.enqueueTopic({
+      projectId: "alpha",
+      workspaceId: "repo",
+      destination: { id: "telegram:-300:45", chatId: -300, topicId: 45 },
+      text: "Утренний отчёт готов.",
+      idempotencyKey: "runner:report-job:report",
+      createdBy: 42,
+      context: {
+        kind: "runner-report",
+        jobId: "report-job",
+        scheduleId: "report-schedule",
+      },
+    });
+    runtime.projectPortalOutbox.claimDue();
+    runtime.projectPortalOutbox.markSent(report.id, 700);
+    await send(
+      42,
+      "@summing_bot почему здесь такая цифра?",
+      -300,
+      "supergroup",
+      45,
+      true,
+      "Engineering",
+      "Утренний отчёт готов.",
+      0,
+      700,
+    );
+    assert.deepEqual(unboundQuestions.at(-1)?.report, {
+      projectId: "alpha",
+      workspaceId: "repo",
+      jobId: "report-job",
+      scheduleId: "report-schedule",
+      text: "Утренний отчёт готов.",
+      fileName: null,
+    });
+    unboundQuestions.length = 0;
 
     const observerChatMessagesBefore = replyChats.filter((chatId) => chatId === -300).length;
     await send(1, "/bind_observer_topic -300 44 alpha repo", 1, "private");
@@ -847,6 +895,7 @@ test("explicit questions in unbound topics run without Project access", async ()
     new Map([["summing", project]]),
   );
   const runtime = new SummingRuntime(config);
+  runtime.workspaces.initialize();
   const replies: Array<{
     chatId: number;
     text: string;
@@ -946,6 +995,14 @@ test("explicit questions in unbound topics run without Project access", async ()
           text: string;
           author?: "bot";
         }>;
+        report?: {
+          projectId: string;
+          workspaceId: string;
+          jobId: string;
+          scheduleId: string | null;
+          text: string;
+          fileName: string | null;
+        };
       }): Promise<void>;
     }
   ).answerUnboundQuestion.bind(runtime);
@@ -1000,6 +1057,46 @@ test("explicit questions in unbound topics run without Project access", async ()
       /<blockquote expandable><b>Ход работы · 1 сек<\/b>\nПроверил контекст обсуждения\.\n<\/blockquote>$/,
     );
 
+    runtime.viewer.runner.artifact = async (projectId, jobId, name) => {
+      assert.deepEqual([projectId, jobId, name], ["summing", "report-job", "report.html"]);
+      return {
+        name: "report.html",
+        bytes: 31,
+        contentType: "text/html",
+        content: "<td>Конверсия</td><td>17%</td>",
+      };
+    };
+    await answerUnboundQuestion({
+      chatId: -500,
+      topicId: 77,
+      messageId: 11,
+      senderId: 999,
+      text: "@summing_bot, откуда взялась эта цифра?",
+      hasAttachment: false,
+      context: [],
+      report: {
+        projectId: "summing",
+        workspaceId: "repo",
+        jobId: "report-job",
+        scheduleId: "report-schedule",
+        text: "Утренний отчёт готов.",
+        fileName: "report.html",
+      },
+    });
+    const reportThreadOptions = threadOptions as Record<string, unknown>;
+    assert.equal(reportThreadOptions.readOnly, true);
+    assert.equal(reportThreadOptions.workspaceAccess, true);
+    assert.deepEqual(reportThreadOptions.readableRoots, [realpathSync(staticPath)]);
+    assert.ok((reportThreadOptions.deniedPaths as string[]).includes(".summing-runtime"));
+    assert.match(turnPrompt, /read-only Project context for this question only/);
+    assert.match(turnPrompt, /does not bind this Telegram topic/);
+    assert.doesNotMatch(turnPrompt, /permanent read-only observer table/);
+    assert.match(turnPrompt, /"projectId": "summing"/);
+    assert.match(turnPrompt, /"jobId": "report-job"/);
+    assert.match(turnPrompt, /Конверсия/);
+    assert.match(turnPrompt, /17%/);
+    assert.match(turnPrompt, /откуда взялась эта цифра/);
+
     replies.length = 0;
     runtime.codex.startThread = async () => {
       throw new Error("thread/start did not preserve any runtime workspace roots");
@@ -1007,7 +1104,7 @@ test("explicit questions in unbound topics run without Project access", async ()
     await answerUnboundQuestion({
       chatId: -500,
       topicId: 77,
-      messageId: 11,
+      messageId: 12,
       senderId: 999,
       text: "@summing_bot, что решили?",
       hasAttachment: false,
@@ -1017,10 +1114,10 @@ test("explicit questions in unbound topics run without Project access", async ()
       {
         chatId: -500,
         text: "Не удалось ответить. Попробуйте ещё раз позже.",
-        options: { topicId: 77, replyTo: 11 },
+        options: { topicId: 77, replyTo: 12 },
       },
     ]);
-    assert.equal(knowledgeContextLookups, 1);
+    assert.equal(knowledgeContextLookups, 2);
   } finally {
     runtime.requestStop();
     runtime.state.close();
