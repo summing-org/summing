@@ -9,7 +9,9 @@ test("administrator Mini App separates projects, topic bindings and global setti
   assert.match(ADMIN_HTML, /id="primaryOwnerId"/);
   assert.match(ADMIN_HTML, /id="topicSearch"/);
   assert.match(ADMIN_HTML, /id="userCount"/);
-  assert.match(ADMIN_HTML, /Привязки топиков/);
+  assert.match(ADMIN_HTML, /<button id="bindingsTab"[^>]*>Telegram<\/button>/);
+  assert.match(ADMIN_HTML, /<h1>Telegram<\/h1>/);
+  assert.doesNotMatch(ADMIN_HTML, /Привязки топиков/);
   assert.match(ADMIN_HTML, /один основной рабочий топик/);
   assert.match(ADMIN_HTML, /read-only топиков-наблюдателей/);
   assert.match(ADMIN_HTML, /Доставка наблюдателям/);

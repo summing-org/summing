@@ -18,7 +18,7 @@ export const ADMIN_HTML = `<!doctype html>
   </header>
   <nav class="admin-tabs" role="tablist" aria-label="Разделы Admin Mini App">
     <button id="projectsTab" type="button" role="tab" data-admin-section="projects" aria-controls="projectsPanel" aria-selected="true" class="active">Проекты</button>
-    <button id="bindingsTab" type="button" role="tab" data-admin-section="bindings" aria-controls="bindingsPanel" aria-selected="false">Привязки топиков</button>
+    <button id="bindingsTab" type="button" role="tab" data-admin-section="bindings" aria-controls="bindingsPanel" aria-selected="false">Telegram</button>
     <button id="knowledgeTab" type="button" role="tab" data-admin-section="knowledge" aria-controls="knowledgePanel" aria-selected="false">База знаний</button>
     <button id="systemTab" type="button" role="tab" data-admin-section="system" aria-controls="systemPanel" aria-selected="false">Система</button>
   </nav>
@@ -62,10 +62,10 @@ export const ADMIN_HTML = `<!doctype html>
     <section class="hero">
       <div>
         <span class="eyebrow">TELEGRAM ROUTING</span>
-        <h1>Привязки топиков</h1>
+        <h1>Telegram</h1>
         <p>Связывайте Telegram-топики с проектами и следите за наблюдаемой активностью участников.</p>
       </div>
-      <dl class="metrics binding-metrics" aria-label="Сводка привязок топиков">
+      <dl class="metrics binding-metrics" aria-label="Сводка Telegram">
         <div><dt id="topicCount">—</dt><dd>топиков</dd></div>
         <div><dt id="bindingCount">—</dt><dd>привязано</dd></div>
         <div><dt id="userCount">—</dt><dd>пользователей</dd></div>
