@@ -3,7 +3,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { KnowledgeSyncStore } from "../src/knowledge-sync-store.js";
+import {
+  GROUP_CONSENT_TELEGRAM_USER_ID,
+  KnowledgeSyncStore,
+} from "../src/knowledge-sync-store.js";
 
 test("knowledge sync persists checkpoints, consent, stages, jobs and one completion outbox item", () => {
   const root = mkdtempSync(join(tmpdir(), "summing-sync-store-"));
@@ -102,6 +105,114 @@ test("knowledge sync persists checkpoints, consent, stages, jobs and one complet
     assert.equal(store.checkpoint("source-1")?.fromMessageId, 555);
     assert.deepEqual(store.consentSummary(), { granted: 1, revoked: 0, sources: 1 });
     assert.equal(store.claimOutbox(10, 200).length, 0);
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("group consent admits unknown authors while individual revocation remains authoritative", () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-sync-group-consent-"));
+  const store = new KnowledgeSyncStore(join(root, "core.sqlite"));
+  try {
+    store.grantConsent({
+      sourceId: "source",
+      telegramUserId: GROUP_CONSENT_TELEGRAM_USER_ID,
+      proof: "signed group agreement",
+      historicalFrom: 50,
+    });
+    assert.equal(store.groupConsentGranted("source"), true);
+    assert.equal(store.consentGranted("source", 999, 60), true);
+    assert.equal(store.consentGranted("source", 999, 40), false);
+    store.recordContentObject({
+      sha256: "d".repeat(64),
+      objectKey: `summing/sha256/dd/${"d".repeat(64)}`,
+      size: 12,
+      mimeType: "application/pdf",
+      fileName: "group.pdf",
+      backend: "s3",
+      sourceId: "source",
+      refType: "telegram_attachment",
+      refId: "source:999:1",
+      telegramUserId: 999,
+    });
+    assert.equal(store.contentObjectModelEgressAllowed("d".repeat(64)), true);
+    store.revokeConsent("source", 999, 70);
+    assert.equal(store.consentGranted("source", 999, 80), false);
+    assert.equal(store.consentGranted("source", 998, 80), true);
+    assert.equal(store.contentObjectModelEgressAllowed("d".repeat(64)), false);
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("history recovery preserves skipped-author audit while reducing the unresolved remainder", () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-sync-history-recovery-"));
+  const store = new KnowledgeSyncStore(join(root, "core.sqlite"));
+  const connectorId = "12121212-1212-4212-8212-121212121212";
+  try {
+    store.createConnector({
+      id: connectorId,
+      apiId: 1,
+      encryptedApiHash: "encrypted",
+      phoneMask: "***",
+      databaseDirectory: join(root, "tdlib"),
+    });
+    store.updateConnector(connectorId, "ready");
+    store.bindSource({ sourceId: "source", connectorId, telegramChatId: -100, title: "T" });
+    store.startSync("source", connectorId);
+    assert.equal(store.recordUnknownAuthor("source", 77, 10), true);
+    assert.equal(store.recordUnknownAuthor("source", 77, 11), false);
+    store.incrementProgress("source", { discovered: 2, skipped: 2, unknownAuthors: 1 });
+    store.requestHistoryRecovery("source", 20);
+    store.startHistoryRecovery("source", 21);
+    store.recordRecoveredMessage("source", 77, 22);
+
+    let status = store.syncStatus("source")!;
+    assert.equal(status.counters.accepted, 1);
+    assert.equal(status.counters.skipped, 1);
+    assert.equal(status.counters.unknownAuthors, 1);
+    assert.equal(status.skippedByAuthor.items[0]?.messageCount, 1);
+    assert.equal(status.historyRecovery?.recoveredMessages, 1);
+
+    store.recordRecoveredMessage("source", 77, 23);
+    store.finishHistoryRecovery("source", 24);
+    status = store.syncStatus("source")!;
+    assert.equal(status.counters.discovered, 2);
+    assert.equal(status.counters.accepted, 2);
+    assert.equal(status.counters.skipped, 0);
+    assert.equal(status.counters.unknownAuthors, 0);
+    assert.deepEqual(status.skippedByAuthor.items, []);
+    assert.equal(status.historyRecovery?.state, "succeeded");
+    assert.equal(status.historyRecovery?.recoveredMessages, 2);
+    assert.equal(store.recordUnknownAuthor("source", 77, 30), true);
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("running history recovery resumes from its durable checkpoint after restart", () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-sync-history-restart-"));
+  const path = join(root, "core.sqlite");
+  let store = new KnowledgeSyncStore(path);
+  try {
+    store.requestHistoryRecovery("source", 10);
+    store.startHistoryRecovery("source", 11);
+    store.updateHistoryRecoveryCheckpoint("source", 456, 12);
+    store.close();
+    store = new KnowledgeSyncStore(path);
+    assert.deepEqual(store.historyRecovery("source"), {
+      sourceId: "source",
+      state: "queued",
+      fromMessageId: 456,
+      recoveredMessages: 0,
+      lastError: "resuming after process restart",
+      requestedAt: 10,
+      updatedAt: store.historyRecovery("source")!.updatedAt,
+      completedAt: null,
+    });
   } finally {
     store.close();
     rmSync(root, { recursive: true, force: true });

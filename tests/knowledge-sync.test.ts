@@ -74,7 +74,7 @@ test("Team Space export returns one recovery key and persists only its wrapped e
   }
 });
 
-test("group consent grants every observed human and applies to every Telegram topic", async () => {
+test("signed group consent covers historical and future authors across every Telegram topic", async () => {
   const root = mkdtempSync(join(tmpdir(), "summing-group-consent-"));
   const state = new StateStore(join(root, "state.sqlite3"));
   const service = new KnowledgeSyncService(
@@ -125,11 +125,17 @@ test("group consent grants every observed human and applies to every Telegram to
     }), {
       sourceId: StateStore.teamSourceId("telegram", "-100500", "0"),
       chatId: -100500,
-      granted: 2,
-      newlyGranted: 2,
-      alreadyGranted: 0,
-      telegramUserIds: [42, 43],
+      coverage: "all-authors",
+      status: "granted",
+      historicalFrom: 100,
+      newlyGranted: true,
+      observedUsers: 2,
+      historyRecovery: "not-needed",
     });
+    assert.equal(
+      service.store.groupConsent(StateStore.teamSourceId("telegram", "-100500", "0"))?.proof,
+      "customer contracts",
+    );
     assert.equal(service.store.consent(topic.id, 42), null);
     assert.equal(
       service.consentScopeGrantedForSource(topic.id, 42, "model_egress", 150),
@@ -141,8 +147,199 @@ test("group consent grants every observed human and applies to every Telegram to
     );
     assert.equal(
       service.consentScopeGrantedForSource(topic.id, 123, "model_egress", 170),
+      true,
+    );
+    assert.equal(
+      service.consentScopeGrantedForSource(topic.id, 999, "model_egress", 170),
+      true,
+    );
+    await service.revokeConsent(-100500, 42);
+    assert.equal(
+      service.consentScopeGrantedForSource(topic.id, 42, "model_egress", 170),
       false,
     );
+  } finally {
+    await service.close();
+    state.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("group consent admits unknown authors and senderless service history immediately", async () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-group-backfill-"));
+  const state = new StateStore(join(root, "state.sqlite3"));
+  const service = new KnowledgeSyncService(
+    { ...enabledConfig(root), enabled: false },
+    state,
+    "",
+    async () => {},
+    root,
+    1,
+  );
+  const connectorId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const chatId = -100800;
+  const sourceId = StateStore.teamSourceId("telegram", String(chatId), "0");
+  try {
+    state.recordTelegramChat({
+      chatId,
+      type: "supergroup",
+      title: "Signed group",
+      isForum: false,
+    });
+    service.grantGroupConsent({ chatId, proof: "signed group appendix" });
+    service.store.createConnector({
+      id: connectorId,
+      apiId: 123,
+      encryptedApiHash: "encrypted",
+      phoneMask: "+79***1234",
+      databaseDirectory: join(root, "tdlib"),
+      now: 100,
+    });
+    service.store.updateConnector(connectorId, "ready");
+    const binding = service.store.bindSource({
+      sourceId,
+      connectorId,
+      telegramChatId: chatId,
+      title: "Signed group",
+      now: 101,
+    });
+    service.store.startSync(sourceId, connectorId, 102);
+    const processMessage = (service as unknown as {
+      processMessage: (
+        source: typeof binding,
+        message: Record<string, unknown>,
+        kind: "message" | "edit",
+      ) => Promise<void>;
+    }).processMessage.bind(service);
+    await processMessage(binding, {
+      chat_id: chatId,
+      id: 10,
+      date: 50,
+      sender_id: { _: "messageSenderUser", user_id: 999 },
+      content: { _: "messageText", text: { text: "Previously unseen author" } },
+    }, "message");
+    await processMessage(binding, {
+      chat_id: chatId,
+      id: 9,
+      date: 40,
+      sender_id: {},
+      content: { _: "messageChatAddMembers" },
+    }, "message");
+
+    const status = service.store.syncStatus(sourceId)!;
+    assert.equal(status.groupConsent.granted, true);
+    assert.equal(status.counters.discovered, 2);
+    assert.equal(status.counters.accepted, 2);
+    assert.equal(status.counters.skipped, 0);
+    assert.deepEqual(status.unknownAuthorIds, []);
+    const source = state.teamSource(sourceId)!;
+    const events = state.teamEventsAfter(source.spaceId, 0, 10);
+    assert.deepEqual(events.map((event) => ({
+      id: event.externalEventId,
+      kind: event.eventKind,
+      sender: event.senderExternalId,
+    })), [
+      { id: "10", kind: "message", sender: "999" },
+      { id: "9", kind: "service", sender: String(chatId) },
+    ]);
+  } finally {
+    await service.close();
+    state.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("granting signed group consent runs a durable recovery backfill for existing skips", async () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-group-recovery-"));
+  const state = new StateStore(join(root, "state.sqlite3"));
+  const config = enabledConfig(root);
+  writeFileSync(config.mtprotoMasterKeyPath, randomBytes(32), { mode: 0o600 });
+  const service = new KnowledgeSyncService(config, state, "", async () => {}, root, 1);
+  const connectorId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  const chatId = -100900;
+  const sourceId = StateStore.teamSourceId("telegram", String(chatId), "0");
+  try {
+    state.recordTelegramChat({
+      chatId,
+      type: "supergroup",
+      title: "Recovery group",
+      isForum: false,
+    });
+    service.store.createConnector({
+      id: connectorId,
+      apiId: 123,
+      encryptedApiHash: "encrypted",
+      phoneMask: "+79***1234",
+      databaseDirectory: join(root, "tdlib"),
+      now: 100,
+    });
+    service.store.updateConnector(connectorId, "ready");
+    await assert.rejects(
+      service.startSource({ chatId, connectorId }),
+      /signed group consent/,
+    );
+    service.store.bindSource({
+      sourceId,
+      connectorId,
+      telegramChatId: chatId,
+      title: "Recovery group",
+      now: 101,
+    });
+    service.store.startSync(sourceId, connectorId, 102);
+    service.store.recordUnknownAuthor(sourceId, 777, 50);
+    service.store.incrementProgress(sourceId, {
+      discovered: 2,
+      skipped: 2,
+      unknownAuthors: 1,
+    }, 50, 103);
+    service.store.markCollected(sourceId, 104);
+    const pages = new Map<number, Record<string, unknown>[]>([
+      [0, [
+        {
+          chat_id: chatId,
+          id: 10,
+          date: 50,
+          sender_id: { _: "messageSenderUser", user_id: 777 },
+          content: { _: "messageText", text: { text: "Recovered author message" } },
+        },
+        {
+          chat_id: chatId,
+          id: 9,
+          date: 40,
+          sender_id: {},
+          content: { _: "messageChatSetTheme" },
+        },
+      ]],
+      [9, []],
+    ]);
+    const mtproto = service.mtproto! as unknown as {
+      invokeHistory: (
+        connector: string,
+        request: Record<string, unknown>,
+      ) => Promise<Record<string, unknown>>;
+    };
+    mtproto.invokeHistory = async (_connector, request) => ({
+      messages: pages.get(Number(request.from_message_id ?? 0)) ?? [],
+    });
+
+    const consent = service.grantGroupConsent({
+      chatId,
+      proof: "signed group recovery agreement",
+    });
+    assert.equal(consent.historyRecovery, "running");
+    const internals = service as unknown as {
+      historyRecoveries: Map<string, Promise<void>>;
+    };
+    await Promise.all(internals.historyRecoveries.values());
+
+    const status = service.store.syncStatus(sourceId)!;
+    assert.equal(status.counters.discovered, 2);
+    assert.equal(status.counters.accepted, 2);
+    assert.equal(status.counters.skipped, 0);
+    assert.equal(status.counters.unknownAuthors, 0);
+    assert.equal(status.historyRecovery?.state, "succeeded");
+    assert.equal(status.historyRecovery?.recoveredMessages, 2);
+    assert.deepEqual(status.skippedByAuthor.items, []);
   } finally {
     await service.close();
     state.close();

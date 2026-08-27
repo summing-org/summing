@@ -23,6 +23,8 @@ test("administrator Mini App separates projects, topic bindings and global setti
   assert.match(ADMIN_HTML, /data-admin-section="knowledge"/);
   assert.match(ADMIN_HTML, /id="connectorForm"/);
   assert.match(ADMIN_HTML, /id="consentFrom"/);
+  assert.match(ADMIN_HTML, /согласие всей группы/i);
+  assert.match(ADMIN_HTML, /Пустая дата означает всю доступную историю/);
   assert.match(ADMIN_HTML, /id="sourceSyncForm"/);
   assert.match(ADMIN_HTML, /Перенести Team Space/);
   assert.match(ADMIN_HTML, /id="exportSpace"/);
@@ -75,6 +77,8 @@ test("administrator Mini App separates projects, topic bindings and global setti
   assert.match(ADMIN_JS, /status\.skippedByAuthor/);
   assert.match(ADMIN_JS, /МЕДИА ОШИБКИ/);
   assert.match(ADMIN_JS, /before-history-boundary/);
+  assert.match(ADMIN_JS, /history recovery/);
+  assert.match(ADMIN_JS, /восстановление истории запущено/);
   assert.match(ADMIN_JS, /state!=="paused"&&status\.collector\.state!=="failed"/);
   assert.match(ADMIN_JS, /deploymentActive/);
   assert.match(ADMIN_JS, /renderDeploymentFailure/);

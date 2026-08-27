@@ -13,6 +13,7 @@ export type CollectorState =
 export type SyncStageName = "media" | "extraction" | "fts" | "embeddings" | "knowledge";
 export type SyncStageState = "pending" | "running" | "ready" | "degraded" | "failed";
 export type ConsentStatus = "granted" | "revoked";
+export const GROUP_CONSENT_TELEGRAM_USER_ID = 0;
 export type KnowledgeTransferKind = "export" | "import";
 export type KnowledgeTransferMode = "manifest" | "portable";
 export type KnowledgeTransferState =
@@ -21,6 +22,7 @@ export type KnowledgeTransferState =
   | "awaiting_confirmation"
   | "succeeded"
   | "failed";
+export type HistoryRecoveryState = "queued" | "running" | "succeeded" | "failed";
 
 export interface KnowledgeTransferRecord {
   id: string;
@@ -118,6 +120,17 @@ export interface SkippedAuthorBreakdown {
   items: SkippedAuthorStatus[];
 }
 
+export interface HistoryRecoveryStatus {
+  sourceId: string;
+  state: HistoryRecoveryState;
+  fromMessageId: number;
+  recoveredMessages: number;
+  lastError: string;
+  requestedAt: number;
+  updatedAt: number;
+  completedAt: number | null;
+}
+
 export interface SyncStatus {
   sourceId: string;
   connectorId: string;
@@ -142,6 +155,12 @@ export interface SyncStatus {
     lagSeconds: number | null;
   };
   counters: SyncCounters;
+  groupConsent: {
+    granted: boolean;
+    scope: string[];
+    historicalFrom: number | null;
+  };
+  historyRecovery: HistoryRecoveryStatus | null;
   unknownAuthorIds: number[];
   skippedByAuthor: SkippedAuthorBreakdown;
   stages: Record<SyncStageName, SyncStageStatus>;
@@ -336,7 +355,18 @@ export class KnowledgeSyncStore {
         first_seen_at REAL NOT NULL,
         last_seen_at REAL NOT NULL,
         message_count INTEGER NOT NULL DEFAULT 1,
+        recovered_count INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY(source_id, telegram_user_id)
+      );
+      CREATE TABLE IF NOT EXISTS team_sync_history_recovery (
+        source_id TEXT PRIMARY KEY,
+        state TEXT NOT NULL CHECK(state IN ('queued','running','succeeded','failed')),
+        from_message_id INTEGER NOT NULL DEFAULT 0,
+        recovered_count INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT NOT NULL DEFAULT '',
+        requested_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        completed_at REAL
       );
       CREATE TABLE IF NOT EXISTS team_event_revisions (
         source_id TEXT NOT NULL,
@@ -495,9 +525,21 @@ export class KnowledgeSyncStore {
     if (!runColumns.some((column) => column.name === "last_live_event_at")) {
       this.db.exec("ALTER TABLE team_sync_runs ADD COLUMN last_live_event_at REAL");
     }
+    const unknownAuthorColumns = this.db.prepare(
+      "PRAGMA table_info(team_sync_unknown_authors)",
+    ).all() as Row[];
+    if (!unknownAuthorColumns.some((column) => column.name === "recovered_count")) {
+      this.db.exec(`
+        ALTER TABLE team_sync_unknown_authors
+        ADD COLUMN recovered_count INTEGER NOT NULL DEFAULT 0
+      `);
+    }
     this.db.exec(`
       UPDATE team_ingestion_jobs SET state = 'pending' WHERE state = 'running';
       UPDATE team_sync_outbox SET state = 'pending' WHERE state = 'sending';
+      UPDATE team_sync_history_recovery SET state = 'queued',
+        last_error = 'resuming after process restart', updated_at = unixepoch('subsec')
+      WHERE state = 'running';
       UPDATE knowledge_transfers
       SET state = 'queued', last_error = 'resuming after process restart',
           completed_at = NULL, updated_at = unixepoch('subsec')
@@ -744,16 +786,21 @@ export class KnowledgeSyncStore {
         for (const author of unknownAuthors) {
           this.db.prepare(`
             INSERT INTO team_sync_unknown_authors
-              (source_id, telegram_user_id, first_seen_at, last_seen_at, message_count)
-            VALUES (?, ?, ?, ?, ?)
+              (source_id, telegram_user_id, first_seen_at, last_seen_at,
+               message_count, recovered_count)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(source_id, telegram_user_id) DO UPDATE SET
               first_seen_at = MIN(team_sync_unknown_authors.first_seen_at, excluded.first_seen_at),
               last_seen_at = MAX(team_sync_unknown_authors.last_seen_at, excluded.last_seen_at),
-              message_count = MAX(team_sync_unknown_authors.message_count, excluded.message_count)
+              message_count = MAX(team_sync_unknown_authors.message_count, excluded.message_count),
+              recovered_count = MAX(
+                team_sync_unknown_authors.recovered_count,
+                excluded.recovered_count
+              )
           `).run(
             sqlValue(author.source_id), sqlValue(author.telegram_user_id),
             sqlValue(author.first_seen_at), sqlValue(author.last_seen_at),
-            sqlValue(author.message_count),
+            sqlValue(author.message_count), Number(author.recovered_count ?? 0),
           );
         }
 
@@ -1128,9 +1175,13 @@ export class KnowledgeSyncStore {
 
   revokeConsent(sourceId: string, telegramUserId: number, now = Date.now() / 1_000): void {
     this.db.prepare(`
-      UPDATE team_consents SET status = 'revoked', revoked_at = ?, updated_at = ?
-      WHERE source_id = ? AND telegram_user_id = ?
-    `).run(now, now, sourceId, telegramUserId);
+      INSERT INTO team_consents
+        (source_id, telegram_user_id, status, scope_json, granted_at, historical_from,
+         proof, revoked_at, updated_at)
+      VALUES (?, ?, 'revoked', '[]', ?, NULL, '', ?, ?)
+      ON CONFLICT(source_id, telegram_user_id) DO UPDATE SET status = 'revoked',
+        revoked_at = excluded.revoked_at, updated_at = excluded.updated_at
+    `).run(sourceId, telegramUserId, now, now, now);
   }
 
   consent(sourceId: string, telegramUserId: number): TeamConsentRecord | null {
@@ -1140,16 +1191,37 @@ export class KnowledgeSyncStore {
     return row ? this.toConsent(row) : null;
   }
 
-  consentGranted(sourceId: string, telegramUserId: number, occurredAt?: number): boolean {
-    const item = this.consent(sourceId, telegramUserId);
+  groupConsent(sourceId: string): TeamConsentRecord | null {
+    return this.consent(sourceId, GROUP_CONSENT_TELEGRAM_USER_ID);
+  }
+
+  private consentAllows(
+    item: TeamConsentRecord | null,
+    scopes: string[],
+    occurredAt?: number,
+  ): boolean {
     return Boolean(
       item &&
       item.status === "granted" &&
-      item.scope.includes("history") &&
-      item.scope.includes("future") &&
-      item.scope.includes("model_egress") &&
+      scopes.every((scope) => item.scope.includes(scope)) &&
       (item.historicalFrom === null || occurredAt === undefined || occurredAt >= item.historicalFrom),
     );
+  }
+
+  groupConsentGranted(sourceId: string, occurredAt?: number): boolean {
+    return this.consentAllows(
+      this.groupConsent(sourceId),
+      ["history", "future", "model_egress"],
+      occurredAt,
+    );
+  }
+
+  consentGranted(sourceId: string, telegramUserId: number, occurredAt?: number): boolean {
+    const individual = this.consent(sourceId, telegramUserId);
+    if (individual?.status === "revoked") return false;
+    const scopes = ["history", "future", "model_egress"];
+    return this.consentAllows(individual, scopes, occurredAt) ||
+      this.consentAllows(this.groupConsent(sourceId), scopes, occurredAt);
   }
 
   consentScopeGranted(
@@ -1158,13 +1230,10 @@ export class KnowledgeSyncStore {
     scope: "history" | "future" | "model_egress",
     occurredAt?: number,
   ): boolean {
-    const item = this.consent(sourceId, telegramUserId);
-    return Boolean(
-      item &&
-      item.status === "granted" &&
-      item.scope.includes(scope) &&
-      (item.historicalFrom === null || occurredAt === undefined || occurredAt >= item.historicalFrom),
-    );
+    const individual = this.consent(sourceId, telegramUserId);
+    if (individual?.status === "revoked") return false;
+    return this.consentAllows(individual, [scope], occurredAt) ||
+      this.consentAllows(this.groupConsent(sourceId), [scope], occurredAt);
   }
 
   listConsents(sourceId: string): TeamConsentRecord[] {
@@ -1191,7 +1260,7 @@ export class KnowledgeSyncStore {
   recordUnknownAuthor(sourceId: string, telegramUserId: number, occurredAt: number): boolean {
     const existing = this.db.prepare(`
       SELECT 1 AS found FROM team_sync_unknown_authors
-      WHERE source_id = ? AND telegram_user_id = ?
+      WHERE source_id = ? AND telegram_user_id = ? AND message_count > recovered_count
     `).get(sourceId, telegramUserId);
     const result = this.db.prepare(`
       INSERT INTO team_sync_unknown_authors
@@ -1203,11 +1272,135 @@ export class KnowledgeSyncStore {
     return !existing && Number(result.changes) > 0;
   }
 
-  resolveUnknownAuthor(sourceId: string, telegramUserId: number): boolean {
-    const result = this.db.prepare(`
-      DELETE FROM team_sync_unknown_authors WHERE source_id = ? AND telegram_user_id = ?
-    `).run(sourceId, telegramUserId);
-    return Number(result.changes) > 0;
+  requestHistoryRecovery(sourceId: string, now = Date.now() / 1_000): HistoryRecoveryStatus {
+    const existing = this.historyRecovery(sourceId);
+    if (existing?.state === "queued" || existing?.state === "running") return existing;
+    this.db.prepare(`
+      INSERT INTO team_sync_history_recovery
+        (source_id, state, from_message_id, recovered_count, requested_at, updated_at)
+      VALUES (?, 'queued', 0, 0, ?, ?)
+      ON CONFLICT(source_id) DO UPDATE SET state = 'queued', from_message_id = 0,
+        recovered_count = 0, last_error = '', requested_at = excluded.requested_at,
+        updated_at = excluded.updated_at, completed_at = NULL
+    `).run(sourceId, now, now);
+    return this.historyRecovery(sourceId)!;
+  }
+
+  historyRecovery(sourceId: string): HistoryRecoveryStatus | null {
+    const row = this.db.prepare(`
+      SELECT * FROM team_sync_history_recovery WHERE source_id = ?
+    `).get(sourceId) as Row | undefined;
+    return row ? {
+      sourceId: String(row.source_id),
+      state: String(row.state) as HistoryRecoveryState,
+      fromMessageId: Number(row.from_message_id),
+      recoveredMessages: Number(row.recovered_count),
+      lastError: String(row.last_error),
+      requestedAt: Number(row.requested_at),
+      updatedAt: Number(row.updated_at),
+      completedAt: row.completed_at === null ? null : Number(row.completed_at),
+    } : null;
+  }
+
+  pendingHistoryRecoveries(): HistoryRecoveryStatus[] {
+    return (this.db.prepare(`
+      SELECT source_id FROM team_sync_history_recovery
+      WHERE state IN ('queued','running') ORDER BY requested_at, source_id
+    `).all() as Row[]).flatMap((row) => {
+      const recovery = this.historyRecovery(String(row.source_id));
+      return recovery ? [recovery] : [];
+    });
+  }
+
+  startHistoryRecovery(sourceId: string, now = Date.now() / 1_000): void {
+    this.db.prepare(`
+      UPDATE team_sync_history_recovery SET state = 'running', last_error = '', updated_at = ?
+      WHERE source_id = ?
+    `).run(now, sourceId);
+  }
+
+  deferHistoryRecovery(sourceId: string, now = Date.now() / 1_000): void {
+    this.db.prepare(`
+      UPDATE team_sync_history_recovery SET state = 'queued', updated_at = ?
+      WHERE source_id = ? AND state = 'running'
+    `).run(now, sourceId);
+  }
+
+  updateHistoryRecoveryCheckpoint(
+    sourceId: string,
+    fromMessageId: number,
+    now = Date.now() / 1_000,
+  ): void {
+    this.db.prepare(`
+      UPDATE team_sync_history_recovery SET from_message_id = ?, updated_at = ?
+      WHERE source_id = ?
+    `).run(fromMessageId, now, sourceId);
+  }
+
+  finishHistoryRecovery(sourceId: string, now = Date.now() / 1_000): void {
+    this.db.prepare(`
+      UPDATE team_sync_history_recovery SET state = 'succeeded', last_error = '',
+        completed_at = ?, updated_at = ? WHERE source_id = ?
+    `).run(now, now, sourceId);
+  }
+
+  failHistoryRecovery(sourceId: string, error: string, now = Date.now() / 1_000): void {
+    this.db.prepare(`
+      UPDATE team_sync_history_recovery SET state = 'failed', last_error = ?, updated_at = ?
+      WHERE source_id = ?
+    `).run(error.slice(0, 1_000), now, sourceId);
+  }
+
+  recordRecoveredMessage(
+    sourceId: string,
+    telegramUserId: number | null,
+    now = Date.now() / 1_000,
+  ): void {
+    this.transaction(() => {
+      const run = this.latestRun(sourceId);
+      if (!run) throw new Error(`sync run is missing for ${sourceId}`);
+      const author = telegramUserId === null ? undefined : this.db.prepare(`
+        SELECT message_count, recovered_count FROM team_sync_unknown_authors
+        WHERE source_id = ? AND telegram_user_id = ?
+      `).get(sourceId, telegramUserId) as Row | undefined;
+      const authorWasSkipped = Boolean(
+        author && Number(author.recovered_count) < Number(author.message_count),
+      );
+      const unresolved = this.db.prepare(`
+        SELECT COALESCE(SUM(message_count - recovered_count), 0) AS count
+        FROM team_sync_unknown_authors
+        WHERE source_id = ? AND message_count > recovered_count
+      `).get(sourceId) as Row;
+      const unattributed = Math.max(
+        0,
+        Number(run.skipped_count ?? 0) - Number(unresolved.count ?? 0),
+      );
+      const wasSkipped = authorWasSkipped || unattributed > 0;
+      this.db.prepare(`
+        UPDATE team_sync_runs SET accepted_count = accepted_count + 1,
+          discovered_count = discovered_count + ?,
+          skipped_count = MAX(0, skipped_count - ?), updated_at = ? WHERE id = ?
+      `).run(wasSkipped ? 0 : 1, wasSkipped ? 1 : 0, now, Number(run.id));
+      if (telegramUserId !== null) {
+        if (author && Number(author.recovered_count) < Number(author.message_count)) {
+          const remaining = Number(author.message_count) - Number(author.recovered_count);
+          this.db.prepare(`
+            UPDATE team_sync_unknown_authors SET recovered_count = recovered_count + 1
+            WHERE source_id = ? AND telegram_user_id = ?
+          `).run(sourceId, telegramUserId);
+          if (remaining === 1) {
+            this.db.prepare(`
+              UPDATE team_sync_runs SET unknown_authors = MAX(0, unknown_authors - 1)
+              WHERE id = ?
+            `).run(Number(run.id));
+          }
+        }
+      }
+      this.db.prepare(`
+        UPDATE team_sync_history_recovery SET recovered_count = recovered_count + 1,
+          updated_at = ? WHERE source_id = ?
+      `).run(now, sourceId);
+    });
   }
 
   recordRevision(input: {
@@ -1773,13 +1966,20 @@ export class KnowledgeSyncStore {
     return (this.db.prepare(`
       SELECT r.source_id, r.telegram_user_id, r.ref_type, r.ref_id, r.metadata_json
       FROM content_object_refs r
-      WHERE r.sha256 = ? AND EXISTS (
-        SELECT 1 FROM team_consents c, json_each(c.scope_json) scope
-        WHERE c.source_id = r.source_id
-          AND c.telegram_user_id = r.telegram_user_id
-          AND c.status = 'granted'
-          AND scope.value = 'model_egress'
-      )
+      WHERE r.sha256 = ?
+        AND NOT EXISTS (
+          SELECT 1 FROM team_consents denied
+          WHERE denied.source_id = r.source_id
+            AND denied.telegram_user_id = r.telegram_user_id
+            AND denied.status = 'revoked'
+        )
+        AND EXISTS (
+          SELECT 1 FROM team_consents c, json_each(c.scope_json) scope
+          WHERE c.source_id = r.source_id
+            AND c.telegram_user_id IN (r.telegram_user_id, 0)
+            AND c.status = 'granted'
+            AND scope.value = 'model_egress'
+        )
       ORDER BY r.id
     `).all(sha256) as Row[]).map((row) => ({
       sourceId: String(row.source_id),
@@ -1793,10 +1993,15 @@ export class KnowledgeSyncStore {
   contentObjectModelEgressAllowed(sha256: string): boolean {
     const row = this.db.prepare(`
       SELECT COUNT(*) AS ref_count,
-        SUM(CASE WHEN EXISTS (
+        SUM(CASE WHEN NOT EXISTS (
+          SELECT 1 FROM team_consents denied
+          WHERE denied.source_id = r.source_id
+            AND denied.telegram_user_id = r.telegram_user_id
+            AND denied.status = 'revoked'
+        ) AND EXISTS (
           SELECT 1 FROM team_consents c, json_each(c.scope_json) scope
           WHERE c.source_id = r.source_id
-            AND c.telegram_user_id = r.telegram_user_id
+            AND c.telegram_user_id IN (r.telegram_user_id, 0)
             AND c.status = 'granted'
             AND scope.value = 'model_egress'
         ) THEN 0 ELSE 1 END) AS denied_count
@@ -2153,14 +2358,17 @@ export class KnowledgeSyncStore {
     const lastEventAt = row.last_event_at === null ? null : Number(row.last_event_at);
     const skippedMessages = Number(row.skipped_count ?? 0);
     const skippedAuthorTotals = this.db.prepare(`
-      SELECT COUNT(*) AS author_count, COALESCE(SUM(message_count), 0) AS message_count
-      FROM team_sync_unknown_authors WHERE source_id = ?
+      SELECT COUNT(*) AS author_count,
+        COALESCE(SUM(message_count - recovered_count), 0) AS message_count
+      FROM team_sync_unknown_authors
+      WHERE source_id = ? AND message_count > recovered_count
     `).get(sourceId) as Row;
     const skippedAuthorRows = this.db.prepare(`
-      SELECT telegram_user_id, message_count, first_seen_at, last_seen_at
+      SELECT telegram_user_id, message_count - recovered_count AS message_count,
+        first_seen_at, last_seen_at
       FROM team_sync_unknown_authors
-      WHERE source_id = ?
-      ORDER BY message_count DESC, last_seen_at DESC, telegram_user_id
+      WHERE source_id = ? AND message_count > recovered_count
+      ORDER BY message_count - recovered_count DESC, last_seen_at DESC, telegram_user_id
       LIMIT 100
     `).all(sourceId) as Row[];
     const skippedAuthorCount = Number(skippedAuthorTotals.author_count ?? 0);
@@ -2203,9 +2411,19 @@ export class KnowledgeSyncStore {
         mediaPending: Number(row.media_pending ?? 0),
         mediaFailed: Number(row.media_failed ?? 0),
       },
+      groupConsent: (() => {
+        const consent = this.groupConsent(sourceId);
+        return {
+          granted: this.groupConsentGranted(sourceId),
+          scope: consent?.scope ?? [],
+          historicalFrom: consent?.historicalFrom ?? null,
+        };
+      })(),
+      historyRecovery: this.historyRecovery(sourceId),
       unknownAuthorIds: (this.db.prepare(`
         SELECT telegram_user_id FROM team_sync_unknown_authors
-        WHERE source_id = ? ORDER BY telegram_user_id LIMIT 500
+        WHERE source_id = ? AND message_count > recovered_count
+        ORDER BY telegram_user_id LIMIT 500
       `).all(sourceId) as Row[]).map((author) => Number(author.telegram_user_id)),
       skippedByAuthor: {
         totalAuthors: skippedAuthorCount,

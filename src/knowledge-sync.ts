@@ -10,6 +10,7 @@ import {
   type SearchHit,
 } from "./knowledge-search.js";
 import {
+  GROUP_CONSENT_TELEGRAM_USER_ID,
   KnowledgeSyncStore,
   type IngestionJob,
   type KnowledgeTransferMode,
@@ -282,6 +283,8 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
   readonly transfers: KnowledgeTransferManager;
   readonly mtproto: MtprotoConnectorManager | null;
   private readonly backfills = new Map<string, Promise<void>>();
+  private readonly historyRecoveries = new Map<string, Promise<void>>();
+  private readonly recoveryAfterBackfill = new Set<string>();
   private jobsTimer: NodeJS.Timeout | null = null;
   private outboxTimer: NodeJS.Timeout | null = null;
   private transfersTimer: NodeJS.Timeout | null = null;
@@ -350,6 +353,13 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
     for (const status of this.store.listSyncStatuses()) {
       if (status.collector.state === "backfilling") this.startBackfill(status.sourceId);
     }
+    for (const recovery of this.store.pendingHistoryRecoveries()) {
+      if (this.backfills.has(recovery.sourceId)) {
+        this.recoveryAfterBackfill.add(recovery.sourceId);
+      } else {
+        this.startHistoryRecovery(recovery.sourceId);
+      }
+    }
     if (this.searchIndex.rebuildRequired(this.searchIndexSignature())) {
       this.searchRebuild = this.rebuildDerivedSearch().catch((error) => {
         console.error("knowledge search rebuild failed", error);
@@ -367,6 +377,7 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
     if (this.transfersTimer) clearTimeout(this.transfersTimer);
     await this.mtproto?.close();
     await Promise.allSettled(this.backfills.values());
+    await Promise.allSettled(this.historyRecoveries.values());
     if (this.transfersTask) await this.transfersTask;
     if (this.searchRebuild) await this.searchRebuild;
     this.searchIndex.close();
@@ -392,7 +403,8 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
               isBot: user?.isBot ?? false,
               profileObserved: Boolean(user),
               reason: skippedAuthorReason(
-                this.store.consent(status.sourceId, author.telegramUserId),
+                this.store.consent(status.sourceId, author.telegramUserId) ??
+                  this.store.groupConsent(status.sourceId),
                 author,
               ),
             };
@@ -593,9 +605,6 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
     if (!wasGranted && this.store.hasSyncRun(source.sourceId)) {
       this.store.incrementProgress(source.sourceId, { consentedAuthors: 1 });
     }
-    if (this.store.resolveUnknownAuthor(source.sourceId, input.telegramUserId)) {
-      this.store.incrementProgress(source.sourceId, { unknownAuthors: -1 });
-    }
     const space = this.state.teamSpaceForProvider("telegram", String(input.chatId));
     if (space) {
       this.state.setTeamIdentityObservation(
@@ -605,7 +614,10 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
         true,
       );
     }
-    return { ...consent };
+    const historyRecovery = !wasGranted
+      ? this.requestHistoryRecovery(source.sourceId)
+      : "not-needed";
+    return { ...consent, historyRecovery };
   }
 
   grantGroupConsent(input: {
@@ -617,30 +629,42 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
     const users = this.state.listTelegramChatUsers(input.chatId)
       .filter((user) => !user.isBot)
       .sort((left, right) => left.userId - right.userId);
-    if (users.length === 0) {
-      throw new Error("no observed non-bot Telegram users found in the group");
-    }
     const source = this.rootSource(input.chatId);
-    let newlyGranted = 0;
-    for (const user of users) {
-      if (!this.store.consentGranted(source.sourceId, user.userId)) newlyGranted += 1;
-      this.grantConsent({
-        chatId: input.chatId,
-        telegramUserId: user.userId,
-        proof: input.proof,
-        ...(input.historicalFrom === undefined
-          ? {}
-          : { historicalFrom: input.historicalFrom }),
-      });
-    }
+    const wasGranted = this.store.groupConsentGranted(source.sourceId);
+    const consent = this.store.grantConsent({
+      sourceId: source.sourceId,
+      telegramUserId: GROUP_CONSENT_TELEGRAM_USER_ID,
+      proof: input.proof,
+      historicalFrom: input.historicalFrom ?? null,
+    });
+    const historyRecovery = this.requestHistoryRecovery(source.sourceId);
     return {
       sourceId: source.sourceId,
       chatId: input.chatId,
-      granted: users.length,
-      newlyGranted,
-      alreadyGranted: users.length - newlyGranted,
-      telegramUserIds: users.map((user) => user.userId),
+      coverage: "all-authors",
+      status: consent.status,
+      historicalFrom: consent.historicalFrom,
+      newlyGranted: !wasGranted,
+      observedUsers: users.length,
+      historyRecovery,
     };
+  }
+
+  private requestHistoryRecovery(sourceId: string): string {
+    const status = this.store.syncStatus(sourceId);
+    if (!status || status.counters.skipped === 0) return "not-needed";
+    this.store.requestHistoryRecovery(sourceId);
+    if (status.collector.state === "paused") return "queued-while-paused";
+    if (status.collector.initialCollectedAt === null && !this.backfills.has(sourceId)) {
+      this.store.setCollectorState(sourceId, "backfilling");
+      this.startBackfill(sourceId);
+    }
+    if (this.backfills.has(sourceId)) {
+      this.recoveryAfterBackfill.add(sourceId);
+      return "queued-after-backfill";
+    }
+    this.startHistoryRecovery(sourceId);
+    return "running";
   }
 
   consentGrantedForSource(
@@ -731,12 +755,18 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
       return this.store.syncStatus(source.sourceId)!;
     }
     const knownUsers = this.state.listTelegramChatUsers(input.chatId).filter((user) => !user.isBot);
-    const missing = knownUsers.filter((user) => !this.store.consentGranted(source.sourceId, user.userId));
-    if (missing.length > 0) {
-      throw new Error(`consent is missing for Telegram users: ${missing.map((user) => user.userId).join(", ")}`);
+    if (!this.store.groupConsentGranted(source.sourceId)) {
+      throw new Error(
+        "signed group consent covering history, future events and model egress is required before history sync",
+      );
     }
-    if (this.store.listConsents(source.sourceId).filter((item) => item.status === "granted").length === 0) {
-      throw new Error("at least one explicit author consent is required before history sync");
+    const revoked = this.store.listConsents(source.sourceId)
+      .filter((item) => item.telegramUserId !== GROUP_CONSENT_TELEGRAM_USER_ID)
+      .filter((item) => item.status === "revoked");
+    if (revoked.length > 0) {
+      throw new Error(
+        `history sync is blocked by individual revocations: ${revoked.map((item) => item.telegramUserId).join(", ")}`,
+      );
     }
     const chat = await this.mtproto.invoke(input.connectorId, { _: "getChat", chat_id: input.chatId });
     if (chat.has_protected_content === true) throw new Error("content-protected Telegram groups cannot be synchronized");
@@ -755,11 +785,12 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
       } else {
         this.store.setCollectorState(source.sourceId, "tailing");
       }
+      if (status.counters.skipped > 0) this.requestHistoryRecovery(source.sourceId);
       return this.store.syncStatus(source.sourceId)!;
     }
     this.store.startSync(source.sourceId, input.connectorId);
     this.store.incrementProgress(source.sourceId, {
-      consentedAuthors: this.store.listConsents(source.sourceId).filter((item) => item.status === "granted").length,
+      consentedAuthors: knownUsers.length,
     });
     this.startBackfill(source.sourceId);
     return this.store.syncStatus(source.sourceId)!;
@@ -782,6 +813,14 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
       this.startBackfill(binding.sourceId);
     } else {
       this.store.setCollectorState(binding.sourceId, "tailing");
+    }
+    const recovery = this.store.historyRecovery(binding.sourceId);
+    if (recovery?.state === "queued") {
+      if (this.backfills.has(binding.sourceId)) {
+        this.recoveryAfterBackfill.add(binding.sourceId);
+      } else {
+        this.startHistoryRecovery(binding.sourceId);
+      }
     }
     return this.store.syncStatus(binding.sourceId)!;
   }
@@ -814,8 +853,73 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
         });
         console.error(`Telegram history sync failed for ${sourceId}`, error);
       })
-      .finally(() => this.backfills.delete(sourceId));
+      .finally(() => {
+        this.backfills.delete(sourceId);
+        if (this.recoveryAfterBackfill.delete(sourceId) && !this.stopped) {
+          if (this.store.syncStatus(sourceId)?.collector.initialCollectedAt === null) {
+            this.recoveryAfterBackfill.add(sourceId);
+          } else {
+            this.startHistoryRecovery(sourceId);
+          }
+        }
+      });
     this.backfills.set(sourceId, task);
+  }
+
+  private startHistoryRecovery(sourceId: string): void {
+    if (this.historyRecoveries.has(sourceId) || this.stopped || !this.mtproto) return;
+    const status = this.store.syncStatus(sourceId);
+    if (!status || status.collector.state === "paused") return;
+    const task = this.recoverHistory(sourceId)
+      .catch((error) => {
+        this.store.failHistoryRecovery(sourceId, errorText(error));
+        console.error(`Telegram history recovery failed for ${sourceId}`, error);
+      })
+      .finally(() => this.historyRecoveries.delete(sourceId));
+    this.historyRecoveries.set(sourceId, task);
+  }
+
+  private async recoverHistory(sourceId: string): Promise<void> {
+    if (!this.mtproto) return;
+    const binding = this.store.binding(sourceId);
+    if (!binding) throw new Error("Telegram history recovery source is not bound");
+    const recovery = this.store.historyRecovery(sourceId);
+    if (!recovery) return;
+    this.store.startHistoryRecovery(sourceId);
+    let fromMessageId = recovery.fromMessageId;
+    while (!this.stopped) {
+      const status = this.store.syncStatus(sourceId);
+      if (!status || status.collector.state === "paused") {
+        this.store.deferHistoryRecovery(sourceId);
+        return;
+      }
+      const result = await this.mtproto.invokeHistory(binding.connectorId, {
+        _: "getChatHistory",
+        chat_id: binding.telegramChatId,
+        from_message_id: fromMessageId,
+        offset: 0,
+        limit: 100,
+        only_local: false,
+      });
+      const messages = arrayRecords(result.messages);
+      if (messages.length === 0) {
+        this.store.finishHistoryRecovery(sourceId);
+        this.scheduleKnowledgeRefresh(binding.telegramChatId);
+        this.refreshStages(sourceId, true);
+        this.scheduleJobs(0);
+        return;
+      }
+      for (const message of messages) {
+        await this.processMessage(binding, message, "message", true);
+      }
+      const next = Number(messages.at(-1)?.id ?? 0);
+      if (!next || next === fromMessageId) {
+        throw new Error("Telegram history recovery checkpoint did not advance");
+      }
+      fromMessageId = next;
+      this.store.updateHistoryRecoveryCheckpoint(sourceId, fromMessageId);
+      await new Promise<void>((resolveYield) => setImmediate(resolveYield));
+    }
   }
 
   private async backfill(sourceId: string): Promise<void> {
@@ -856,21 +960,27 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
     binding: { sourceId: string; connectorId: string; telegramChatId: number; title: string },
     message: Record<string, unknown>,
     eventKind: "message" | "edit",
+    recoveringHistory = false,
   ): Promise<void> {
     const chatId = Number(message.chat_id ?? 0);
     if (chatId !== binding.telegramChatId) return;
     const messageId = Number(message.id ?? 0);
     const senderId = tdSenderId(message);
+    const effectiveSenderId = senderId || binding.telegramChatId;
     const occurredAt = Number(message.edit_date ?? message.date ?? 0) || Date.now() / 1_000;
-    this.store.incrementProgress(binding.sourceId, { discovered: 1 }, occurredAt);
-    if (!senderId || !this.store.consentGranted(binding.sourceId, senderId, occurredAt)) {
-      const firstUnknown = senderId
-        ? this.store.recordUnknownAuthor(binding.sourceId, senderId, occurredAt)
-        : false;
-      this.store.incrementProgress(binding.sourceId, {
-        skipped: 1,
-        unknownAuthors: firstUnknown ? 1 : 0,
-      }, occurredAt);
+    if (!recoveringHistory) {
+      this.store.incrementProgress(binding.sourceId, { discovered: 1 }, occurredAt);
+    }
+    if (!this.store.consentGranted(binding.sourceId, effectiveSenderId, occurredAt)) {
+      if (!recoveringHistory) {
+        const firstUnknown = senderId
+          ? this.store.recordUnknownAuthor(binding.sourceId, senderId, occurredAt)
+          : false;
+        this.store.incrementProgress(binding.sourceId, {
+          skipped: 1,
+          unknownAuthors: firstUnknown ? 1 : 0,
+        }, occurredAt);
+      }
       return;
     }
     const attachments = tdAttachments(message);
@@ -892,9 +1002,11 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
       spaceName: binding.title,
       sourceTitle: threadId === "0" ? "general" : `topic ${threadId}`,
       externalEventId,
-      eventKind,
-      senderExternalId: String(senderId),
-      senderDisplayName: `Telegram user ${senderId}`,
+      eventKind: eventKind === "edit" ? "edit" : senderId ? "message" : "service",
+      senderExternalId: String(effectiveSenderId),
+      senderDisplayName: senderId
+        ? `Telegram user ${senderId}`
+        : `Telegram service ${binding.telegramChatId}`,
       text: tdMessageText(message),
       replyToExternalEventId: tdReplyId(message),
       attachments: teamAttachments,
@@ -914,7 +1026,15 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
       teamEventId: event.id,
       occurredAt,
     });
-    if (!inserted) return;
+    if (!inserted) {
+      if (!recoveringHistory) {
+        this.store.incrementProgress(binding.sourceId, { discovered: -1 });
+      }
+      return;
+    }
+    if (recoveringHistory) {
+      this.store.recordRecoveredMessage(binding.sourceId, senderId || null);
+    }
     this.onAdmittedTeamEvent(event.sourceId);
     supersededEventIds.forEach((eventId) => this.searchIndex.remove("event", String(eventId)));
     if (eventKind === "edit") {
@@ -930,7 +1050,7 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
       this.scheduleKnowledgeRefresh(chatId);
     }
     this.store.incrementProgress(binding.sourceId, {
-      accepted: 1,
+      accepted: recoveringHistory ? 0 : 1,
       mediaDiscovered: attachments.length,
       mediaPending: attachments.length,
     }, occurredAt);
@@ -944,7 +1064,7 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
         messageId,
         threadId,
         topicId: threadId,
-        authorId: String(senderId),
+        authorId: String(effectiveSenderId),
         occurredAt,
       },
     });
@@ -961,7 +1081,7 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
         size: attachment.size,
         refId: `${chatId}:${messageId}:${attachment.fileId}`,
         telegramMessageId: messageId,
-        telegramUserId: senderId,
+        telegramUserId: effectiveSenderId,
         occurredAt,
         },
       );
@@ -1701,7 +1821,8 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
       `chat_id: ${status.telegramChatId}`,
       `Период: ${dates}`,
       `Сообщения: ${status.counters.accepted} сохранено, ${status.counters.skipped} пропущено`,
-      `Авторы: ${status.counters.consentedAuthors} согласовано, ${status.counters.unknownAuthors} неизвестно`,
+      `Согласие всей группы: ${status.groupConsent.granted ? "зафиксировано" : "отсутствует"}`,
+      `Авторы: ${status.counters.consentedAuthors} наблюдалось, ${status.counters.unknownAuthors} ожидают восстановления`,
       `Медиа: ${status.counters.mediaDiscovered} найдено, ${status.counters.mediaUploaded} загружено, ` +
         `${status.counters.mediaPending} в очереди, ${status.counters.mediaFailed} ошибок`,
       `Стадии: extraction=${status.stages.extraction.state}, fts=${status.stages.fts.state}, ` +
@@ -1751,7 +1872,10 @@ export class KnowledgeSyncService implements KnowledgeSyncAdmin {
         : "—"}`,
       `Lag: ${status.collector.lagSeconds === null ? "—" : `${Math.round(status.collector.lagSeconds)}s`}`,
       `Messages: discovered=${status.counters.discovered}, accepted=${status.counters.accepted}, skipped=${status.counters.skipped}`,
-      `Authors: consented=${status.counters.consentedAuthors}, unknown=${status.counters.unknownAuthors}`,
+      `Group consent: ${status.groupConsent.granted ? "granted" : "missing"}; observed authors=${status.counters.consentedAuthors}, unresolved=${status.counters.unknownAuthors}`,
+      ...(status.historyRecovery
+        ? [`History recovery: ${status.historyRecovery.state}; recovered=${status.historyRecovery.recoveredMessages}; checkpoint=${status.historyRecovery.fromMessageId}`]
+        : []),
       ...(status.unknownAuthorIds.length > 0
         ? [`Unknown author IDs: ${status.unknownAuthorIds.join(", ")}`]
         : []),
