@@ -1,6 +1,6 @@
-# SUMMING 9.22: архитектура, эксплуатация и разработка
+# SUMMING 9.23: архитектура, эксплуатация и разработка
 
-> Версия: **9.22.0**
+> Версия: **9.23.0**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
 > Последняя сверка с кодом: **27 августа 2026 года**.
 
@@ -253,7 +253,7 @@ Runtime запрашивает Telegram updates типов `message`, `edited_me
 `message_reaction_count`, `my_chat_member` и `chat_member`. Из
 `my_chat_member` он сохраняет chat metadata, текущий статус бота, добавившего
 пользователя, время присоединения и последний исходный membership event, а также
-создаёт Team Space и публикует прозрачное admission notice. Telegram
+создаёт Team Space. Отдельное admission-уведомление в группу не отправляется. Telegram
 не передаёт в этом событии список уже существующих forum topics, поэтому
 `topic_id` и доступное название регистрируются по первому увиденному сообщению,
 `forum_topic_created` или `forum_topic_edited`. Администратор просматривает реестр
@@ -896,12 +896,13 @@ status и запрашивает атомарное обновление без 
 Project Viewer больше не содержит системную вкладку и остаётся scoped-интерфейсом
 конкретного Project/Repository.
 Карточки пользователей не входят в основной overview payload и загружаются только
-при раскрытии группы/topic. `/memory_forget_me` удаляет scoped activity автора из
-этой сводки и существующее Team Space opt-out блокирует повторное накопление до
-`/memory_resume_me`.
+при раскрытии группы/topic. История сохраняется на основании подписанного согласия
+всей группы; точечный отзыв автора в consent ledger остаётся явным deny и имеет
+приоритет над групповым основанием.
 
-После успешного нового bind/rebind runtime отправляет сообщение именно в связанный
-Telegram topic. Primary Project owner упоминается через HTML-ссылку `tg://user?id=<id>`,
+После успешного нового primary bind/rebind runtime отправляет сообщение именно в связанный
+Telegram topic; observer bind/rebind проходит без отдельного сообщения в группе.
+Primary Project owner упоминается через HTML-ссылку `tg://user?id=<id>`,
 поэтому уведомление не зависит от наличия username; доступное наблюдаемое имя
 используется только как безопасно экранированная подпись ссылки. Сообщение содержит
 Project и Repository и объясняет, что рабочие запросы топика теперь относятся к
@@ -1189,7 +1190,7 @@ Telegram мог принять сообщение до падения. Внут�
 `dead-letter/uncertain` — 90 дней.
 
 Входящий файл observer topic после secret scan шифруется локальным
-AES-256-GCM ключом, получает SHA-256, `artifactId` и raw-retention Team Space.
+AES-256-GCM ключом, получает SHA-256, `artifactId` и хранится бессрочно.
 История возвращает метаданные, но не байты. Только активный авторизованный owner
 turn может расшифровать файл в `.summing-runtime/attachments/` через
 `project_portal.materialize_attachment` либо переслать его по `attachmentId`.
@@ -1225,10 +1226,6 @@ thread без `runner-control-v1` атомарно переносится в `pr
 | `/publish <обновление>` | Из primary явно опубликовать безопасный текст всем observers текущего Workspace. |
 | `/remember <факт>` | Добавить факт в Project memory. |
 | `/memory`, `/memory_status` | Показать видимое состояние Team Space. |
-| `/memory_me` | Показать собственные evidence и связанные knowledge items. |
-| `/memory_forget_me` | Redact собственных events, удалить связанные выводы, пометить summary для пересборки и остановить будущий ingest. |
-| `/memory_resume_me` | Возобновить будущий ingest без восстановления удалённого. |
-| `/memory_pause`, `/memory_resume` | Приостановить/возобновить Space; только администратор. |
 | `/review` | Follow-up с просьбой проверить незакоммиченные изменения и не менять файлы. |
 | `/restart` | Выйти с кодом 42; только администратор, systemd перезапустит. |
 | `/panic` | Только администратор; немедленно выйти с кодом 99 без acknowledgement и автоматического рестарта. |
@@ -1300,7 +1297,7 @@ SQLite хранит:
 - Team Spaces, Sources, People и не объединяемые автоматически provider identities;
 - event journal с replies, edits, reactions, membership и attachment metadata;
 - knowledge с confidence, visibility, temporal validity, evidence и supersession;
-- understanding/intervention audit и opt-out/retention state;
+- understanding/intervention audit и consent/revocation state;
 - последний подтверждённый Telegram update offset.
 
 Основные таблицы:
@@ -1347,7 +1344,7 @@ Telegram-проекты находятся в SQLite и не записываю�
 | `agent.participant_rate_limit_messages` | Явных direct Q&A одного участника на окно. | 12 |
 | `agent.participant_rate_limit_window_sec` | Длина rate-limit окна. | 60 |
 | `agent.network_access` | Сеть внутри Codex sandbox. | true |
-| `team_memory.enabled` | Локальный Team Space journal и privacy commands. | true |
+| `team_memory.enabled` | Локальный Team Space journal. | true |
 | `team_memory.model_egress_enabled` | Consent-gated Conversation Understanding Loop в Codex. | false |
 | `team_memory.model` | Модель только для background Conversation Understanding Loop. | `gpt-5.6-luna` |
 | `team_memory.effort` | Reasoning effort только для background loop. | `low` |
@@ -1356,8 +1353,6 @@ Telegram-проекты находятся в SQLite и не записываю�
 | `team_memory.understanding_max_events` | Event cap и немедленный trigger batch. | 100 |
 | `team_memory.orientation_event_threshold` | Минимум evidence до первого orientation. | 50 |
 | `team_memory.intervention_cooldown_sec` | Минимальный интервал proactive replies. | 3600 |
-| `team_memory.raw_retention_days` | Дни хранения raw evidence; 0 = бессрочно. | 365 |
-| `team_memory.announce_on_join` | Admission notice при добавлении в группу. | true |
 | `codex_usage.profile_enabled` | Обновлять short description Telegram-бота. | true |
 | `codex_usage.refresh_interval_sec` | Интервал перечитывания App Server limits. | 900 |
 | `codex_usage.timezone` | IANA timezone для времени сброса. | `Europe/Moscow` |
@@ -1373,6 +1368,10 @@ Telegram-проекты находятся в SQLite и не записываю�
 | `projects.<id>.default_workspace` | Workspace для короткого `/bind`. | первый |
 | `projects.<id>.self_change` | Пометка собственного репозитория. | false |
 | `...workspaces.<id>.path` | Абсолютный локальный путь. | обязателен |
+
+Raw Team Space evidence и зашифрованные observer-вложения хранятся бессрочно.
+Возрастной retention-loop отсутствует; старые `team_memory.raw_retention_days` и
+`team_memory.announce_on_join` при обновлении безопасно игнорируются.
 
 Project/Workspace id имеют длину от 1 до 64 символов, начинаются с
 `[a-z0-9]`, а дальше допускают `[a-z0-9._-]`. Должен существовать хотя бы один
@@ -1794,7 +1793,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "9.22.0",
+  "version": "9.23.0",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",

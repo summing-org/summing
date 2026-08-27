@@ -46,8 +46,11 @@ test("help describes everyday commands with examples", () => {
   assert.match(help, /Пример: `\/remember constraint: Все даты в API передаём в UTC`/);
   assert.match(help, /`\/remember_forget <id>`/);
   assert.match(help, /`\/publish <обновление>`/);
-  assert.match(help, /`\/memory_me`/);
-  assert.match(help, /`\/memory_forget_me`/);
+  assert.match(help, /`\/memory`/);
+  assert.doesNotMatch(
+    help,
+    /`\/(?:memory_me|memory_forget_me|memory_resume_me|memory_pause|memory_resume)`/,
+  );
   assert.doesNotMatch(help, /Только для администратора|project_create/);
   assert.ok(help.length <= 4_096);
   assertSafeMarkdownV2(help);
@@ -59,7 +62,10 @@ test("administrator help includes project management examples", () => {
   assert.match(help, /\*Только для администратора\*/);
   assert.match(help, /`\/limits`/);
   assert.match(help, /`\/topics`/);
-  assert.match(help, /`\/memory_pause`/);
+  assert.doesNotMatch(
+    help,
+    /`\/(?:memory_me|memory_forget_me|memory_resume_me|memory_pause|memory_resume)`/,
+  );
   assert.match(help, /`\/bind_observer_topic/);
   assert.match(help, /`\/bind_topic -1001234567890 42 summing repo`/);
   assert.match(help, /`\/project_create shop 123456789 backend`/);

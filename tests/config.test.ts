@@ -30,8 +30,6 @@ understanding_max_wait_sec = 150
 understanding_max_events = 80
 orientation_event_threshold = 25
 intervention_cooldown_sec = 7200
-raw_retention_days = 180
-announce_on_join = false
 
 [codex_usage]
 profile_enabled = false
@@ -85,8 +83,6 @@ test("loads the explicit project model", () => {
     assert.equal(config.teamUnderstandingMaxEvents, 80);
     assert.equal(config.teamOrientationEventThreshold, 25);
     assert.equal(config.teamInterventionCooldownSeconds, 7_200);
-    assert.equal(config.teamRawRetentionDays, 180);
-    assert.equal(config.teamAnnounceOnJoin, false);
     assert.equal(config.codexLimitsProfileEnabled, false);
     assert.equal(config.codexLimitsRefreshIntervalSeconds, 600);
     assert.equal(config.codexLimitsTimeZone, "UTC");

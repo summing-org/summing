@@ -132,8 +132,6 @@ export class RuntimeConfig {
     readonly teamUnderstandingMaxEvents = 100,
     readonly teamOrientationEventThreshold = 50,
     readonly teamInterventionCooldownSeconds = 3_600,
-    readonly teamRawRetentionDays = 365,
-    readonly teamAnnounceOnJoin = true,
     readonly knowledgeSync: KnowledgeSyncConfig = defaultKnowledgeSyncConfig(dataDir),
     readonly teamUnderstandingModel = "gpt-5.6-luna",
     readonly teamUnderstandingEffort = "low",
@@ -466,14 +464,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RuntimeConfig 
       604_800,
       false,
     ),
-    boundedNumber(
-      teamMemory.raw_retention_days ?? 365,
-      "team_memory.raw_retention_days",
-      0,
-      3_650,
-      true,
-    ),
-    Boolean(teamMemory.announce_on_join ?? true),
     {
       enabled: Boolean(knowledgeSync.enabled ?? false),
       telegramTermsReviewed: String(

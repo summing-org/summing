@@ -236,8 +236,6 @@ understanding_max_wait_sec = 300
 understanding_max_events = 100
 orientation_event_threshold = 50
 intervention_cooldown_sec = 3600
-raw_retention_days = 365
-announce_on_join = true
 
 [knowledge_sync]
 enabled = ${knowledgeEnabled}

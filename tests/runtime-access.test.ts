@@ -35,6 +35,7 @@ test("owners control projects while group participants get read-only Q&A", async
     new Map([["summing", staticProject]]),
   );
   const runtime = new SummingRuntime(config);
+  assert.equal(runtime.projectPortalArtifacts.retentionDays, 0);
   const replies: string[] = [];
   const replyChats: number[] = [];
   const replyOptions: Array<{ topicId?: number; parseMode?: string }> = [];
@@ -140,8 +141,12 @@ test("owners control projects while group participants get read-only Q&A", async
     assert.equal(runtime.state.telegramChat(-300)?.addedByUserId, 1);
     assert.equal(runtime.state.telegramChat(-300)?.botStatus, "administrator");
     const engineeringSpace = runtime.state.teamSpaceForProvider("telegram", "-300")!;
-    assert.equal(engineeringSpace.announcedAt !== null, true);
+    assert.equal(engineeringSpace.announcedAt, null);
     assert.equal(runtime.state.teamEventCount(engineeringSpace.id), 1);
+    assert.equal(
+      replies.some((reply) => reply.includes("Я начал наблюдение за Team Space")),
+      false,
+    );
     await send(1, "/topics", 1, "private");
     assert.match(replies.at(-1) ?? "", /Engineering/);
     assert.match(replies.at(-1) ?? "", /топики пока не обнаружены/);
@@ -271,10 +276,15 @@ test("owners control projects while group participants get read-only Q&A", async
       },
     });
 
+    const observerChatMessagesBefore = replyChats.filter((chatId) => chatId === -300).length;
     await send(1, "/bind_observer_topic -300 44 alpha repo", 1, "private");
     const externalPortal = runtime.state.byTopic(-300, 44)!;
     assert.equal(externalPortal.role, "observer");
     assert.match(replies.at(-1) ?? "", /Топик-наблюдатель проекта привязан/);
+    assert.equal(
+      replyChats.filter((chatId) => chatId === -300).length,
+      observerChatMessagesBefore,
+    );
     await send(42, "/publish Исправление авторизации принято и опубликовано.", -100, "supergroup", 5);
     const publishedIndex = replies.findIndex((reply) =>
       reply.includes("📣 Обновление проекта «alpha»") &&
@@ -586,18 +596,19 @@ test("owners control projects while group participants get read-only Q&A", async
     assert.equal(runtime.state.recentTeamEvents(observedSpace.id, firstSource.id)[0]?.text, "Фоновый контекст 1");
     assert.equal(runtime.state.recentTeamEvents(observedSpace.id, lastSource.id)[0]?.text, "Фоновый контекст 101");
     assert.equal(runtime.state.telegramChatUserCount(-400), 1);
+    const repliesBeforeRemovedMemoryCommand = replies.length;
     await send(777, "/memory_forget_me", -400, "supergroup", 101);
     assert.equal(
       runtime.state.teamEventCountForIdentity(observedSpace.id, "telegram", "777"),
-      0,
+      102,
     );
-    assert.equal(runtime.state.telegramChatUserCount(-400), 0);
-    await send(777, "Не сохраняй это", -400, "supergroup", 101);
-    assert.equal(runtime.state.teamEventCount(observedSpace.id), 0);
-    assert.equal(runtime.state.telegramChatUserCount(-400), 0);
+    assert.equal(replies.length, repliesBeforeRemovedMemoryCommand);
+    assert.equal(runtime.state.telegramChatUserCount(-400), 1);
+    await send(777, "Продолжай сохранять", -400, "supergroup", 101);
+    assert.equal(runtime.state.teamEventCount(observedSpace.id), 103);
+    assert.equal(runtime.state.telegramChatUserCount(-400), 1);
     await send(777, "/memory_resume_me", -400, "supergroup", 101);
-    await send(777, "Снова сохраняй", -400, "supergroup", 101);
-    assert.equal(runtime.state.teamEventCount(observedSpace.id), 1);
+    assert.equal(runtime.state.teamEventCount(observedSpace.id), 104);
     assert.equal(runtime.state.telegramChatUserCount(-400), 1);
 
     await send(999, "Как устроена авторизация?", -100, "supergroup", 5);

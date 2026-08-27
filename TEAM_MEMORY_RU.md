@@ -232,21 +232,19 @@ turn. Если для помощи нужна проверка репозито�
 
 ## Transparency и управление
 
-При admission SUMMING публикует уведомление о durable observation. Доступны:
+Основанием для ingest служит заранее подписанное согласие всей группы, сохранённое
+в consent ledger. Отдельное admission-уведомление в Telegram-группу не отправляется.
+Для просмотра состояния остаются:
 
 | Команда | Поведение |
 |---|---|
 | `/memory`, `/memory_status` | Состояние Team Space и видимые отправителю знания. |
-| `/memory_me` | События пользователя и выводы с их evidence. |
-| `/memory_forget_me` | Redact собственных событий, удалить связанные выводы, пометить summary для пересборки и остановить будущий ingest. |
-| `/memory_resume_me` | Возобновить будущий ingest; удалённое не восстанавливается. |
-| `/memory_pause` | Администратор приостанавливает весь Space. |
-| `/memory_resume` | Администратор возобновляет Space. |
 
-`team_memory.raw_retention_days` очищает raw text и attachment metadata по
-возрасту, включая ещё не синтезированные events. Значение `0` явно означает
-бессрочную локальную retention policy. Credentials никогда не становятся Team
-Space evidence: security ingress перехватывает их раньше.
+Raw text, attachment metadata и зашифрованные observer-вложения не имеют срока
+истечения и не очищаются по возрасту. Ключ `team_memory.raw_retention_days` удалён;
+старое значение в конфиге игнорируется. Credentials никогда не становятся Team
+Space evidence: security ingress перехватывает их раньше. Индивидуальный отзыв в
+consent ledger остаётся точечным deny поверх группового основания.
 
 ## Transport model
 

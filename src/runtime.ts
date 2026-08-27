@@ -620,7 +620,6 @@ export class SummingRuntime {
   private codexLimitsState: CodexRateLimitsSnapshot | null = null;
   private codexLimitsRefresh: Promise<CodexRateLimitsSnapshot | null> | null = null;
   private codexLimitsTimer: NodeJS.Timeout | null = null;
-  private teamRetentionTimer: NodeJS.Timeout | null = null;
   private projectPortalOutboxTimer: NodeJS.Timeout | null = null;
   private projectPortalOutboxDraining = false;
   private teamModelEgressEnabledState: boolean;
@@ -708,7 +707,7 @@ export class SummingRuntime {
     this.projectPortalArtifacts = new ProjectPortalArtifactStore(
       config.dataDir,
       config.maximumAttachmentBytes,
-      config.teamRawRetentionDays,
+      0,
     );
     this.transcriber =
       config.transcriptionProvider === "groq"
@@ -864,8 +863,6 @@ export class SummingRuntime {
       await this.projectRunnerRegistry.start();
       this.workspaces.initialize(this.projects.all().map((entry) => entry.project));
       this.initializeProjectMemories();
-      this.purgeTeamEvidence();
-      this.scheduleTeamRetention();
       await this.codex.start();
       this.accountState = await this.codex.account();
       const me = await this.telegram.getMe();
@@ -924,7 +921,6 @@ export class SummingRuntime {
       this.stopping = true;
       this.shutdownController.abort();
       this.clearCodexLimitsTimer();
-      this.clearTeamRetentionTimer();
       this.clearProjectPortalOutboxTimer();
       this.clearTeamUnderstandingTimers();
       this.deploymentEvents.stop();
@@ -976,7 +972,6 @@ export class SummingRuntime {
     this.stopping = true;
     this.shutdownController.abort();
     this.clearCodexLimitsTimer();
-    this.clearTeamRetentionTimer();
     this.clearProjectPortalOutboxTimer();
     this.clearTeamUnderstandingTimers();
     this.shutdown.resolve(undefined);
@@ -1194,41 +1189,6 @@ export class SummingRuntime {
     this.codexLimitsTimer = null;
   }
 
-  private purgeTeamEvidence(): void {
-    if (!this.config.teamMemoryEnabled) return;
-    const retainedSpaces = [...new Set(
-      this.knowledgeSync.store.consentedRetainedSourceIds().flatMap((sourceId) => {
-        const source = this.state.teamSource(sourceId);
-        return source ? [source.spaceId] : [];
-      }),
-    )];
-    const redacted = this.state.purgeExpiredTeamEvidence(
-      this.config.teamRawRetentionDays,
-      Date.now() / 1_000,
-      retainedSpaces,
-    );
-    if (redacted > 0) console.info(`redacted ${redacted} expired Team Space events`);
-  }
-
-  private scheduleTeamRetention(): void {
-    this.clearTeamRetentionTimer();
-    if (this.stopping || !this.config.teamMemoryEnabled) return;
-    this.teamRetentionTimer = setTimeout(() => {
-      try {
-        this.purgeTeamEvidence();
-      } finally {
-        this.scheduleTeamRetention();
-      }
-    }, 86_400_000);
-    this.teamRetentionTimer.unref();
-  }
-
-  private clearTeamRetentionTimer(): void {
-    if (!this.teamRetentionTimer) return;
-    clearTimeout(this.teamRetentionTimer);
-    this.teamRetentionTimer = null;
-  }
-
   private scheduleTeamUnderstanding(sourceId: string, retryDelaySeconds?: number): void {
     if (
       this.stopping ||
@@ -1417,7 +1377,7 @@ export class SummingRuntime {
             "Администратор включил фоновое осмысление Team Space.",
             "После паузы разговора новые сообщения одного source одним пакетом передаются в Codex App Server администратора вместе с sender identity, message/reply ids, timestamps, метаданными вложений и доступными транскрипциями.",
             "Один Conversation Understanding Loop одновременно собирает эпизод, обновляет память и решает, полезнее ответить или промолчать; отдельного ambient-вызова модели нет.",
-            "Codex работает в отдельном read-only контексте без Project, файлов, сети и внешних инструментов. Проверить память можно через /memory и /memory_me; удалить свои данные и остановить будущий ingest — через /memory_forget_me.",
+            "Codex работает в отдельном read-only контексте без Project, файлов, сети и внешних инструментов. Текущее состояние памяти доступно через /memory.",
           ].join("\n"),
           "",
         );
@@ -1839,37 +1799,6 @@ export class SummingRuntime {
         administratorUserId: this.config.telegramOwnerId,
       });
       if (event) this.scheduleTeamUnderstanding(event.sourceId);
-    }
-    if (
-      !joined ||
-      !this.config.teamAnnounceOnJoin ||
-      ensured.space.announcedAt !== null
-    ) {
-      return;
-    }
-    const announcement = [
-      `Я начал наблюдение за Team Space «${ensured.space.name}».`,
-      this.teamModelEgressEnabled()
-        ? "Новые сообщения сохраняются локально; после паузы один Conversation Understanding Loop одновременно обновляет командную память и решает, отвечать или молчать."
-        : "Новые сообщения сохраняются только локально как источник командной памяти до принятия решения отвечать или молчать; фоновая передача в Codex выключена.",
-      `Raw-текст хранится ${this.config.teamRawRetentionDays === 0 ? "без автоматического удаления" : `${this.config.teamRawRetentionDays} дней`}; обнаруженные credentials не сохраняются.`,
-      "Любой участник может проверить /memory_me, остановить наблюдение за собой и удалить свои данные через /memory_forget_me.",
-      "Наблюдение не даёт мне доступа к Project, файлам или права выполнять действия.",
-    ].join("\n");
-    const interventionId = this.state.recordTeamIntervention({
-      spaceId: ensured.space.id,
-      sourceId: ensured.source.id,
-      kind: "admission",
-      reason: "transparent durable observation notice",
-      text: announcement,
-      replyToExternalEventId: "",
-      providerMessageId: "",
-    });
-    const providerMessageId = await this.telegram.sendMessage(chatId, announcement);
-    this.state.markTeamInterventionSent(interventionId, String(providerMessageId));
-    this.state.markTeamSpaceAnnounced(ensured.space.id);
-    if (this.teamModelEgressEnabled()) {
-      this.state.markTeamSpaceModelEgressAnnounced(ensured.space.id);
     }
   }
 
@@ -2964,16 +2893,7 @@ export class SummingRuntime {
     const separator = text.indexOf(" ");
     const commandPart = separator < 0 ? text : text.slice(0, separator);
     const command = (commandPart.split("@", 1)[0] ?? "").toLowerCase();
-    const supported = new Set([
-      "/memory",
-      "/memory_status",
-      "/memory_me",
-      "/memory_forget_me",
-      "/memory_resume_me",
-      "/memory_pause",
-      "/memory_resume",
-    ]);
-    if (!supported.has(command)) return false;
+    if (command !== "/memory" && command !== "/memory_status") return false;
     if (!this.config.teamMemoryEnabled) {
       await this.reply(chatId, topicId, messageId, "Team Space memory отключена в конфигурации.");
       return true;
@@ -2983,121 +2903,31 @@ export class SummingRuntime {
       await this.reply(chatId, topicId, messageId, "Для этого чата Team Space ещё не создан.");
       return true;
     }
-    if (command === "/memory" || command === "/memory_status") {
-      const source = this.state.teamSourceForProvider(
-        "telegram",
-        String(chatId),
-        String(topicId),
-      );
-      const personId = this.state.teamPersonIdForIdentity(
-        space.id,
-        "telegram",
-        String(senderId),
-      ) ?? "";
-      const knowledge = source
-        ? this.state.teamKnowledgeVisibleTo(space.id, source.id, personId, 20)
-        : this.state.teamKnowledge(space.id, 20).filter((item) => item.visibility === "space");
-      const memoryText = teamKnowledgeText(
-        space,
-        knowledge,
-        this.state.teamEventCount(space.id),
-        this.state.pendingTeamEventCount(space.id),
-      );
-      await this.replyLong(
-        chatId,
-        topicId,
-        messageId,
-        `${memoryText}\nConversation Understanding Loop: ${this.teamModelEgressEnabled() ? "включён" : "выключен"}`,
-      );
-      return true;
-    }
-    if (command === "/memory_me") {
-      const count = this.state.teamEventCountForIdentity(
-        space.id,
-        "telegram",
-        String(senderId),
-      );
-      const knowledge = this.state.teamKnowledgeForIdentity(
-        space.id,
-        "telegram",
-        String(senderId),
-        20,
-      );
-      const lines = [
-        `В Team Space сохранено ваших событий: ${count}.`,
-        `Знаний со ссылкой на них: ${knowledge.length}.`,
-      ];
-      for (const item of knowledge) {
-        lines.push(
-          `- [${item.kind}; ${Math.round(item.confidence * 100)}%; ` +
-            `evidence:${item.evidenceEventIds.join(",")}] ${item.statement}`,
-        );
-      }
-      lines.push(
-        "",
-        "Команда /memory_forget_me удалит сохранённый текст и вложения ваших событий, " +
-          "пометит зависимые выводы для пересмотра и остановит дальнейшее наблюдение за вами.",
-      );
-      await this.replyLong(chatId, topicId, messageId, lines.join("\n"));
-      return true;
-    }
-    if (command === "/memory_forget_me") {
-      const forgotten = this.state.forgetTeamIdentity(
-        space.id,
-        "telegram",
-        String(senderId),
-      );
-      this.state.forgetTelegramChatUser(chatId, senderId);
-      await this.reply(
-        chatId,
-        topicId,
-        messageId,
-        `Удалено содержимое ваших событий: ${forgotten}. Связанные выводы удалены, а общий ` +
-          "summary будет пересобран без них. Будущие сообщения не сохраняются. " +
-          "Вернуть наблюдение можно командой /memory_resume_me.",
-      );
-      return true;
-    }
-    if (command === "/memory_resume_me") {
-      this.state.setTeamIdentityObservation(space.id, "telegram", String(senderId), true);
-      await this.reply(
-        chatId,
-        topicId,
-        messageId,
-        "Наблюдение за вашими будущими сообщениями возобновлено. Удалённые данные не восстановлены.",
-      );
-      return true;
-    }
-    if (senderId !== this.config.telegramOwnerId) {
-      await this.reply(
-        chatId,
-        topicId,
-        messageId,
-        "Приостановить память всего Team Space может только администратор SUMMING.",
-      );
-      return true;
-    }
-    if (command === "/memory_pause") {
-      this.state.setTeamSpacePhase(space.id, "paused");
-      await this.reply(
-        chatId,
-        topicId,
-        messageId,
-        "Наблюдение Team Space приостановлено. Новые сообщения не сохраняются.",
-      );
-      return true;
-    }
-    this.state.setTeamSpacePhase(
-      space.id,
-      space.orientedAt === null ? "observing" : "active",
+    const source = this.state.teamSourceForProvider(
+      "telegram",
+      String(chatId),
+      String(topicId),
     );
-    if (this.state.pendingTeamEventCount(space.id) > 0) {
-      for (const sourceId of this.state.sourcesWithPendingTeamEvents()) {
-        const pendingSource = this.state.teamSource(sourceId);
-        if (pendingSource?.spaceId === space.id) this.scheduleTeamUnderstanding(sourceId);
-      }
-    }
-    await this.reply(chatId, topicId, messageId, "Наблюдение Team Space возобновлено.");
+    const personId = this.state.teamPersonIdForIdentity(
+      space.id,
+      "telegram",
+      String(senderId),
+    ) ?? "";
+    const knowledge = source
+      ? this.state.teamKnowledgeVisibleTo(space.id, source.id, personId, 20)
+      : this.state.teamKnowledge(space.id, 20).filter((item) => item.visibility === "space");
+    const memoryText = teamKnowledgeText(
+      space,
+      knowledge,
+      this.state.teamEventCount(space.id),
+      this.state.pendingTeamEventCount(space.id),
+    );
+    await this.replyLong(
+      chatId,
+      topicId,
+      messageId,
+      `${memoryText}\nConversation Understanding Loop: ${this.teamModelEgressEnabled() ? "включён" : "выключен"}`,
+    );
     return true;
   }
 
@@ -3406,8 +3236,8 @@ export class SummingRuntime {
         );
         const teamSpace = this.state.teamSpaceForProvider("telegram", String(targetChatId));
         if (teamSpace) this.state.linkTeamProject(teamSpace.id, project.id);
-        if (bindingChanged) {
-          this.queueProjectOwnerBindingNotification(targetChatId, targetTopicId);
+        if (bindingChanged && role === "primary") {
+          this.queuePrimaryProjectBindingNotification(targetChatId, targetTopicId);
         }
         const targetTitle = targetChat.title || String(targetChat.chatId);
         const topicTitle = targetTopic.name || String(targetTopic.topicId);
@@ -3487,7 +3317,7 @@ export class SummingRuntime {
         const teamSpace = this.state.teamSpaceForProvider("telegram", String(chatId));
         if (teamSpace) this.state.linkTeamProject(teamSpace.id, project.id);
         if (bindingChanged && chatType === "supergroup") {
-          this.queueProjectOwnerBindingNotification(chatId, topicId);
+          this.queuePrimaryProjectBindingNotification(chatId, topicId);
         }
         await this.reply(
           chatId,
@@ -3970,18 +3800,20 @@ export class SummingRuntime {
     if (!conversation) return;
     const teamSpace = this.state.teamSpaceForProvider("telegram", String(chatId));
     if (teamSpace) this.state.linkTeamProject(teamSpace.id, conversation.projectId);
-    this.queueProjectOwnerBindingNotification(chatId, topicId);
+    if (conversation.role === "primary") {
+      this.queuePrimaryProjectBindingNotification(chatId, topicId);
+    }
   }
 
-  private queueProjectOwnerBindingNotification(chatId: number, topicId: number): void {
-    void this.notifyProjectOwnerBinding(chatId, topicId).catch((error) => {
+  private queuePrimaryProjectBindingNotification(chatId: number, topicId: number): void {
+    void this.notifyPrimaryProjectBinding(chatId, topicId).catch((error) => {
       console.warn("could not notify project owner about topic binding", errorText(error));
     });
   }
 
-  private async notifyProjectOwnerBinding(chatId: number, topicId: number): Promise<void> {
+  private async notifyPrimaryProjectBinding(chatId: number, topicId: number): Promise<void> {
     const conversation = this.state.byTopic(chatId, topicId);
-    if (!conversation) return;
+    if (!conversation || conversation.role !== "primary") return;
     const project = this.projects.project(conversation.projectId);
     const ownerId = this.projects.owner(project.id);
     const profile = this.state.listTelegramChatUsers(chatId)
@@ -3994,25 +3826,14 @@ export class SummingRuntime {
     const mention = `<a href="tg://user?id=${ownerId}">${telegramHtml(ownerLabel)}</a>`;
     await this.telegram.sendMessage(
       chatId,
-      (conversation.role === "observer"
-        ? [
-            `👤 ${mention}, этот топик подключён как <b>наблюдатель</b> проекта ` +
-              `<b>${telegramHtml(project.name)}</b>.`,
-            `Project: <code>${telegramHtml(project.id)}</code>`,
-            `Repository: <code>${telegramHtml(conversation.workspaceId)}</code>`,
-            "Здесь появляются опубликованные владельцем обновления. Ответ на сообщение бота " +
-              "или прямое упоминание открывает read-only Q&A.",
-            "Комментарии сохраняются как недоверенный feedback для основного рабочего топика, " +
-              "но никогда сами не становятся задачами, решениями или разрешениями.",
-          ]
-        : [
-            `👤 ${mention}, этот топик стал основным рабочим столом проекта ` +
-              `<b>${telegramHtml(project.name)}</b>, где вы назначены владельцем.`,
-            `Project: <code>${telegramHtml(project.id)}</code>`,
-            `Repository: <code>${telegramHtml(conversation.workspaceId)}</code>`,
-            "Только здесь owners и Codex принимают рабочие решения. Команда /publish отправляет " +
-              "безопасное обновление всем топикам-наблюдателям этого Workspace.",
-          ]).join("\n"),
+      [
+        `👤 ${mention}, этот топик стал основным рабочим столом проекта ` +
+          `<b>${telegramHtml(project.name)}</b>, где вы назначены владельцем.`,
+        `Project: <code>${telegramHtml(project.id)}</code>`,
+        `Repository: <code>${telegramHtml(conversation.workspaceId)}</code>`,
+        "Только здесь owners и Codex принимают рабочие решения. Команда /publish отправляет " +
+          "безопасное обновление всем топикам-наблюдателям этого Workspace.",
+      ].join("\n"),
       { topicId, parseMode: "HTML" },
     );
   }

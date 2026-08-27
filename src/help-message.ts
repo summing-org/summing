@@ -55,12 +55,6 @@ export function helpMessage(isAdministrator: boolean): string {
     command("/remember_forget <id>", "архивировать пункт без физического удаления"),
     command("/publish <обновление>", "опубликовать безопасное обновление наблюдателям Workspace"),
     command("/memory", "показать состояние и знания текущего Team Space"),
-    command("/memory_me", "показать сохранённые обо мне события и выводы"),
-    command(
-      "/memory_forget_me",
-      "удалить содержимое моих событий и остановить дальнейшее наблюдение",
-    ),
-    command("/memory_resume_me", "снова разрешить сохранять мои будущие сообщения"),
     command("/review", "проверить текущие незакоммиченные изменения без их исправления"),
   ];
 
@@ -74,8 +68,6 @@ export function helpMessage(isAdministrator: boolean): string {
       command("/limits", "показать 5-часовой и недельный Codex limits этого VPS"),
       command("/sync_status [chat_id]", "показать состояние синхронизации базы знаний"),
       command("/topics", "показать обнаруженные Telegram группы, топики и привязки"),
-      command("/memory_pause", "приостановить наблюдение текущего Team Space"),
-      command("/memory_resume", "возобновить наблюдение текущего Team Space"),
       command(
         "/bind_topic <chat_id> <topic_id> <project> [workspace]",
         "привязать топик из личного чата",
