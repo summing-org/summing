@@ -90,7 +90,7 @@ test("binding, input queues, and Telegram offset", () => {
   }
 });
 
-test("observer bindings expose durable feedback to the Project", () => {
+test("legacy observer bindings are retained as inactive customer channels", () => {
   const { root, store } = tempStore();
   try {
     const conversation = store.bind(
@@ -101,6 +101,16 @@ test("observer bindings expose durable feedback to the Project", () => {
       "observer",
     );
     assert.equal(conversation.role, "observer");
+    assert.equal(store.byTopic(-100500, 9), null);
+    assert.deepEqual(store.customerChannel(-100500, 9), {
+      id: StateStore.customerChannelId(-100500, 9),
+      chatId: -100500,
+      topicId: 9,
+      title: "topic 9",
+      legacyConversationId: conversation.id,
+      createdAt: store.customerChannel(-100500, 9)?.createdAt,
+      updatedAt: store.customerChannel(-100500, 9)?.updatedAt,
+    });
     const event = store.recordTeamEvent({
       provider: "telegram",
       externalSpaceId: "-100500",
@@ -131,6 +141,63 @@ test("observer bindings expose durable feedback to the Project", () => {
     const rebound = store.bind(-100500, 9, "ash-telegrams", "repo");
     assert.equal(rebound.role, "primary");
     assert.deepEqual(store.observerProjectSources("ash-telegrams"), []);
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("result publications isolate customer discussion and Project feedback", () => {
+  const { root, store } = tempStore();
+  try {
+    const publication = store.recordResultPublication({
+      projectId: "ash-telegrams",
+      workspaceId: "repo",
+      jobId: "dry-run",
+      scheduleId: "daily",
+      outboxId: "outbox-result-1",
+      reportText: "Отчёт готов.",
+      artifactName: "report.html",
+      chatId: -100500,
+      topicId: 9,
+      channelTitle: "Отчёты заказчику",
+      telegramMessageId: 78032,
+      createdAt: 100,
+    });
+    assert.equal(store.byTopic(-100500, 9), null);
+    assert.equal(store.customerChannelsForProject("ash-telegrams", "repo")[0]?.id,
+      publication.channelId);
+    assert.equal(store.resultPublicationForMessage(-100500, 9, 78032)?.id, publication.id);
+
+    store.recordResultMessage({
+      publicationId: publication.id,
+      chatId: -100500,
+      topicId: 9,
+      telegramMessageId: 78040,
+      author: "agent",
+      senderId: 500,
+      text: "Цифра рассчитана по 56 публикациям.",
+      createdAt: 110,
+    });
+    const feedback = store.recordProjectFeedback({
+      publicationId: publication.id,
+      telegramMessageId: 78041,
+      senderId: 42,
+      text: "Покажите также отклонённые каналы.",
+      createdAt: 120,
+    });
+    assert.equal(store.resultPublicationForMessage(-100500, 9, 78040)?.id, publication.id);
+    assert.deepEqual(
+      store.resultDiscussion(publication.id).map((message) => message.author),
+      ["publication", "agent", "customer"],
+    );
+    assert.deepEqual(store.projectFeedback({
+      projectId: "ash-telegrams",
+      workspaceId: "repo",
+      query: "отклонённые",
+    }).map((item) => [item.id, item.publicationId, item.status]), [
+      [feedback.id, publication.id, "new"],
+    ]);
   } finally {
     store.close();
     rmSync(root, { recursive: true, force: true });

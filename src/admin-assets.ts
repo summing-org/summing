@@ -63,7 +63,7 @@ export const ADMIN_HTML = `<!doctype html>
       <div>
         <span class="eyebrow">TELEGRAM ROUTING</span>
         <h1>Telegram</h1>
-        <p>Связывайте Telegram-топики с проектами и следите за наблюдаемой активностью участников.</p>
+        <p>Связывайте внутренние рабочие топики с проектами и настраивайте отдельную доставку результатов.</p>
       </div>
       <dl class="metrics binding-metrics" aria-label="Сводка Telegram">
         <div><dt id="topicCount">—</dt><dd>топиков</dd></div>
@@ -76,12 +76,12 @@ export const ADMIN_HTML = `<!doctype html>
         <div><span class="eyebrow">TELEGRAM TOPICS</span><h2 id="bindingsTitle">Маршрутизация топиков</h2></div>
         <label class="search"><span>⌕</span><input id="topicSearch" placeholder="Найти группу или топик" autocomplete="off"></label>
       </div>
-      <p class="section-note">Для каждого Project/Workspace выберите один основной рабочий топик и любое число read-only топиков-наблюдателей. Решения и изменения выполняются только в основном топике; наблюдатели получают опубликованные через <code>/publish</code> обновления и оставляют недоверенный feedback. SUMMING видит топик и пользователя после первого доступного боту сообщения.</p>
+      <p class="section-note">Для каждого Project/Workspace выбирается один внутренний рабочий топик. Внешние customer channels к Project не привязываются: расписание фиксирует точный топик доставки, а комментарии связываются с конкретным result. SUMMING видит топик и пользователя после первого доступного боту сообщения.</p>
       <div id="chats" class="chat-list"><div class="empty">Загрузка Telegram-топиков…</div></div>
     </section>
     <section class="section" aria-labelledby="portalDeliveryTitle">
       <div class="section-heading">
-        <div><span class="eyebrow">OBSERVER DELIVERY OUTBOX</span><h2 id="portalDeliveryTitle">Доставка наблюдателям</h2></div>
+        <div><span class="eyebrow">RESULT DELIVERY OUTBOX</span><h2 id="portalDeliveryTitle">Доставка результатов</h2></div>
         <button id="refreshPortalDeliveries" class="quiet" type="button" aria-label="Обновить доставку">↻</button>
       </div>
       <p class="section-note">Здесь видны pending, retry и терминальные состояния публикаций. <code>uncertain</code> означает, что Telegram мог принять сообщение до перезапуска: сначала проверьте Telegram-топик и только затем запускайте повтор.</p>
@@ -311,12 +311,12 @@ export const ADMIN_JS = `
         return "<div class='topic-row' data-topic-row data-search='"+esc((title+" "+(topic.name||"")+" "+chat.chatId+" "+topic.topicId).toLowerCase())+"'>"+
           "<div class='topic-name'><strong>"+esc(topic.name||(topic.topicId===0?"Общий чат":"Без названия"))+"</strong>"+
           "<span>topic_id: "+esc(topic.topicId)+" · "+esc(localTime(topic.updatedAt))+"</span>"+
-          "<span class='binding-current "+(binding?"":"unbound")+"'>"+(binding?"→ "+esc(binding.projectId+" / "+binding.workspaceId)+" · "+(binding.role==="observer"?"наблюдатель":"основной")+(busy?" · есть активная задача":""):"не привязан")+"</span>"+
+          "<span class='binding-current "+(binding?"":"unbound")+"'>"+(binding?"→ "+esc(binding.projectId+" / "+binding.workspaceId)+" · основной"+(busy?" · есть активная задача":""):"не привязан")+"</span>"+
           (binding?"<a class='viewer-link' href='/?conversation="+encodeURIComponent(binding.conversationId)+"'>Открыть Project Viewer ↗</a>":"")+"<br>"+
           "<button class='users-toggle' data-users='"+esc(usersKey)+"' data-chat='"+esc(chat.chatId)+"' data-topic='"+esc(topic.topicId)+"' aria-expanded='false'>Пользователи · "+esc(topic.userCount)+"</button></div>"+
           "<div class='topic-controls'><select data-project='"+esc(key)+"' aria-label='Проект'>"+projectOptions(selectedProject)+"</select>"+
           "<select data-workspace='"+esc(key)+"' aria-label='Репозиторий'>"+workspaceOptions(selectedProject,selectedWorkspace)+"</select>"+
-          "<select data-role='"+esc(key)+"' aria-label='Роль топика'><option value='primary' "+(selectedRole==="primary"?"selected":"")+">Основной рабочий топик</option><option value='observer' "+(selectedRole==="observer"?"selected":"")+">Read-only наблюдатель</option></select>"+
+          "<input data-role='"+esc(key)+"' type='hidden' value='primary'>"+
           "<div class='topic-actions'><button class='bind-button' data-bind='"+esc(key)+"' data-chat='"+esc(chat.chatId)+"' data-topic='"+esc(topic.topicId)+"' "+(busy?"disabled":"")+">"+(busy?"Занято":binding?"Привязано":"Привязать")+"</button>"+
           "<button class='unbind-button "+(binding?"":"hidden")+"' data-unbind='"+esc(key)+"' data-chat='"+esc(chat.chatId)+"' data-topic='"+esc(topic.topicId)+"' "+(busy?"disabled":"")+">Отвязать</button></div></div>"+
           userPanel(usersKey)+"</div>";
@@ -367,7 +367,7 @@ export const ADMIN_JS = `
   async function copyUserId(button){const userId=button.dataset.copyUser;try{if(!navigator.clipboard)throw new Error("clipboard unavailable");await navigator.clipboard.writeText(userId);toast("Telegram ID скопирован")}catch{toast("Telegram ID: "+userId)}}
   function currentBinding(chatId,topicId){const chat=(state.overview.chats||[]).find(item=>item.chatId===chatId);return chat&&chat.topics.find(item=>item.topicId===topicId)?.binding||null}
   function updateBindingButton(key){const button=document.querySelector("[data-bind='"+CSS.escape(key)+"']");if(!button)return;const unbind=document.querySelector("[data-unbind='"+CSS.escape(key)+"']");const project=document.querySelector("[data-project='"+CSS.escape(key)+"']").value;const workspace=document.querySelector("[data-workspace='"+CSS.escape(key)+"']").value;const role=document.querySelector("[data-role='"+CSS.escape(key)+"']").value;const binding=currentBinding(Number(button.dataset.chat),Number(button.dataset.topic));const unchanged=Boolean(binding&&binding.projectId===project&&binding.workspaceId===workspace&&binding.role===role);button.disabled=Boolean(binding&&binding.busy)||unchanged;button.textContent=binding&&binding.busy?"Занято":unchanged?"Привязано":binding?"Перепривязать":"Привязать";if(unbind){unbind.classList.toggle("hidden",!binding);unbind.disabled=!binding||Boolean(binding.busy)}}
-  async function bindTopic(button){const key=button.dataset.bind;const projectId=document.querySelector("[data-project='"+CSS.escape(key)+"']").value;const workspaceId=document.querySelector("[data-workspace='"+CSS.escape(key)+"']").value;const role=document.querySelector("[data-role='"+CSS.escape(key)+"']").value;const binding=currentBinding(Number(button.dataset.chat),Number(button.dataset.topic));if(binding&&!confirm("Перепривязать топик к "+projectId+" / "+workspaceId+" как "+(role==="observer"?"наблюдатель":"основной")+"?"))return;button.disabled=true;button.textContent="Сохранение…";try{await api("/api/viewer/admin/bindings",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({chatId:Number(button.dataset.chat),topicId:Number(button.dataset.topic),projectId,workspaceId,role})});await loadOverview();toast(binding?"Привязка обновлена":"Топик привязан")}catch(error){toast(error.message);updateBindingButton(key)}}
+  async function bindTopic(button){const key=button.dataset.bind;const projectId=document.querySelector("[data-project='"+CSS.escape(key)+"']").value;const workspaceId=document.querySelector("[data-workspace='"+CSS.escape(key)+"']").value;const role="primary";const binding=currentBinding(Number(button.dataset.chat),Number(button.dataset.topic));if(binding&&!confirm("Перепривязать основной рабочий топик к "+projectId+" / "+workspaceId+"?"))return;button.disabled=true;button.textContent="Сохранение…";try{await api("/api/viewer/admin/bindings",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({chatId:Number(button.dataset.chat),topicId:Number(button.dataset.topic),projectId,workspaceId,role})});await loadOverview();toast(binding?"Привязка обновлена":"Топик привязан")}catch(error){toast(error.message);updateBindingButton(key)}}
   async function unbindTopic(button){const key=button.dataset.unbind;const chatId=Number(button.dataset.chat);const topicId=Number(button.dataset.topic);const binding=currentBinding(chatId,topicId);if(!binding)return;if(!confirm("Отвязать топик от "+binding.projectId+" / "+binding.workspaceId+" на этой ноде? Codex-контекст и история запусков этой привязки будут удалены. Сам Telegram-топик останется в списке."))return;button.disabled=true;button.textContent="Отвязка…";try{await api("/api/viewer/admin/bindings",{method:"DELETE",headers:{"content-type":"application/json"},body:JSON.stringify({chatId,topicId})});await loadOverview();toast("Топик отвязан")}catch(error){button.textContent="Отвязать";toast(error.message);updateBindingButton(key)}}
   function renderOverview(){const overview=state.overview;$("projectCount").textContent=overview.counts.projects;$("topicCount").textContent=overview.counts.topics;$("bindingCount").textContent=overview.counts.bindings;$("userCount").textContent=overview.counts.users;$("primaryOwnerId").value=$("primaryOwnerId").value||overview.administratorId;$("syncState").textContent="обновлено "+new Date().toLocaleTimeString("ru-RU",{hour:"2-digit",minute:"2-digit"});renderProjects();renderChats()}
   async function loadOverview(){$("refreshButton").disabled=true;try{state.overview=await api("/api/viewer/admin");renderOverview()}finally{$("refreshButton").disabled=false}}

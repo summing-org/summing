@@ -12,9 +12,11 @@ test("administrator Mini App separates projects, topic bindings and global setti
   assert.match(ADMIN_HTML, /<button id="bindingsTab"[^>]*>Telegram<\/button>/);
   assert.match(ADMIN_HTML, /<h1>Telegram<\/h1>/);
   assert.doesNotMatch(ADMIN_HTML, /Привязки топиков/);
-  assert.match(ADMIN_HTML, /один основной рабочий топик/);
-  assert.match(ADMIN_HTML, /read-only топиков-наблюдателей/);
-  assert.match(ADMIN_HTML, /Доставка наблюдателям/);
+  assert.match(ADMIN_HTML, /один внутренний рабочий топик/);
+  assert.match(ADMIN_HTML, /customer channels к Project не привязываются/);
+  assert.doesNotMatch(ADMIN_HTML, /read-only топиков-наблюдателей/);
+  assert.match(ADMIN_HTML, /Доставка результатов/);
+  assert.doesNotMatch(ADMIN_JS, /value='observer'/);
   assert.match(ADMIN_HTML, /Настройки SUMMING/);
   assert.match(ADMIN_HTML, /data-admin-section="projects"/);
   assert.match(ADMIN_HTML, /data-admin-section="bindings"/);
@@ -92,7 +94,7 @@ test("administrator Mini App separates projects, topic bindings and global setti
   assert.match(ADMIN_JS, /deployment-attempt-details/);
   assert.match(ADMIN_JS, /Telegram ID:/);
   assert.match(ADMIN_JS, /Наблюдаемые пользователи топика/);
-  assert.match(ADMIN_JS, /Перепривязать топик/);
+  assert.match(ADMIN_JS, /Перепривязать основной рабочий топик/);
   assert.match(ADMIN_JS, /method:"DELETE"/);
   assert.match(ADMIN_JS, /Сам Telegram-топик останется в списке/);
   assert.match(ADMIN_CSS, /@media\(max-width:520px\)/);

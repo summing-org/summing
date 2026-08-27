@@ -368,7 +368,7 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
     assert.deepEqual(projects.owners("client"), [77]);
     assert.equal(projects.canAccess(42, "client"), false);
 
-    const bound = await fetch(`${endpoint}/api/viewer/admin/bindings`, {
+    const retiredObserver = await fetch(`${endpoint}/api/viewer/admin/bindings`, {
       method: "POST",
       headers: { ...auth(1), "content-type": "application/json" },
       body: JSON.stringify({
@@ -379,12 +379,27 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
         role: "observer",
       }),
     });
+    assert.equal(retiredObserver.status, 409);
+    assert.match(await retiredObserver.text(), /observer topics упразднены/);
+    assert.equal(state.byTopic(-300, 44), null);
+    assert.deepEqual(bindingNotifications, []);
+
+    const bound = await fetch(`${endpoint}/api/viewer/admin/bindings`, {
+      method: "POST",
+      headers: { ...auth(1), "content-type": "application/json" },
+      body: JSON.stringify({
+        chatId: -300,
+        topicId: 44,
+        projectId: "client",
+        workspaceId: "backend",
+        role: "primary",
+      }),
+    });
     assert.equal(bound.status, 200, await bound.text());
     const conversation = state.byTopic(-300, 44)!;
     assert.equal(conversation.projectId, "client");
-    assert.equal(conversation.role, "observer");
-    assert.equal(state.projectPortal("client", "backend", conversation.id)?.portalKey, "main");
-    assert.equal(state.projectPortal("client", "backend", conversation.id)?.isDefault, true);
+    assert.equal(conversation.role, "primary");
+    assert.equal(state.projectPortal("client", "backend", conversation.id), null);
     assert.deepEqual(bindingNotifications, [[-300, 44]]);
 
     const unchanged = await fetch(`${endpoint}/api/viewer/admin/bindings`, {
@@ -395,7 +410,7 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
         topicId: 44,
         projectId: "client",
         workspaceId: "backend",
-        role: "observer",
+        role: "primary",
       }),
     });
     assert.equal(unchanged.status, 200, await unchanged.text());

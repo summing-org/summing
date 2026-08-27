@@ -246,6 +246,57 @@ export interface TelegramReportDestinationMark extends TelegramTopicRecord {
   markedAt: number;
 }
 
+export interface CustomerChannel {
+  id: string;
+  chatId: number;
+  topicId: number;
+  title: string;
+  legacyConversationId: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ResultPublication {
+  id: string;
+  channelId: string;
+  projectId: string;
+  workspaceId: string;
+  jobId: string;
+  scheduleId: string | null;
+  outboxId: string;
+  reportText: string;
+  artifactName: string | null;
+  telegramMessageId: number;
+  createdAt: number;
+}
+
+export type ResultMessageAuthor = "publication" | "customer" | "agent";
+
+export interface ResultDiscussionMessage {
+  publicationId: string;
+  chatId: number;
+  topicId: number;
+  telegramMessageId: number;
+  author: ResultMessageAuthor;
+  senderId: number;
+  text: string;
+  createdAt: number;
+}
+
+export interface ProjectFeedback {
+  id: number;
+  publicationId: string;
+  channelId: string;
+  projectId: string;
+  workspaceId: string;
+  teamEventId: number | null;
+  telegramMessageId: number;
+  senderId: number;
+  text: string;
+  status: "new" | "promoted" | "resolved" | "dismissed";
+  createdAt: number;
+}
+
 export interface TelegramUserObservation {
   userId: number;
   username?: string;
@@ -1073,6 +1124,59 @@ export class StateStore {
           WHERE is_default = 1;
         CREATE INDEX IF NOT EXISTS project_portal_bindings_project
           ON project_portal_bindings(project_id, workspace_id, portal_key);
+        CREATE TABLE IF NOT EXISTS customer_channels (
+          id TEXT PRIMARY KEY,
+          chat_id INTEGER NOT NULL,
+          topic_id INTEGER NOT NULL,
+          title TEXT NOT NULL DEFAULT '',
+          legacy_conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+          created_at REAL NOT NULL,
+          updated_at REAL NOT NULL,
+          UNIQUE(chat_id, topic_id)
+        );
+        CREATE TABLE IF NOT EXISTS result_publications (
+          id TEXT PRIMARY KEY,
+          channel_id TEXT NOT NULL REFERENCES customer_channels(id),
+          project_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          job_id TEXT NOT NULL,
+          schedule_id TEXT,
+          outbox_id TEXT NOT NULL UNIQUE,
+          report_text TEXT NOT NULL DEFAULT '',
+          artifact_name TEXT,
+          telegram_message_id INTEGER NOT NULL,
+          created_at REAL NOT NULL,
+          UNIQUE(channel_id, telegram_message_id)
+        );
+        CREATE INDEX IF NOT EXISTS result_publications_project
+          ON result_publications(project_id, workspace_id, created_at DESC);
+        CREATE TABLE IF NOT EXISTS result_discussion_messages (
+          publication_id TEXT NOT NULL REFERENCES result_publications(id) ON DELETE CASCADE,
+          chat_id INTEGER NOT NULL,
+          topic_id INTEGER NOT NULL,
+          telegram_message_id INTEGER NOT NULL,
+          author TEXT NOT NULL CHECK(author IN ('publication', 'customer', 'agent')),
+          sender_id INTEGER NOT NULL DEFAULT 0,
+          text TEXT NOT NULL DEFAULT '',
+          created_at REAL NOT NULL,
+          PRIMARY KEY(chat_id, topic_id, telegram_message_id)
+        );
+        CREATE INDEX IF NOT EXISTS result_discussion_publication
+          ON result_discussion_messages(publication_id, created_at, telegram_message_id);
+        CREATE TABLE IF NOT EXISTS project_feedback (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          publication_id TEXT NOT NULL REFERENCES result_publications(id) ON DELETE CASCADE,
+          team_event_id INTEGER REFERENCES team_events(id) ON DELETE SET NULL,
+          telegram_message_id INTEGER NOT NULL,
+          sender_id INTEGER NOT NULL,
+          text TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL DEFAULT 'new'
+            CHECK(status IN ('new', 'promoted', 'resolved', 'dismissed')),
+          created_at REAL NOT NULL,
+          UNIQUE(publication_id, telegram_message_id)
+        );
+        CREATE INDEX IF NOT EXISTS project_feedback_publication
+          ON project_feedback(publication_id, created_at DESC, id DESC);
         CREATE TABLE IF NOT EXISTS runs (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
@@ -1505,6 +1609,7 @@ export class StateStore {
         );
       }
       this.migrateProjectPortalBindings();
+      this.migrateObserverCustomerChannels();
       const pendingColumns = this.db.prepare("PRAGMA table_info(pending_inputs)").all() as Row[];
       if (!pendingColumns.some((column) => column.name === "access_mode")) {
         this.db.exec(
@@ -2956,6 +3061,278 @@ export class StateStore {
     });
   }
 
+  static customerChannelId(chatId: number, topicId: number): string {
+    const digest = createHash("sha256").update(`${chatId}:${topicId}`).digest("hex").slice(0, 20);
+    return `customer-${digest}`;
+  }
+
+  ensureCustomerChannel(
+    chatId: number,
+    topicId: number,
+    title = "",
+    legacyConversationId: string | null = null,
+  ): CustomerChannel {
+    const now = Date.now() / 1_000;
+    const id = StateStore.customerChannelId(chatId, topicId);
+    this.db.prepare(`
+      INSERT INTO customer_channels
+        (id, chat_id, topic_id, title, legacy_conversation_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(chat_id, topic_id) DO UPDATE SET
+        title = CASE WHEN excluded.title = '' THEN title ELSE excluded.title END,
+        legacy_conversation_id = COALESCE(legacy_conversation_id, excluded.legacy_conversation_id),
+        updated_at = excluded.updated_at
+    `).run(id, chatId, topicId, title.trim(), legacyConversationId, now, now);
+    const row = this.db.prepare("SELECT * FROM customer_channels WHERE id = ?").get(id) as Row;
+    return this.toCustomerChannel(row);
+  }
+
+  customerChannel(chatId: number, topicId: number): CustomerChannel | null {
+    const row = this.db.prepare(`
+      SELECT * FROM customer_channels WHERE chat_id = ? AND topic_id = ?
+    `).get(chatId, topicId) as Row | undefined;
+    return row ? this.toCustomerChannel(row) : null;
+  }
+
+  customerChannelById(id: string): CustomerChannel | null {
+    const row = this.db.prepare("SELECT * FROM customer_channels WHERE id = ?")
+      .get(id) as Row | undefined;
+    return row ? this.toCustomerChannel(row) : null;
+  }
+
+  customerChannelsForProject(projectId: string, workspaceId = ""): CustomerChannel[] {
+    return (this.db.prepare(`
+      SELECT DISTINCT channel.*
+      FROM customer_channels channel
+      JOIN result_publications publication ON publication.channel_id = channel.id
+      WHERE publication.project_id = ? AND (? = '' OR publication.workspace_id = ?)
+      ORDER BY channel.updated_at DESC, channel.id
+    `).all(projectId, workspaceId, workspaceId) as Row[])
+      .map((row) => this.toCustomerChannel(row));
+  }
+
+  recordResultPublication(input: {
+    projectId: string;
+    workspaceId: string;
+    jobId: string;
+    scheduleId?: string | null;
+    outboxId: string;
+    reportText?: string;
+    artifactName?: string | null;
+    chatId: number;
+    topicId: number;
+    channelTitle?: string;
+    telegramMessageId: number;
+    createdAt?: number;
+  }): ResultPublication {
+    if (!Number.isSafeInteger(input.telegramMessageId) || input.telegramMessageId <= 0) {
+      throw new Error("result publication Telegram message id is invalid");
+    }
+    const channel = this.ensureCustomerChannel(
+      input.chatId,
+      input.topicId,
+      input.channelTitle ?? "",
+    );
+    const id = `result-${createHash("sha256").update(input.outboxId).digest("hex").slice(0, 24)}`;
+    const createdAt = input.createdAt ?? Date.now() / 1_000;
+    this.transaction(() => {
+      this.db.prepare(`
+        INSERT INTO result_publications
+          (id, channel_id, project_id, workspace_id, job_id, schedule_id, outbox_id,
+           report_text, artifact_name, telegram_message_id, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(outbox_id) DO UPDATE SET
+          report_text = excluded.report_text,
+          artifact_name = excluded.artifact_name,
+          telegram_message_id = excluded.telegram_message_id
+      `).run(
+        id,
+        channel.id,
+        input.projectId,
+        input.workspaceId,
+        input.jobId,
+        input.scheduleId ?? null,
+        input.outboxId,
+        input.reportText ?? "",
+        input.artifactName ?? null,
+        input.telegramMessageId,
+        createdAt,
+      );
+      this.recordResultMessage({
+        publicationId: id,
+        chatId: input.chatId,
+        topicId: input.topicId,
+        telegramMessageId: input.telegramMessageId,
+        author: "publication",
+        senderId: 0,
+        text: input.reportText ?? "",
+        createdAt,
+      });
+    });
+    const row = this.db.prepare("SELECT * FROM result_publications WHERE outbox_id = ?")
+      .get(input.outboxId) as Row;
+    return this.toResultPublication(row);
+  }
+
+  recordResultMessage(input: {
+    publicationId: string;
+    chatId: number;
+    topicId: number;
+    telegramMessageId: number;
+    author: ResultMessageAuthor;
+    senderId: number;
+    text: string;
+    createdAt?: number;
+  }): void {
+    this.db.prepare(`
+      INSERT INTO result_discussion_messages
+        (publication_id, chat_id, topic_id, telegram_message_id, author, sender_id, text, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(chat_id, topic_id, telegram_message_id) DO UPDATE SET
+        text = excluded.text,
+        sender_id = excluded.sender_id
+    `).run(
+      input.publicationId,
+      input.chatId,
+      input.topicId,
+      input.telegramMessageId,
+      input.author,
+      input.senderId,
+      input.text,
+      input.createdAt ?? Date.now() / 1_000,
+    );
+  }
+
+  resultPublicationForMessage(
+    chatId: number,
+    topicId: number,
+    telegramMessageId: number,
+  ): ResultPublication | null {
+    const row = this.db.prepare(`
+      SELECT publication.*
+      FROM result_discussion_messages message
+      JOIN result_publications publication ON publication.id = message.publication_id
+      WHERE message.chat_id = ? AND message.topic_id = ? AND message.telegram_message_id = ?
+    `).get(chatId, topicId, telegramMessageId) as Row | undefined;
+    return row ? this.toResultPublication(row) : null;
+  }
+
+  resultDiscussion(publicationId: string, limit = 30): ResultDiscussionMessage[] {
+    const bounded = Math.max(1, Math.min(100, Math.trunc(limit)));
+    const rows = this.db.prepare(`
+      SELECT * FROM (
+        SELECT * FROM result_discussion_messages
+        WHERE publication_id = ? ORDER BY created_at DESC, telegram_message_id DESC LIMIT ?
+      ) ORDER BY created_at, telegram_message_id
+    `).all(publicationId, bounded) as Row[];
+    return rows.map((row) => this.toResultDiscussionMessage(row));
+  }
+
+  recordProjectFeedback(input: {
+    publicationId: string;
+    teamEventId?: number | null;
+    telegramMessageId: number;
+    senderId: number;
+    text: string;
+    createdAt?: number;
+  }): ProjectFeedback {
+    const publication = this.db.prepare("SELECT * FROM result_publications WHERE id = ?")
+      .get(input.publicationId) as Row | undefined;
+    if (!publication) throw new Error("result publication was not found");
+    const channel = this.db.prepare("SELECT * FROM customer_channels WHERE id = ?")
+      .get(publication.channel_id as SQLInputValue) as Row;
+    const createdAt = input.createdAt ?? Date.now() / 1_000;
+    this.transaction(() => {
+      this.recordResultMessage({
+        publicationId: input.publicationId,
+        chatId: Number(channel.chat_id),
+        topicId: Number(channel.topic_id),
+        telegramMessageId: input.telegramMessageId,
+        author: "customer",
+        senderId: input.senderId,
+        text: input.text,
+        createdAt,
+      });
+      this.db.prepare(`
+        INSERT INTO project_feedback
+          (publication_id, team_event_id, telegram_message_id, sender_id, text, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(publication_id, telegram_message_id) DO UPDATE SET
+          team_event_id = COALESCE(excluded.team_event_id, team_event_id),
+          text = excluded.text
+      `).run(
+        input.publicationId,
+        input.teamEventId ?? null,
+        input.telegramMessageId,
+        input.senderId,
+        input.text,
+        createdAt,
+      );
+    });
+    const row = this.db.prepare(`
+      SELECT feedback.*, publication.channel_id, publication.project_id,
+        publication.workspace_id
+      FROM project_feedback feedback
+      JOIN result_publications publication ON publication.id = feedback.publication_id
+      WHERE feedback.publication_id = ? AND feedback.telegram_message_id = ?
+    `).get(input.publicationId, input.telegramMessageId) as Row;
+    return this.toProjectFeedback(row);
+  }
+
+  projectFeedbackForMessage(
+    publicationId: string,
+    telegramMessageId: number,
+  ): ProjectFeedback | null {
+    const row = this.db.prepare(`
+      SELECT feedback.*, publication.channel_id, publication.project_id,
+        publication.workspace_id
+      FROM project_feedback feedback
+      JOIN result_publications publication ON publication.id = feedback.publication_id
+      WHERE feedback.publication_id = ? AND feedback.telegram_message_id = ?
+    `).get(publicationId, telegramMessageId) as Row | undefined;
+    return row ? this.toProjectFeedback(row) : null;
+  }
+
+  projectFeedback(input: {
+    projectId: string;
+    workspaceId?: string;
+    channelId?: string;
+    query?: string;
+    beforeFeedbackId?: number;
+    limit?: number;
+  }): ProjectFeedback[] {
+    const query = String(input.query ?? "").trim().toLowerCase();
+    const workspaceId = String(input.workspaceId ?? "").trim();
+    const channelId = String(input.channelId ?? "").trim();
+    const before = Number.isSafeInteger(input.beforeFeedbackId) && Number(input.beforeFeedbackId) > 0
+      ? Number(input.beforeFeedbackId)
+      : Number.MAX_SAFE_INTEGER;
+    const limit = Math.max(1, Math.min(50, Math.trunc(input.limit ?? 20)));
+    return (this.db.prepare(`
+      SELECT feedback.*, publication.channel_id, publication.project_id,
+        publication.workspace_id
+      FROM project_feedback feedback
+      JOIN result_publications publication ON publication.id = feedback.publication_id
+      WHERE publication.project_id = ?
+        AND (? = '' OR publication.workspace_id = ?)
+        AND (? = '' OR publication.channel_id = ?)
+        AND (? = '' OR instr(lower(feedback.text), ?) > 0)
+        AND feedback.id < ?
+      ORDER BY feedback.id DESC
+      LIMIT ?
+    `).all(
+      input.projectId,
+      workspaceId,
+      workspaceId,
+      channelId,
+      channelId,
+      query,
+      query,
+      before,
+      limit,
+    ) as Row[]).map((row) => this.toProjectFeedback(row));
+  }
+
   observerProjectSources(projectId: string): TeamSource[] {
     return (this.db.prepare(`
       SELECT DISTINCT source.*
@@ -3542,6 +3919,37 @@ export class StateStore {
     }
   }
 
+  private migrateObserverCustomerChannels(): void {
+    const rows = this.db.prepare(`
+      SELECT conversation.id AS conversation_id, conversation.chat_id, conversation.topic_id,
+        COALESCE(NULLIF(topic.name, ''), 'topic ' || CAST(conversation.topic_id AS TEXT)) AS title,
+        conversation.created_at, conversation.updated_at
+      FROM conversations conversation
+      LEFT JOIN telegram_topics topic
+        ON topic.chat_id = conversation.chat_id AND topic.topic_id = conversation.topic_id
+      WHERE conversation.binding_mode = 'external-readonly'
+    `).all() as Row[];
+    for (const row of rows) {
+      this.db.prepare(`
+        INSERT INTO customer_channels
+          (id, chat_id, topic_id, title, legacy_conversation_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(chat_id, topic_id) DO UPDATE SET
+          title = CASE WHEN excluded.title = '' THEN title ELSE excluded.title END,
+          legacy_conversation_id = COALESCE(legacy_conversation_id, excluded.legacy_conversation_id),
+          updated_at = MAX(updated_at, excluded.updated_at)
+      `).run(
+        StateStore.customerChannelId(Number(row.chat_id), Number(row.topic_id)),
+        row.chat_id as SQLInputValue,
+        row.topic_id as SQLInputValue,
+        row.title as SQLInputValue,
+        row.conversation_id as SQLInputValue,
+        row.created_at as SQLInputValue,
+        row.updated_at as SQLInputValue,
+      );
+    }
+  }
+
   private ensureProjectPortalDefault(projectId: string, workspaceId: string): void {
     const selected = this.db.prepare(`
       SELECT id FROM project_portal_bindings
@@ -3619,7 +4027,7 @@ export class StateStore {
         if (existingPrimary) {
           throw new Error(
             "у Project/Workspace уже есть основной рабочий топик; " +
-              "сначала сделайте его наблюдателем или отвяжите",
+              "сначала отвяжите или перепривяжите его",
           );
         }
       }
@@ -3703,6 +4111,12 @@ export class StateStore {
           now,
         );
         this.ensureProjectPortalDefault(projectId, workspaceId);
+        this.ensureCustomerChannel(
+          chatId,
+          topicId,
+          topic?.name || `topic ${topicId}`,
+          conversationId,
+        );
       }
       if (oldPortal && (
         oldPortal.project_id !== projectId || oldPortal.workspace_id !== workspaceId ||
@@ -3712,6 +4126,12 @@ export class StateStore {
           String(oldPortal.project_id),
           String(oldPortal.workspace_id),
         );
+      }
+      if (role === "primary") {
+        this.db.prepare(`
+          UPDATE customer_channels SET legacy_conversation_id = NULL, updated_at = ?
+          WHERE legacy_conversation_id = ?
+        `).run(now, conversationId);
       }
     });
     return this.get(conversationId);
@@ -3742,7 +4162,10 @@ export class StateStore {
 
   byTopic(chatId: number, topicId: number): Conversation | null {
     const row = this.db
-      .prepare("SELECT * FROM conversations WHERE chat_id = ? AND topic_id = ?")
+      .prepare(`
+        SELECT * FROM conversations
+        WHERE chat_id = ? AND topic_id = ? AND binding_mode = 'project'
+      `)
       .get(chatId, topicId);
     return row ? this.toConversation(row as Row) : null;
   }
@@ -3750,6 +4173,15 @@ export class StateStore {
   listConversations(): Conversation[] {
     return (this.db.prepare("SELECT * FROM conversations ORDER BY updated_at DESC").all() as Row[])
       .map((row) => this.toConversation(row));
+  }
+
+  primaryConversation(projectId: string, workspaceId: string): Conversation | null {
+    const row = this.db.prepare(`
+      SELECT * FROM conversations
+      WHERE project_id = ? AND workspace_id = ? AND binding_mode = 'project'
+      ORDER BY created_at, id LIMIT 1
+    `).get(projectId, workspaceId) as Row | undefined;
+    return row ? this.toConversation(row) : null;
   }
 
   private toConversation(row: Row): Conversation {
@@ -3771,6 +4203,64 @@ export class StateStore {
       activeTurnId: row.active_turn_id === null ? null : String(row.active_turn_id),
       streamMessageId: row.stream_message_id === null ? null : Number(row.stream_message_id),
       worktreePath: row.worktree_path === null ? null : String(row.worktree_path),
+    };
+  }
+
+  private toCustomerChannel(row: Row): CustomerChannel {
+    return {
+      id: String(row.id),
+      chatId: Number(row.chat_id),
+      topicId: Number(row.topic_id),
+      title: String(row.title ?? ""),
+      legacyConversationId:
+        row.legacy_conversation_id === null ? null : String(row.legacy_conversation_id),
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
+    };
+  }
+
+  private toResultPublication(row: Row): ResultPublication {
+    return {
+      id: String(row.id),
+      channelId: String(row.channel_id),
+      projectId: String(row.project_id),
+      workspaceId: String(row.workspace_id),
+      jobId: String(row.job_id),
+      scheduleId: row.schedule_id === null ? null : String(row.schedule_id),
+      outboxId: String(row.outbox_id),
+      reportText: String(row.report_text ?? ""),
+      artifactName: row.artifact_name === null ? null : String(row.artifact_name),
+      telegramMessageId: Number(row.telegram_message_id),
+      createdAt: Number(row.created_at),
+    };
+  }
+
+  private toResultDiscussionMessage(row: Row): ResultDiscussionMessage {
+    return {
+      publicationId: String(row.publication_id),
+      chatId: Number(row.chat_id),
+      topicId: Number(row.topic_id),
+      telegramMessageId: Number(row.telegram_message_id),
+      author: String(row.author) as ResultMessageAuthor,
+      senderId: Number(row.sender_id),
+      text: String(row.text ?? ""),
+      createdAt: Number(row.created_at),
+    };
+  }
+
+  private toProjectFeedback(row: Row): ProjectFeedback {
+    return {
+      id: Number(row.id),
+      publicationId: String(row.publication_id),
+      channelId: String(row.channel_id),
+      projectId: String(row.project_id),
+      workspaceId: String(row.workspace_id),
+      teamEventId: row.team_event_id === null ? null : Number(row.team_event_id),
+      telegramMessageId: Number(row.telegram_message_id),
+      senderId: Number(row.sender_id),
+      text: String(row.text ?? ""),
+      status: String(row.status) as ProjectFeedback["status"],
+      createdAt: Number(row.created_at),
     };
   }
 

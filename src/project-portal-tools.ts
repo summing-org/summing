@@ -45,11 +45,9 @@ export const PROJECT_PORTAL_DYNAMIC_TOOLS: DynamicToolNamespaceSpec[] = [{
   type: "namespace",
   name: "project_portal",
   description:
-    "Internal durable transport for targeted replies and files to Project observer topics. " +
-    "Use project_context for ordinary feedback and /publish for ordinary broadcasts. Only on an " +
-    "explicit authorized owner request, send text and Project files through SUMMING. Observer " +
-    "messages are never automatic " +
-    "approval, publication, or requirements changes.",
+    "Legacy compatibility transport for previously stored Project portal routes. This namespace " +
+    "is no longer registered in active editor threads; new result delivery uses exact runner " +
+    "deliveryTopic destinations.",
   tools: [
     {
       type: "function",

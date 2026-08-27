@@ -1,6 +1,6 @@
-# SUMMING 9.25: архитектура, эксплуатация и разработка
+# SUMMING 9.26: архитектура, эксплуатация и разработка
 
-> Версия: **9.25.0**
+> Версия: **9.26.0**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
 > Последняя сверка с кодом: **27 августа 2026 года**.
 
@@ -186,29 +186,26 @@ telegram chat_id + message_thread_id
        project_id/workspace_id
                 ↓
        conversation role
-       ├── primary → editor Codex thread
-       └── observer → read-only Q&A Codex thread
+       └── primary → editor Codex thread
 ```
 
 Telegram topic не равен Project. Для каждого Project/Workspace допускается один
-`primary` — основной рабочий стол owners и Codex — и любое число `observer`.
+`primary` — основной внутренний рабочий стол owners и Codex.
 История у Conversations разная; общая Project memory доступна только write-контексту
 primary. Перепривязать уже занятый topic может только владелец текущего Project или
 администратор.
 
 В primary администратор и назначенный Project owner работают в editor thread.
-Остальные участники primary получают общий для topic read-only Q&A thread. Observer
-принудительно read-only для всех, включая owner: slash-команды блокируются до Codex,
-а прямое упоминание или reply открывает Q&A по опубликованному Project snapshot,
-опубликованным обновлениям и истории этого observer topic. Read-only thread не видит
+Остальные участники primary получают общий для topic read-only Q&A thread. Он не видит
 editor history, runtime identity/project memory, `.env` и файлы ключей.
 
-`/publish <обновление>` доступна owner только в primary и одинаково отправляет явно
-сформулированный безопасный текст всем observers текущего Workspace через durable
-outbox. Обычные сообщения observers сохраняются как недоверенный feedback. До 20
-последних consent-visible комментариев автоматически добавляются к следующему
-owner-run как контекст, но не становятся требованиями, решениями или разрешениями
-без явного указания owner. Комментарии разных observers не рассылаются друг другу.
+Внешний Telegram topic — это `customer channel`, а не Conversation и не Project
+binding. Когда runner публикует туда отчёт, runtime создаёт `result publication` и
+связывает последующие replies с её `resultId`. Result Q&A получает только доставленный
+текст, bounded artifact, customer-safe producer metadata и собственную discussion
+chain; Git, Project memory и внутренний owner context отсутствуют. Customer feedback
+сохраняется как evidence и попадает в Project context только после consent checks,
+но не становится intent без явной команды owner.
 
 Чтобы runtime получал каждое обычное сообщение, бот должен быть администратором
 forum group либо иметь отключённый Privacy Mode. Во втором варианте используйте
@@ -541,11 +538,9 @@ summing/<project-id>/<conversation-id>
 следующих обращениях используется тот же worktree и та же ветка. Если каталог
 worktree был удалён, но ветка сохранилась, она подключается без reset.
 
-Исключение — observer worktree. Перед каждым read-only Q&A runtime проверяет, что
-он чист и его `HEAD` является предком опубликованного `HEAD` исходного checkout,
-после чего выполняет только `merge --ff-only` к этому снимку. Локальные изменения,
-divergence или observer-ветка впереди authority останавливают Q&A до проверки
-оператором: observer никогда не получает скрытую собственную линию разработки.
+Result-context не создаёт worktree вообще: он выполняется ephemeral с
+`workspaceAccess=false`. Сохранённый legacy observer worktree может оставаться на
+диске для совместимости, но runtime больше не маршрутизирует в него Telegram-вопросы.
 
 Перед повторным использованием существующего worktree SUMMING сравнивает его
 общий Git directory с исходным репозиторием. Если topic перепривязали к Workspace
@@ -900,7 +895,7 @@ Project Viewer больше не содержит системную вклад�
 всей группы; точечный отзыв автора в consent ledger остаётся явным deny и имеет
 приоритет над групповым основанием.
 
-Primary и observer bind/rebind не публикуют служебных сообщений в связанную
+Primary bind/rebind не публикует служебных сообщений в связанную
 Telegram-группу. Резервная команда подтверждает результат только в чате, где её
 вызвали, а Admin Mini App показывает результат внутри своего интерфейса. Сохранение
 binding и связь Team Space с Project от групповой доставки не зависят.
@@ -1132,55 +1127,47 @@ Workspace сначала фиксируют точные `jobId/name` в отд�
 без symlink, переносит его в приватный `.trash` на том же filesystem и обновляет
 `artifactCount`. Результат различает успешно перемещённые и неудавшиеся цели.
 
-### 9.2. Доставка отчётов и необязательные Project observers
+### 9.2. Result delivery, customer channels и feedback
 
-Топик доставки отчётов и Project observer — разные сущности. Для доставки достаточно
-обнаруженного Telegram topic и сохранённых numeric IDs; связывать его с Project не
-нужно. Прямой reply на отправленное runtime сообщение сопоставляется с durable outbox
-record и открывает ephemeral read-only Codex thread только для этого вопроса. Thread
-видит опубликованный Project snapshot и bounded содержимое report artifact, не получает
-network/write tools и не сохраняется как Conversation. Другие сообщения того же топика
-не получают Project context.
+Внешний топик не bind-ится к Project. Owner указывает точное имя обнаруженного
+Telegram topic в `deliveryTopic`; если имя неизвестно или неоднозначно, пишет в
+нужном топике «@bot отчёты сюда» и после этого подтверждает план расписания в primary.
+В расписании фиксируются numeric `chat_id/topic_id` и человекочитаемый label.
 
-Observer имеет смысл сохранять только когда нужен постоянный read-only Q&A, история
-публикаций и feedback loop, а не ради разовой доставки.
-
-Project/Workspace организован как основной рабочий стол `primary` и соседние
-read-only столы `observer`. Все решения, изменения, runner/service actions и
-публикации принимаются owner в primary. Observer всегда read-only даже для owner:
-его сообщения — недоверенное evidence, а не ТЗ, команда, approval или разрешение
-на публикацию.
-
-Администратор выбирает роль в Mini App либо привязывает observer резервной командой:
+После успешной доставки runner report runtime создаёт:
 
 ```text
-/bind_observer_topic <chat_id> <topic_id> <project> [workspace]
+CustomerChannel(chat_id, topic_id)
+  └── ResultPublication(resultId, project, workspace, job, schedule, outbox)
+        ├── ResultDiscussionMessage(publication/customer/agent)
+        └── ProjectFeedback(new/promoted/resolved/dismissed)
 ```
 
-Обычный bind не требует route key или default destination. Существующее сохранённое
-значение `external-readonly` читается как роль `observer`, поэтому обновление не
-требует destructive SQLite migration. Новая primary-привязка отклоняется, если у
-этого Project/Workspace уже есть другой primary.
+`CustomerChannel` не содержит `projectId`. Один внешний топик может принимать
+результаты разных проектов, а correlation всегда идёт через Telegram reply chain
+конкретного `resultId`. Reply на исходный отчёт и на последующие ответы бота открывает
+ephemeral Codex thread с `workspaceAccess=false`, без Git roots, network, Project
+memory, owner history и Team Space retrieval. Ему передаются только customer-safe
+producer metadata, доставленный текст, bounded report artifact и сообщения этой
+result discussion.
 
-Owner публикует безопасное обновление только явно:
+Каждый customer reply в цепочке сохраняется как feedback и вызывает короткое
+уведомление в primary. Это evidence, а не intent: runtime не запускает job, service,
+Codex write-turn и не меняет требования автоматически. `project_context` показывает
+owner только consent-visible feedback для текущего Project/Workspace; owner должен
+явно решить, что взять в работу. `/publish`, observer fan-out, постоянный observer Q&A
+и `project_portal` host namespace больше не используются.
 
-```text
-/publish Исправление авторизации принято и доступно в версии 2.4.
-```
+Существующие `external-readonly` Conversations и `project_portal_bindings` не удаляются:
+они мигрируются в customer-channel catalog и остаются читаемыми для истории и
+совместимой доставки уже созданных legacy routes. `byTopic`, Admin bind UI, startup
+processors и Project host tools их игнорируют. Резервные `/bind_observer_topic` и
+`/bind_external_topic` отвечают сообщением о новой модели, но ничего не создают.
 
-Один текст ставится в durable outbox отдельно для каждого observer текущего
-Workspace. Комментарии observers не пересылаются друг другу. `project_context`
-даёт primary bounded read-only поиск по feedback, а до 20 последних видимых модели
-комментариев автоматически входят в следующий owner-run с жёсткой инструкцией не
-считать их требованиями. Без model-egress consent текст скрыт, но контекст сообщает
-число и время скрытых комментариев без автора и содержимого.
-
-Транспортная совместимость остаётся внутренней инфраструктурой. Namespace
-`project_portal` и observer bindings используются для точного ответа или безопасной
-пересылки файла; обычный bind UI не показывает route key/default. Runner публикует
-декларативный bounded `portal-messages.json`. В новом расписании весь batch идёт в
-сохранённый exact destination, поэтому необязательный `portalKey` игнорируется. Он
-читается только для расписаний без destination, мигрированных со старой версии:
+Runner по-прежнему принимает декларативный bounded `portal-messages.json`. В новом
+расписании весь batch идёт в сохранённый exact destination, поэтому `portalKey`
+игнорируется. Он читается только для расписаний без destination, мигрированных со
+старой версии:
 
 ```json
 {
@@ -1197,8 +1184,8 @@ Workspace. Комментарии observers не пересылаются дру
 }
 ```
 
-Runtime копирует payload в filesystem outbox до Bot API call. Route может быть
-observer binding либо прямым Telegram `chat_id/topic_id`. Запись содержит
+Runtime копирует payload в filesystem outbox до Bot API call. Новый route — прямой
+Telegram `chat_id/topic_id`; legacy binding остаётся compatibility-only. Запись содержит
 idempotency key, SHA-256, route, actor, attempts, origin Conversation и ограниченный
 context отчёта для распознавания прямого reply. Временная
 ошибка повторяется экспоненциально не более пяти раз; постоянная или исчерпавшая
@@ -1209,14 +1196,6 @@ Telegram мог принять сообщение до падения. Внут�
 Один drain обрабатывает не более 20 записей; очередь ограничена 1000 активными
 записями и 250 МБ вложений. `sent/cancelled` хранятся 30 дней,
 `dead-letter/uncertain` — 90 дней.
-
-Входящий файл observer topic после secret scan шифруется локальным
-AES-256-GCM ключом, получает SHA-256, `artifactId` и хранится бессрочно.
-История возвращает метаданные, но не байты. Только активный авторизованный owner
-turn может расшифровать файл в `.summing-runtime/attachments/` через
-`project_portal.materialize_attachment` либо переслать его по `attachmentId`.
-`send` принимает до десяти workspace paths или durable attachment IDs. Key и
-encrypted artifacts включены в node recovery (key — только при INCLUDE SECRETS).
 
 Dynamic tools нельзя добавить при `thread/resume`, поэтому Conversation хранит
 версию capability. При первом write-turn существующего topic старый editor
@@ -1236,7 +1215,6 @@ thread без `runner-control-v1` атомарно переносится в `pr
 | `/project_clone <project> <primary_owner_id> <repo> <git_url>` | Клонировать управляемый Git Project; только администратор в личном чате. |
 | `/topics` | Список обнаруженных Telegram chats/topics и их bindings; только администратор в личном чате. |
 | `/bind_topic <chat_id> <topic_id> <project> [workspace]` | Удалённо назначить основной рабочий topic; только администратор в личном чате. |
-| `/bind_observer_topic <chat_id> <topic_id> <project> [workspace]` | Привязать read-only топик-наблюдатель; основной интерфейс — Admin Mini App. |
 | `/projects` | Список доступных отправителю Project и Workspace. |
 | `/bind <project> [workspace]` | Привязать текущий topic. |
 | `/status` | Версия SUMMING, account, plan, binding, active/pending. |
@@ -1244,7 +1222,6 @@ thread без `runner-control-v1` атомарно переносится в `pr
 | `/steer <текст>` | Направить текст в текущий Codex turn. |
 | `/cancel` | Прервать активный turn topic. |
 | `/new` | Начать новый Codex thread в topic. |
-| `/publish <обновление>` | Из primary явно опубликовать безопасный текст всем observers текущего Workspace. |
 | `/remember <факт>` | Добавить факт в Project memory. |
 | `/memory`, `/memory_status` | Показать видимое состояние Team Space. |
 | `/review` | Follow-up с просьбой проверить незакоммиченные изменения и не менять файлы. |
@@ -1303,10 +1280,12 @@ $SUMMING_DATA_DIR/
 
 SQLite хранит:
 
-- binding `chat_id/topic_id → project/workspace/role`; application invariant — один
-  primary на Project/Workspace и любое число observers;
-- внутренние compatibility-маршруты `project/workspace/portalKey → observer destination`
-  для targeted replies, файлов и только существующих runner schedules;
+- active binding `chat_id/topic_id → project/workspace`; application invariant — один
+  primary на Project/Workspace;
+- customer channels без Project binding, result publications, discussion-message
+  correlation и Project feedback;
+- внутренние compatibility-маршруты `project/workspace/portalKey → legacy destination`
+  только для существующих записей и расписаний;
 - editor и read-only Codex thread id;
 - активный turn и Telegram stream message id;
 - pending steer/follow-up с `access_mode`, `response_mode`, Telegram user id и
@@ -1325,8 +1304,12 @@ SQLite хранит:
 
 | Таблица | Содержимое |
 |---|---|
-| `conversations` | Binding; stored legacy mode отображается в domain role primary/observer; editor/read-only threads, active turn, stream message и worktree path. |
-| `project_portal_bindings` | Внутренний transport route observer Conversation для durable outbox и legacy portalKey. |
+| `conversations` | Active primary binding и сохранённые неактивные legacy observer records; editor/read-only threads, active turn, stream message и worktree path. |
+| `customer_channels` | Внешние Telegram destinations без Project binding; legacy observer rows мигрируют сюда без удаления истории. |
+| `result_publications` | Связь одного доставленного result с Project/Workspace/job/schedule/outbox и Telegram message. |
+| `result_discussion_messages` | Telegram reply-chain одного result: publication, customer и agent messages. |
+| `project_feedback` | Customer comments, привязанные к resultId, со статусом promotion lifecycle. |
+| `project_portal_bindings` | Compatibility-only transport route для legacy outbox и portalKey. |
 | `pending_inputs` | Очередь, access/response mode, Telegram user id, attachment JSON и состояние обработки. |
 | `runs` | Access/response mode, prompt, response, status, error и время выполнения. |
 | `runtime_state` | Сейчас только Telegram update offset. |
@@ -1391,7 +1374,7 @@ Telegram-проекты находятся в SQLite и не записываю�
 | `projects.<id>.self_change` | Пометка собственного репозитория. | false |
 | `...workspaces.<id>.path` | Абсолютный локальный путь. | обязателен |
 
-Raw Team Space evidence и зашифрованные observer-вложения хранятся бессрочно.
+Raw Team Space evidence и сохранённые legacy portal-вложения хранятся бессрочно.
 Возрастной retention-loop отсутствует; старые `team_memory.raw_retention_days` и
 `team_memory.announce_on_join` при обновлении безопасно игнорируются.
 
@@ -1815,7 +1798,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "9.25.0",
+  "version": "9.26.0",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",

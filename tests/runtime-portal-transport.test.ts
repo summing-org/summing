@@ -239,6 +239,14 @@ test("scheduled reports deliver to an observed topic without an observer binding
       jobId: job.id,
       scheduleId: schedule.id,
     });
+    const publication = runtime.state.resultPublicationForMessage(-100700, 67800, 512);
+    assert.equal(publication?.jobId, job.id);
+    assert.equal(publication?.scheduleId, schedule.id);
+    assert.equal(runtime.state.customerChannel(-100700, 67800)?.title, "Reports");
+    assert.deepEqual(
+      runtime.state.resultDiscussion(publication!.id).map((message) => message.author),
+      ["publication"],
+    );
   } finally {
     runtime.state.close();
     await runtime.telegram.close();
@@ -325,30 +333,28 @@ test("portal history reports hidden comments without exposing their author or co
   }
 });
 
-test("owner context hears observer feedback while observer context also sees published updates", async () => {
+test("owner context sees consented feedback linked to a concrete result", async () => {
   const { root, runtime } = fixture();
   const primary = runtime.state.bind(1, 0, "demo", "repo", "primary");
-  runtime.state.bind(-100500, 9, "demo", "repo", "observer");
-  const published = runtime.state.recordTeamEvent({
-    provider: "telegram",
-    externalSpaceId: "-100500",
-    externalThreadId: "9",
-    spaceName: "Observer group",
-    sourceTitle: "Observer table",
-    externalEventId: "900",
-    eventKind: "message",
-    senderExternalId: "123",
-    senderDisplayName: "@summing_bot",
-    text: "Published project update",
-    occurredAt: 100,
-    administratorUserId: 1,
+  const publication = runtime.state.recordResultPublication({
+    projectId: "demo",
+    workspaceId: "repo",
+    jobId: "daily-report",
+    scheduleId: "morning",
+    outboxId: "result-feedback-test",
+    reportText: "Published project result",
+    chatId: -100500,
+    topicId: 9,
+    channelTitle: "Customer results",
+    telegramMessageId: 900,
+    createdAt: 100,
   });
-  const feedback = runtime.state.recordTeamEvent({
+  const event = runtime.state.recordTeamEvent({
     provider: "telegram",
     externalSpaceId: "-100500",
     externalThreadId: "9",
-    spaceName: "Observer group",
-    sourceTitle: "Observer table",
+    spaceName: "Customer group",
+    sourceTitle: "Customer results",
     externalEventId: "901",
     eventKind: "message",
     senderExternalId: "42",
@@ -357,10 +363,17 @@ test("owner context hears observer feedback while observer context also sees pub
     occurredAt: 110,
     administratorUserId: 1,
   });
-  assert.ok(published);
-  assert.ok(feedback);
+  assert.ok(event);
+  const feedback = runtime.state.recordProjectFeedback({
+    publicationId: publication.id,
+    teamEventId: event.id,
+    telegramMessageId: 901,
+    senderId: 42,
+    text: "Please keep the previous export format",
+    createdAt: 110,
+  });
   runtime.knowledgeSync.store.grantConsent({
-    sourceId: StateStore.teamSourceId("telegram", "-100500", "0"),
+    sourceId: event.sourceId,
     telegramUserId: 42,
     proof: "observer feedback test consent",
   });
@@ -369,35 +382,37 @@ test("owner context hears observer feedback while observer context also sees pub
     workspaceId: "repo",
     conversationId: primary.id,
     actorUserId: 1,
-    turnId: "turn-observer-feedback",
+    turnId: "turn-result-feedback",
   };
   try {
     const ownerFeedback = await runtime.projectContextTool(
       context,
       "search",
-      { limit: 20, includePublished: false },
-    ) as { events: Array<{ text: string; sourceTitle: string }> };
-    assert.deepEqual(ownerFeedback.events, [{
-      eventId: feedback.id,
-      sourceId: feedback.sourceId,
-      sourceTitle: "Observer table",
-      telegramMessageId: "901",
-      replyToTelegramMessageId: null,
-      author: "Observer",
-      telegramUserId: "42",
+      { limit: 20 },
+    ) as { feedback: Array<{ text: string; channelTitle: string }> };
+    assert.deepEqual(ownerFeedback.feedback, [{
+      feedbackId: feedback.id,
+      resultId: publication.id,
+      channelId: publication.channelId,
+      channelTitle: "Customer results",
+      telegramMessageId: 901,
+      telegramUserId: 42,
       occurredAt: 110,
+      status: "new",
       text: "Please keep the previous export format",
-      attachments: [],
     }]);
-    const observerFeed = await runtime.projectContextTool(
+    const sources = await runtime.projectContextTool(
       context,
-      "search",
-      { limit: 20, includePublished: true },
-    ) as { events: Array<{ text: string }> };
-    assert.deepEqual(
-      observerFeed.events.map((event) => event.text),
-      ["Please keep the previous export format", "Published project update"],
-    );
+      "sources",
+      {},
+    ) as { channels: Array<{ channelId: string; title: string }> };
+    assert.deepEqual(sources.channels, [{
+      channelId: publication.channelId,
+      transport: "telegram",
+      chatId: -100500,
+      topicId: 9,
+      title: "Customer results",
+    }]);
   } finally {
     runtime.state.close();
     await runtime.telegram.close();

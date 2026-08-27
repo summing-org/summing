@@ -53,7 +53,6 @@ export function helpMessage(isAdministrator: boolean): string {
     command("/remember_list", "показать активные пункты памяти и их id"),
     command("/remember_replace <id> <kind>: <текст>", "заменить пункт с сохранением provenance"),
     command("/remember_forget <id>", "архивировать пункт без физического удаления"),
-    command("/publish <обновление>", "опубликовать безопасное обновление наблюдателям Workspace"),
     command("/memory", "показать состояние и знания текущего Team Space"),
     command("/review", "проверить текущие незакоммиченные изменения без их исправления"),
   ];
@@ -71,10 +70,6 @@ export function helpMessage(isAdministrator: boolean): string {
       command(
         "/bind_topic <chat_id> <topic_id> <project> [workspace]",
         "привязать топик из личного чата",
-      ),
-      command(
-        "/bind_observer_topic <chat_id> <topic_id> <project> [workspace]",
-        "привязать read-only топик-наблюдатель проекта",
       ),
       example("/bind_topic -1001234567890 42 summing repo"),
       command("/project_create <project> <primary_owner_id> <repo>", "создать локальный Git-проект"),

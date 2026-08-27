@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -260,6 +260,7 @@ test("owners control projects while group participants get read-only Q&A", async
       report?: {
         projectId: string;
         workspaceId: string;
+        resultId: string;
         jobId: string;
         scheduleId: string | null;
         text: string;
@@ -310,43 +311,40 @@ test("owners control projects while group participants get read-only Q&A", async
     assert.deepEqual(unboundQuestions.at(-1)?.report, {
       projectId: "alpha",
       workspaceId: "repo",
+      resultId: runtime.state.resultPublicationForMessage(-300, 45, 700)?.id,
       jobId: "report-job",
       scheduleId: "report-schedule",
       text: "Утренний отчёт готов.",
       fileName: null,
     });
+    assert.equal(runtime.state.projectFeedback({
+      projectId: "alpha",
+      workspaceId: "repo",
+    })[0]?.publicationId, unboundQuestions.at(-1)?.report?.resultId);
+    assert.ok(replies.some((reply) => reply.includes("Customer feedback #")));
     unboundQuestions.length = 0;
 
     const observerChatMessagesBefore = replyChats.filter((chatId) => chatId === -300).length;
-    await send(1, "/bind_observer_topic -300 44 alpha repo", 1, "private");
-    const externalPortal = runtime.state.byTopic(-300, 44)!;
-    assert.equal(externalPortal.role, "observer");
-    assert.match(replies.at(-1) ?? "", /Топик-наблюдатель проекта привязан/);
+    await send(1, "/bind_observer_topic -300 46 alpha repo", 1, "private");
+    assert.equal(runtime.state.byTopic(-300, 46), null);
+    assert.match(replies.at(-1) ?? "", /Observer topics упразднены/);
     assert.equal(
       replyChats.filter((chatId) => chatId === -300).length,
       observerChatMessagesBefore,
     );
     await send(42, "/publish Исправление авторизации принято и опубликовано.", -100, "supergroup", 5);
-    const publishedIndex = replies.findIndex((reply) =>
-      reply.includes("📣 Обновление проекта «alpha»") &&
-      reply.includes("Исправление авторизации принято")
+    assert.match(replies.at(-1) ?? "", /observer fan-out/);
+    assert.equal(
+      replyChats.filter((chatId) => chatId === -300).length,
+      observerChatMessagesBefore,
     );
-    assert.notEqual(publishedIndex, -1);
-    assert.equal(replyChats[publishedIndex], -300);
-    assert.equal(replyOptions[publishedIndex]?.topicId, 44);
-    assert.match(replies.at(-1) ?? "", /Обновление опубликовано: 1\/1/);
     startedConversation = "";
-    await send(42, "Обсудим детали отчёта", -300, "supergroup", 44);
+    await send(42, "Обсудим детали отчёта", -300, "supergroup", 46);
     assert.equal(startedConversation, "");
-    await send(42, "@summing_bot что означает второй пункт?", -300, "supergroup", 44);
-    assert.equal(startedConversation, externalPortal.id);
-    assert.deepEqual(
-      runtime.state.pendingAll(externalPortal.id).map((item) => [item.access, item.responseMode]),
-      [["read-only", "direct"]],
-    );
-    await send(1, "/cancel", -300, "supergroup", 44);
-    assert.match(replies.at(-1) ?? "", /В топике-наблюдателе команды отключены/);
-    runtime.state.consume(runtime.state.pendingAll(externalPortal.id).map((item) => item.id));
+    await send(42, "@summing_bot что означает второй пункт?", -300, "supergroup", 46);
+    assert.equal(startedConversation, "");
+    assert.equal(unboundQuestions.at(-1)?.report, undefined);
+    unboundQuestions.length = 0;
     startedConversation = "";
 
     const bound = runtime.state.byTopic(-100, 5)!;
@@ -782,13 +780,12 @@ test("owners control projects while group participants get read-only Q&A", async
         "project_context",
         "project_history",
         "project_memory",
-        "project_portal",
       ],
     );
     assert.equal(typeof writeOptions.dynamicToolHandler, "function");
     assert.equal(
       runtime.state.get(bound.id).codexThreadCapability,
-      "runner-repository-project-portal-history-memory-v6",
+      "runner-repository-result-context-history-memory-v7",
     );
     assert.equal(runtime.state.get(bound.id).previousCodexThreadId, "thr-legacy");
 
@@ -835,8 +832,8 @@ test("owners control projects while group participants get read-only Q&A", async
     assert.match(replies.at(-1) ?? "", /только администратору/);
 
     runtime.state.bind(-200, 9, "removed-project", "repo");
-    await send(1, "/bind summing", -200, "supergroup", 9);
-    assert.equal(runtime.state.byTopic(-200, 9)?.projectId, "summing");
+    await send(1, "/bind beta", -200, "supergroup", 9);
+    assert.equal(runtime.state.byTopic(-200, 9)?.projectId, "beta");
 
     let cloneCancelled = false;
     runtime.projects.cloneRemote = async (
@@ -998,6 +995,7 @@ test("explicit questions in unbound topics run without Project access", async ()
         report?: {
           projectId: string;
           workspaceId: string;
+          resultId: string;
           jobId: string;
           scheduleId: string | null;
           text: string;
@@ -1066,6 +1064,19 @@ test("explicit questions in unbound topics run without Project access", async ()
         content: "<td>Конверсия</td><td>17%</td>",
       };
     };
+    const result = runtime.state.recordResultPublication({
+      projectId: "summing",
+      workspaceId: "repo",
+      jobId: "report-job",
+      scheduleId: "report-schedule",
+      outboxId: "report-outbox-1",
+      reportText: "Утренний отчёт готов.",
+      artifactName: "report.html",
+      chatId: -500,
+      topicId: 77,
+      channelTitle: "Customer results",
+      telegramMessageId: 7,
+    });
     await answerUnboundQuestion({
       chatId: -500,
       topicId: 77,
@@ -1077,6 +1088,7 @@ test("explicit questions in unbound topics run without Project access", async ()
       report: {
         projectId: "summing",
         workspaceId: "repo",
+        resultId: result.id,
         jobId: "report-job",
         scheduleId: "report-schedule",
         text: "Утренний отчёт готов.",
@@ -1085,17 +1097,17 @@ test("explicit questions in unbound topics run without Project access", async ()
     });
     const reportThreadOptions = threadOptions as Record<string, unknown>;
     assert.equal(reportThreadOptions.readOnly, true);
-    assert.equal(reportThreadOptions.workspaceAccess, true);
-    assert.deepEqual(reportThreadOptions.readableRoots, [realpathSync(staticPath)]);
-    assert.ok((reportThreadOptions.deniedPaths as string[]).includes(".summing-runtime"));
-    assert.match(turnPrompt, /read-only Project context for this question only/);
-    assert.match(turnPrompt, /does not bind this Telegram topic/);
-    assert.doesNotMatch(turnPrompt, /permanent read-only observer table/);
-    assert.match(turnPrompt, /"projectId": "summing"/);
+    assert.equal(reportThreadOptions.workspaceAccess, false);
+    assert.deepEqual(reportThreadOptions.deniedPaths, []);
+    assert.equal(reportThreadOptions.readableRoots, undefined);
+    assert.match(turnPrompt, /There is no Project, repository, owner-chat/);
+    assert.match(turnPrompt, /"producerProjectId": "summing"/);
+    assert.match(turnPrompt, new RegExp(result.id));
     assert.match(turnPrompt, /"jobId": "report-job"/);
     assert.match(turnPrompt, /Конверсия/);
     assert.match(turnPrompt, /17%/);
     assert.match(turnPrompt, /откуда взялась эта цифра/);
+    assert.equal(runtime.state.resultPublicationForMessage(-500, 77, 2)?.id, result.id);
 
     replies.length = 0;
     runtime.codex.startThread = async () => {
@@ -1117,7 +1129,7 @@ test("explicit questions in unbound topics run without Project access", async ()
         options: { topicId: 77, replyTo: 12 },
       },
     ]);
-    assert.equal(knowledgeContextLookups, 2);
+    assert.equal(knowledgeContextLookups, 1);
   } finally {
     runtime.requestStop();
     runtime.state.close();

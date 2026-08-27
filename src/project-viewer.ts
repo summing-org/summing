@@ -784,14 +784,17 @@ export class ProjectViewerServer {
       const workspace = project.workspace(String(body?.workspaceId ?? ""));
       const legacyBindingMode = String(body?.bindingMode ?? "");
       if (body?.role === undefined && legacyBindingMode &&
-          !new Set(["project", "external-readonly"]).has(legacyBindingMode)) {
+          legacyBindingMode !== "project") {
         throw new ViewerHttpError(400, "некорректная legacy-роль топика");
       }
       const role = body?.role === undefined
-        ? legacyBindingMode === "external-readonly" ? "observer" : "primary"
+        ? "primary"
         : String(body.role);
-      if (!new Set(["primary", "observer"]).has(role)) {
-        throw new ViewerHttpError(400, "некорректная роль топика");
+      if (role !== "primary") {
+        throw new ViewerHttpError(
+          409,
+          "observer topics упразднены; публикуйте result в customer channel без Project binding",
+        );
       }
       const current = this.state.byTopic(chatId, topicId);
       if (
@@ -820,7 +823,7 @@ export class ProjectViewerServer {
           topicId,
           project.id,
           workspace.id,
-          role as "primary" | "observer",
+          "primary",
         );
       } catch (error) {
         throw new ViewerHttpError(409, error instanceof Error ? error.message : String(error));
@@ -1202,7 +1205,8 @@ export class ProjectViewerServer {
   }
 
   private adminOverview(): Record<string, unknown> {
-    const conversations = this.state.listConversations();
+    const conversations = this.state.listConversations()
+      .filter((conversation) => conversation.role === "primary");
     const bindingsByTopic = new Map(
       conversations.map((conversation) => [
         `${conversation.chatId}:${conversation.topicId}`,
@@ -1736,6 +1740,12 @@ export class ProjectViewerServer {
       conversation = this.state.get(conversationId);
     } catch {
       throw new ViewerHttpError(404, "conversation not found");
+    }
+    if (conversation.role === "observer") {
+      throw new ViewerHttpError(
+        410,
+        "legacy observer conversation is retired; use its result publication context",
+      );
     }
     if (telegramUser !== 0 && !this.projects.canAccess(telegramUser, conversation.projectId)) {
       throw new ViewerHttpError(403, "project access denied");
