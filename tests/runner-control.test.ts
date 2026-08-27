@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import type { ProjectCatalog } from "../src/project-catalog.js";
 import type {
@@ -15,6 +16,7 @@ import {
   dueScheduleOccurrence,
   nextScheduleOccurrence,
   RunnerControlPlane,
+  RunnerControlStore,
   type RunnerControlContext,
   type RunnerSchedule,
 } from "../src/runner-control.js";
@@ -78,6 +80,50 @@ test("schedule occurrence respects IANA timezone, weekdays, grace, and DST dedup
   const second = dueScheduleOccurrence(fallBack, Date.parse("2026-11-01T06:30:00.000Z"));
   assert.equal(first?.key, "2026-11-01T01:30@America/New_York");
   assert.equal(second?.key, first?.key);
+});
+
+test("runner control migrates legacy job watches for provision jobs", () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-runner-watch-migration-"));
+  const databasePath = join(root, "control.sqlite3");
+  const legacy = new DatabaseSync(databasePath);
+  legacy.exec(`
+    CREATE TABLE runner_job_watches (
+      job_id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      workspace_id TEXT NOT NULL,
+      conversation_id TEXT NOT NULL,
+      action TEXT NOT NULL CHECK(action IN ('build', 'validate', 'dry-run', 'run')),
+      last_status TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      notified_at TEXT
+    );
+    CREATE INDEX runner_job_watches_pending
+      ON runner_job_watches(notified_at, project_id, workspace_id, created_at);
+    INSERT INTO runner_job_watches VALUES
+      ('legacy-job', 'demo', 'repo', 'conversation-1', 'run', 'completed',
+       '2026-08-17T05:00:00.000Z', '2026-08-17T05:01:00.000Z', NULL);
+  `);
+  legacy.close();
+
+  const store = new RunnerControlStore(databasePath);
+  try {
+    assert.equal(store.jobWatch("legacy-job")?.actorUserId, 0);
+    store.watchJob(context("turn-provision"), {
+      id: "provision-job",
+      projectId: "demo",
+      workspaceId: "repo",
+      action: "provision",
+      provisionId: "rotate-api",
+      revision: "a".repeat(40),
+      status: "queued",
+      createdAt: "2026-08-17T06:00:00.000Z",
+    }, Date.parse("2026-08-17T06:00:00.000Z"));
+    assert.equal(store.jobWatch("provision-job")?.action, "provision");
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("schedule changes require a later-turn confirmation and execute each occurrence once", async () => {
@@ -317,6 +363,125 @@ test("manual tool calls deduplicate jobs, expose an overview, and notify their c
     assert.equal(completedInspection.overview.state, "idle");
     assert.equal(completedInspection.overview.lastResult?.id, jobs[0]!.id);
     assert.match(completedInspection.overview.summary, /ничего не запущено/);
+  } finally {
+    control.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("provision requires an explicit profile and forwards only pinned metadata", async () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-runner-manual-provision-"));
+  const repository = join(root, "repo");
+  mkdirSync(repository);
+  execFileSync("git", ["init", "--initial-branch=master", repository]);
+  execFileSync("git", ["-C", repository, "config", "user.name", "Test"]);
+  execFileSync("git", ["-C", repository, "config", "user.email", "test@example.test"]);
+  writeFileSync(join(repository, "README.md"), "test\n");
+  execFileSync("git", ["-C", repository, "add", "."]);
+  execFileSync("git", ["-C", repository, "commit", "-m", "initial"]);
+  const revision = execFileSync("git", ["-C", repository, "rev-parse", "HEAD"], {
+    encoding: "utf8",
+  }).trim();
+
+  const jobs: RunnerJob[] = [];
+  const submissions: RunnerSubmissionMetadata[] = [];
+  const runner = {
+    available: async () => true,
+    jobs: async () => jobs,
+    submit: async (
+      projectId: string,
+      workspaceId: string,
+      action: RunnerJob["action"],
+      submittedRevision: string,
+      _archive: Buffer,
+      metadata: RunnerSubmissionMetadata,
+    ) => {
+      submissions.push(metadata);
+      const job: RunnerJob = {
+        id: "e6e19e96-5ab4-45c8-a78e-a952819d3c3a",
+        projectId,
+        workspaceId,
+        action,
+        revision: submittedRevision,
+        trigger: "manual",
+        ...(metadata.provisionId ? { provisionId: metadata.provisionId } : {}),
+        ...(metadata.idempotencyKey ? { idempotencyKey: metadata.idempotencyKey } : {}),
+        status: "queued",
+        createdAt: "2026-08-17T06:00:00.000Z",
+      };
+      jobs.push(job);
+      return job;
+    },
+  } as unknown as ProjectRunnerClient;
+  const control = new RunnerControlPlane(
+    join(root, "control.sqlite3"),
+    {} as ProjectCatalog,
+    runner,
+  );
+  const provisionContext = { ...context("turn-provision"), repositoryPath: repository };
+  try {
+    await assert.rejects(
+      executeRunnerTool(control, provisionContext, {
+        threadId: "thread",
+        turnId: "turn-provision",
+        callId: "provision-missing-profile",
+        namespace: "runner",
+        tool: "start",
+        arguments: { action: "provision" },
+      }),
+      /requires a valid provisionId/,
+    );
+    const started = await executeRunnerTool(control, provisionContext, {
+      threadId: "thread",
+      turnId: "turn-provision",
+      callId: "provision-explicit-profile",
+      namespace: "runner",
+      tool: "start",
+      arguments: { action: "provision", provisionId: "rotate-api" },
+    });
+    const job = JSON.parse(started.contentItems[0]!.text) as RunnerJob;
+    assert.equal(job.action, "provision");
+    assert.equal(job.revision, revision);
+    assert.equal(job.provisionId, "rotate-api");
+    assert.equal(submissions.length, 1);
+    assert.deepEqual(Object.keys(submissions[0]!).sort(), [
+      "idempotencyKey",
+      "provisionId",
+      "trigger",
+    ]);
+    assert.equal(submissions[0]?.provisionId, "rotate-api");
+    assert.match(submissions[0]?.idempotencyKey ?? "", /^[0-9a-f]{64}$/);
+    assert.equal(control.store.jobWatch(job.id)?.action, "provision");
+
+    await assert.rejects(
+      executeRunnerTool(control, provisionContext, {
+        threadId: "thread",
+        turnId: "turn-provision",
+        callId: "provision-schedule",
+        namespace: "runner",
+        tool: "schedule_plan",
+        arguments: {
+          operation: "upsert",
+          name: "Unsafe provisioning schedule",
+          action: "provision",
+          time: "08:00",
+          timeZone: "Europe/Moscow",
+          weekdays: [1],
+        },
+      }),
+      /schedule action is invalid/,
+    );
+
+    writeFileSync(join(repository, "README.md"), "dirty\n");
+    await assert.rejects(
+      control.startJob(
+        { ...provisionContext, turnId: "turn-dirty" },
+        "provision",
+        "provision-dirty",
+        "rotate-api",
+      ),
+      /requires a clean committed worktree/,
+    );
   } finally {
     control.close();
     rmSync(root, { recursive: true, force: true });

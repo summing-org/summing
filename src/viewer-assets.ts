@@ -147,7 +147,7 @@ export const VIEWER_HTML = `<!doctype html>
         </div>
       </section>
       <section id="environmentPanel" class="panel environment-panel">
-        <div class="section-heading"><div><span class="eyebrow">ОКРУЖЕНИЕ ПРОЕКТА</span><h2>Энвы репозитория</h2><p>Обычный dotenv-текст. Раннер передаёт зафиксированную версию в validate, dry-run и run.</p></div><button id="reloadEnvironment" class="secondary">Перезагрузить</button></div>
+        <div class="section-heading"><div><span class="eyebrow">ОКРУЖЕНИЕ ПРОЕКТА</span><h2>Энвы репозитория</h2><p>Обычный dotenv-текст. Раннер передаёт зафиксированную версию в validate, dry-run, run и явный provision.</p></div><button id="reloadEnvironment" class="secondary">Перезагрузить</button></div>
         <div class="environment-editor">
           <textarea id="environmentText" spellcheck="false" autocomplete="off" aria-label="Переменные окружения" placeholder="# production\nAPI_URL=https://api.example.com\nAPI_TOKEN=replace-me"></textarea>
           <div class="environment-toolbar"><span id="environmentState">Ещё не загружено</span><button id="saveEnvironment" class="primary-action">Сохранить</button></div>

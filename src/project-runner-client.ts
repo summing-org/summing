@@ -13,7 +13,8 @@ export type {
   RunnerServiceStatus,
 } from "./project-service.js";
 
-export type RunnerAction = "build" | "validate" | "dry-run" | "run";
+export type RunnerAction = "build" | "validate" | "dry-run" | "run" | "provision";
+export type RunnerSchedulableAction = Exclude<RunnerAction, "provision">;
 export type RunnerJobTrigger = "manual" | "schedule" | "replay";
 
 export interface RunnerSubmissionMetadata {
@@ -21,6 +22,7 @@ export interface RunnerSubmissionMetadata {
   scheduleId?: string;
   scheduledFor?: string;
   idempotencyKey?: string;
+  provisionId?: string;
 }
 
 export type RunnerJobStatus =
@@ -58,6 +60,10 @@ export interface RunnerJob {
   artifactCount?: number;
   portalMessageCount?: number;
   environmentRevision?: number;
+  provisionId?: string;
+  provisionedVariables?: string[];
+  consumedVariables?: string[];
+  resultingEnvironmentRevision?: number;
 }
 
 export interface RunnerPortalMessage {
@@ -232,6 +238,7 @@ export class ProjectRunnerClient {
     if (metadata.scheduleId) query.set("schedule", metadata.scheduleId);
     if (metadata.scheduledFor) query.set("scheduled_for", metadata.scheduledFor);
     if (metadata.idempotencyKey) query.set("idempotency_key", metadata.idempotencyKey);
+    if (metadata.provisionId) query.set("provision", metadata.provisionId);
     const result = await this.call<{ job: RunnerJob }>(
       "POST",
       `/jobs?${query.toString()}`,

@@ -36,15 +36,22 @@ export const RUNNER_DYNAMIC_TOOLS: DynamicToolNamespaceSpec[] = [{
       name: "start",
       description:
         "Start one job only when the user explicitly asks to run an action. Live run requires a " +
-        "clean committed worktree; other actions use an isolated repository snapshot. Repeated " +
-        "delivery of the same tool call returns the already accepted job.",
+        "clean committed worktree. Provision also requires a clean commit and an exact profile " +
+        "declared in .summing/provisioning.json; it may rotate encrypted credentials and must " +
+        "never be inferred from a normal build, validation, or dry-run request. Repeated delivery " +
+        "of the same tool call returns the already accepted job.",
       inputSchema: {
         ...OBJECT_SCHEMA,
         properties: {
           action: {
             type: "string",
-            enum: ["build", "validate", "dry-run", "run"],
+            enum: ["build", "validate", "dry-run", "run", "provision"],
             description: "Runner action to execute.",
+          },
+          provisionId: {
+            type: "string",
+            pattern: "^[a-z0-9][a-z0-9._-]{0,63}$",
+            description: "Exact provisioning profile; required only for provision action.",
           },
         },
         required: ["action"],
@@ -69,7 +76,8 @@ export const RUNNER_DYNAMIC_TOOLS: DynamicToolNamespaceSpec[] = [{
         "Replay one exact retained Release only when the user explicitly asks to repeat that " +
         "job and accepts that external production side effects may happen again. Identify the " +
         "source job with inspect first. The host reuses the saved source, config, encrypted env " +
-        "revision, and immutable image ID; expired or incomplete Release payloads fail closed.",
+        "revision, and immutable image ID; expired or incomplete Release payloads fail closed. " +
+        "Provision jobs are credential mutations, not Releases, and cannot be replayed.",
       inputSchema: {
         ...OBJECT_SCHEMA,
         properties: { jobId: { type: "string", description: "Exact source job id from inspect." } },
@@ -307,7 +315,7 @@ export async function executeRunnerTool(
       return result({
         services: inspection.services,
         deployableReleases: inspection.recent.filter(
-          (job) => job.status === "completed" && job.action !== "build",
+          (job) => job.status === "completed" && job.action !== "build" && job.action !== "provision",
         ),
       });
     }
@@ -341,6 +349,9 @@ export async function executeRunnerTool(
         context,
         requiredString(args, "action") as RunnerAction,
         call.callId,
+        typeof args.provisionId === "string" && args.provisionId.trim()
+          ? args.provisionId.trim()
+          : undefined,
       ));
     case "cancel":
       return result(await control.cancelJob(context, requiredString(args, "jobId")));

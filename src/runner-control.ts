@@ -11,6 +11,7 @@ import {
   type RunnerArtifactDeletion,
   type RunnerHealth,
   type RunnerJob,
+  type RunnerSchedulableAction,
   type RunnerService,
   type RunnerServiceAction,
 } from "./project-runner-client.js";
@@ -40,7 +41,7 @@ export interface RunnerSchedule {
   projectId: string;
   workspaceId: string;
   name: string;
-  action: RunnerAction;
+  action: RunnerSchedulableAction;
   time: string;
   timeZone: string;
   weekdays: number[];
@@ -99,7 +100,7 @@ export interface SchedulePlanInput {
   operation: "upsert" | "delete";
   scheduleId?: string;
   name?: string;
-  action?: RunnerAction;
+  action?: RunnerSchedulableAction;
   time?: string;
   timeZone?: string;
   weekdays?: number[];
@@ -179,7 +180,7 @@ function idempotencyKey(...parts: string[]): string {
 }
 
 function manualJobNotification(job: RunnerJob): string {
-  const target = `Ручной запуск «${job.action}» (${job.id})`;
+  const target = `Ручной запуск «${job.action}${job.provisionId ? `:${job.provisionId}` : ""}» (${job.id})`;
   if (job.status === "completed") return `${target} завершён успешно.`;
   if (job.status === "cancelled") return `${target} отменён.`;
   if (job.status === "interrupted") {
@@ -384,7 +385,7 @@ export class RunnerControlStore {
         workspace_id TEXT NOT NULL,
         conversation_id TEXT NOT NULL,
         actor_user_id INTEGER NOT NULL,
-        action TEXT NOT NULL CHECK(action IN ('build', 'validate', 'dry-run', 'run')),
+        action TEXT NOT NULL CHECK(action IN ('build', 'validate', 'dry-run', 'run', 'provision')),
         last_status TEXT NOT NULL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
@@ -417,6 +418,38 @@ export class RunnerControlStore {
       this.db.exec(
         "ALTER TABLE runner_job_watches ADD COLUMN actor_user_id INTEGER NOT NULL DEFAULT 0",
       );
+    }
+    const watchSchema = this.db.prepare(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'runner_job_watches'",
+    ).get() as Row | undefined;
+    if (!String(watchSchema?.sql ?? "").includes("'provision'")) {
+      this.db.exec(`
+        BEGIN IMMEDIATE;
+        ALTER TABLE runner_job_watches RENAME TO runner_job_watches_legacy;
+        DROP INDEX IF EXISTS runner_job_watches_pending;
+        CREATE TABLE runner_job_watches (
+          job_id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          conversation_id TEXT NOT NULL,
+          actor_user_id INTEGER NOT NULL,
+          action TEXT NOT NULL CHECK(action IN ('build', 'validate', 'dry-run', 'run', 'provision')),
+          last_status TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          notified_at TEXT
+        );
+        INSERT INTO runner_job_watches
+          (job_id, project_id, workspace_id, conversation_id, actor_user_id, action,
+           last_status, created_at, updated_at, notified_at)
+        SELECT job_id, project_id, workspace_id, conversation_id, actor_user_id, action,
+               last_status, created_at, updated_at, notified_at
+        FROM runner_job_watches_legacy;
+        DROP TABLE runner_job_watches_legacy;
+        CREATE INDEX runner_job_watches_pending
+          ON runner_job_watches(notified_at, project_id, workspace_id, created_at);
+        COMMIT;
+      `);
     }
   }
 
@@ -811,7 +844,7 @@ export class RunnerControlStore {
       projectId: String(row.project_id),
       workspaceId: String(row.workspace_id),
       name: String(row.name),
-      action: String(row.action) as RunnerAction,
+      action: String(row.action) as RunnerSchedulableAction,
       time: String(row.local_time),
       timeZone: String(row.time_zone),
       weekdays: parseJson<number[]>(row.weekdays_json, "schedule weekdays"),
@@ -981,7 +1014,7 @@ export class RunnerControlPlane {
           count: Number(job.artifactCount ?? 0),
           createdAt: job.createdAt,
         })),
-      capabilities: ["build", "validate", "dry-run", "run"],
+      capabilities: ["build", "validate", "dry-run", "run", "provision"],
     };
   }
 
@@ -989,9 +1022,17 @@ export class RunnerControlPlane {
     context: RunnerControlContext,
     action: RunnerAction,
     requestId: string,
+    provisionId?: string,
   ): Promise<RunnerJob> {
-    if (!(new Set<RunnerAction>(["build", "validate", "dry-run", "run"])).has(action)) {
+    if (!(new Set<RunnerAction>(["build", "validate", "dry-run", "run", "provision"])).has(action)) {
       throw new RunnerControlError("runner action is invalid");
+    }
+    if (action === "provision") {
+      if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(provisionId ?? "")) {
+        throw new RunnerControlError("provision action requires a valid provisionId");
+      }
+    } else if (provisionId) {
+      throw new RunnerControlError("provisionId requires provision action");
     }
     if (!(await this.runner.available())) throw new RunnerControlError("runner is unavailable");
     const requestKey = idempotencyKey(
@@ -1004,7 +1045,11 @@ export class RunnerControlPlane {
     const existing = (await this.runner.jobs(context.projectId, context.workspaceId))
       .find((job) => job.idempotencyKey === requestKey);
     if (existing) {
-      if (existing.action !== action || (existing.trigger ?? "manual") !== "manual") {
+      if (
+        existing.action !== action ||
+        (existing.trigger ?? "manual") !== "manual" ||
+        (existing.provisionId ?? "") !== (provisionId ?? "")
+      ) {
         throw new RunnerControlError("runner request id was reused for a different job");
       }
       this.store.watchJob(context, existing, this.now());
@@ -1012,10 +1057,10 @@ export class RunnerControlPlane {
     }
     const inspector = new GitInspector(context.repositoryPath);
     const repository = await inspector.summary();
-    if (action === "run" && repository.dirty) {
-      throw new RunnerControlError("live run requires a clean committed worktree");
+    if ((action === "run" || action === "provision") && repository.dirty) {
+      throw new RunnerControlError(`${action} requires a clean committed worktree`);
     }
-    const revision = action === "run"
+    const revision = action === "run" || action === "provision"
       ? repository.head
       : await inspector.snapshot(`${action} requested by Telegram owner ${context.actorUserId}`);
     const archive = await inspector.archive(revision);
@@ -1028,10 +1073,17 @@ export class RunnerControlPlane {
       {
         trigger: "manual",
         idempotencyKey: requestKey,
+        ...(provisionId ? { provisionId } : {}),
       },
     );
     this.store.watchJob(context, job, this.now());
-    this.store.audit(context, "runner.start", job.id, { action, revision }, this.now());
+    this.store.audit(
+      context,
+      "runner.start",
+      job.id,
+      { action, revision, ...(provisionId ? { provisionId } : {}) },
+      this.now(),
+    );
     return job;
   }
 
@@ -1051,7 +1103,7 @@ export class RunnerControlPlane {
     const jobs = await this.runner.jobs(context.projectId, context.workspaceId);
     const release = jobs.find((job) => job.id === releaseId);
     if (!release) throw new RunnerControlError("Release was not found in this project");
-    if (release.status !== "completed" || release.action === "build") {
+    if (release.status !== "completed" || release.action === "build" || release.action === "provision") {
       throw new RunnerControlError("service deployment requires a completed non-build Release");
     }
     const requestKey = idempotencyKey(
@@ -1325,8 +1377,8 @@ export class RunnerControlPlane {
     }
     const name = String(input.name ?? existing?.name ?? "").trim();
     if (!SCHEDULE_NAME.test(name)) throw new RunnerControlError("schedule name is invalid");
-    const action = String(input.action ?? existing?.action ?? "") as RunnerAction;
-    if (!(new Set<RunnerAction>(["build", "validate", "dry-run", "run"])).has(action)) {
+    const action = String(input.action ?? existing?.action ?? "") as RunnerSchedulableAction;
+    if (!(new Set<RunnerSchedulableAction>(["build", "validate", "dry-run", "run"])).has(action)) {
       throw new RunnerControlError("schedule action is invalid");
     }
     const time = String(input.time ?? existing?.time ?? "");

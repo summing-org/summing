@@ -70,6 +70,60 @@ backup данных. Для восстановления нужны одновр
 тоже выключена и включается только операторским `"network": true` в runner
 project config.
 
+## Provisioning и ротация секретов
+
+Секрет, который появляется только внутри workload (OAuth refresh token, новый
+API token, recovery credential), не нужно выводить в лог или маскировать под
+dry-run artifact. Для этого есть отдельный ручной action `provision`. Его
+контракт закрепляется в той же Git revision файлом
+`.summing/provisioning.json`:
+
+```json
+{
+  "version": 1,
+  "profiles": [{
+    "id": "youtube-primary",
+    "outputs": [{
+      "name": "refresh_token",
+      "environment": "YOUTUBE_REFRESH_TOKEN",
+      "minimumLength": 20,
+      "maximumLength": 4096
+    }],
+    "consume": ["YOUTUBE_BOOTSTRAP_CODE"]
+  }]
+}
+```
+
+Owner явно запускает точный profile ID. В контейнере доступны
+`SUMMING_PROVISION_ID` и абсолютный `SUMMING_PROVISION_RESULT`. Приложение
+должно атомарно создать по этому пути один файл mode `0600` с точным результатом:
+
+```json
+{
+  "version": 1,
+  "profile": "youtube-primary",
+  "secrets": {
+    "refresh_token": "generated-secret-value"
+  }
+}
+```
+
+Имена и byte limits обязаны в точности совпасть с manifest; дополнительные поля
+и секреты отклоняются. После успешного выхода runner читает файл один раз,
+атомарно записывает outputs в encrypted environment и удаляет перечисленные
+`consume` variables. В job metadata и audit остаются только profile, имена
+переменных и номера env revisions — не значения.
+
+Provision не является Release: его нельзя поставить в расписание, replay-нуть
+или развернуть как service. Он требует чистый committed worktree, а весь
+stdout/stderr workload подавляется, потому что заранее неизвестный generated
+secret невозможно надёжно вычистить потоковым redaction. Private handoff
+directory удаляется при любом исходе и при startup recovery. Если target или
+consumed variable изменились после env snapshot, promotion завершается ошибкой;
+несвязанные параллельные изменения сохраняются. Обычный allowlist dry-run
+артефактов при этом остаётся неизменным. Source/config/encrypted snapshot
+Provision-job удаляются сразу и не занимают Release-retention.
+
 ## Переход с Connections
 
 Новый runtime не читает `.summing/integrations.json`, provider registry,

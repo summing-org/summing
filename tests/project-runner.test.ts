@@ -59,7 +59,8 @@ function seedTerminalJobHistory(
     id: queuedId,
     projectId: "demo",
     workspaceId: "repo",
-    action: "run",
+    action: "provision",
+    provisionId: "rotate-api",
     revision,
     status: "queued",
     createdAt: new Date(0).toISOString(),
@@ -67,6 +68,15 @@ function seedTerminalJobHistory(
   writeFileSync(
     join(runs, queuedId, `.job-999-${randomUUID()}.tmp`),
     '{"status":"interrupted write"',
+  );
+  for (const file of ["source.tar", "environment.json", "release-config.json"]) {
+    writeFileSync(join(runs, queuedId, file), `${file}\n`, { mode: 0o600 });
+  }
+  mkdirSync(join(runs, queuedId, "provisioning"));
+  writeFileSync(
+    join(runs, queuedId, "provisioning", "result.json"),
+    '{"generated":"secret"}\n',
+    { mode: 0o600 },
   );
   for (let index = 0; index < 105; index += 1) {
     const id = randomUUID();
@@ -104,11 +114,34 @@ test("runner snapshots an encrypted workspace environment and injects one tempor
   const appData = join(root, "app-data");
   mkdirSync(repository);
   mkdirSync(configRoot);
+  mkdirSync(join(repository, ".summing"));
   execFileSync("git", ["init", "--initial-branch=main", repository]);
   execFileSync("git", ["-C", repository, "config", "user.name", "Test"]);
   execFileSync("git", ["-C", repository, "config", "user.email", "test@example.test"]);
   writeFileSync(join(repository, "Dockerfile"), "FROM scratch\n");
   writeFileSync(join(repository, "app.json"), "{}\n");
+  writeFileSync(join(repository, ".summing", "provisioning.json"), JSON.stringify({
+    version: 1,
+    profiles: [{
+      id: "rotate-api",
+      outputs: [{
+        name: "rotated_token",
+        environment: "ROTATED_TOKEN",
+        minimumLength: 20,
+        maximumLength: 200,
+      }],
+      consume: ["BOOTSTRAP_CODE"],
+    }, {
+      id: "invalid-result",
+      outputs: [{
+        name: "invalid_token",
+        environment: "INVALID_TOKEN",
+        minimumLength: 20,
+        maximumLength: 200,
+      }],
+      consume: [],
+    }],
+  }));
   execFileSync("git", ["-C", repository, "add", "."]);
   execFileSync("git", ["-C", repository, "commit", "-m", "image"]);
   writeFileSync(
@@ -138,13 +171,31 @@ if [ "$1" = run ]; then
   job=""
   runtime_env=""
   previous=""
+  provision=""
+  provision_dir=""
   for value in "$@"; do
     case "$value" in SUMMING_JOB_ID=*) job="\${value#*=}" ;; esac
+    case "$value" in SUMMING_PROVISION_ID=*) provision="\${value#*=}" ;; esac
     if [ "$previous" = "--env-file" ]; then runtime_env="$value"; fi
+    if [ "$previous" = "--volume" ]; then
+      case "$value" in *:/run/summing-provision) provision_dir="\${value%:*}" ;; esac
+    fi
     previous="$value"
   done
   secret=$(sed -n 's/^API_TOKEN=//p' "$runtime_env")
   printf 'application said key=%s\n' "$secret"
+  if [ -n "$provision" ]; then
+    generated="generated-rotated-secret-123456789"
+    printf 'application accidentally said generated=%s\n' "$generated"
+    if [ "$provision" = invalid-result ]; then
+      printf '{"version":1,"profile":"%s","secrets":{"invalid_token":"%s"}}\n' "$provision" "$generated" > "$provision_dir/result.json"
+      chmod 644 "$provision_dir/result.json"
+    else
+      printf '{"version":1,"profile":"%s","secrets":{"rotated_token":"%s"}}\n' "$provision" "$generated" > "$provision_dir/result.json"
+      chmod 600 "$provision_dir/result.json"
+    fi
+    exit 0
+  fi
   if [ -n "$job" ]; then
     mkdir -p "${appData}/dry-runs/$job"
     printf '{"status":"completed","key":"%s"}\n' "$secret" > "${appData}/dry-runs/$job/manifest.json"
@@ -172,7 +223,7 @@ exit 0
     assert.deepEqual(await client.health(), {
       ok: true,
       version: readFileSync(join(process.cwd(), "VERSION"), "utf8").trim(),
-      protocolVersion: 3,
+      protocolVersion: 4,
       queued: 0,
       running: 0,
       maxParallelJobs: 2,
@@ -196,6 +247,8 @@ exit 0
       [
         "LOG_LEVEL=info",
         "API_TOKEN=rotated-runtime-secret-987654321",
+        "BOOTSTRAP_CODE=one-shot-bootstrap-secret",
+        "ROTATED_TOKEN=",
         "",
       ].join("\n"),
       1,
@@ -301,6 +354,95 @@ exit 0
     assert.equal(existsSync(join(releaseDirectory, "source.tar")), true);
     assert.equal(existsSync(join(releaseDirectory, "environment.json")), true);
     assert.equal(existsSync(join(releaseDirectory, "release-config.json")), true);
+
+    await assert.rejects(
+      client.submit("demo", "repo", "provision", revision, archive, {
+        trigger: "schedule",
+        scheduleId: randomUUID(),
+        scheduledFor: "2026-08-17T07:00:00.000Z",
+        provisionId: "rotate-api",
+      }),
+    );
+    await assert.rejects(
+      client.submit("demo", "repo", "dry-run", revision, archive, {
+        provisionId: "rotate-api",
+      }),
+    );
+
+    const provision = await client.submit(
+      "demo",
+      "repo",
+      "provision",
+      revision,
+      archive,
+      { provisionId: "rotate-api" },
+    );
+    const provisionCompleted = await completedJob(client, "demo", "repo", provision.id);
+    assert.equal(provisionCompleted.status, "completed");
+    assert.equal(provisionCompleted.releaseId, undefined);
+    assert.equal(provisionCompleted.environmentRevision, 2);
+    assert.equal(provisionCompleted.resultingEnvironmentRevision, 3);
+    assert.deepEqual(provisionCompleted.provisionedVariables, ["ROTATED_TOKEN"]);
+    assert.deepEqual(provisionCompleted.consumedVariables, ["BOOTSTRAP_CODE"]);
+    const provisionedEnvironment = await client.environment("demo", "repo");
+    assert.equal(provisionedEnvironment.revision, 3);
+    assert.match(provisionedEnvironment.text, /ROTATED_TOKEN="generated-rotated-secret-123456789"/);
+    assert.doesNotMatch(provisionedEnvironment.text, /BOOTSTRAP_CODE/);
+    assert.doesNotMatch(await client.log("demo", provision.id), /generated-rotated-secret/);
+    assert.match(await client.log("demo", provision.id), /workload output is suppressed/);
+    assert.match(await client.log("demo", provision.id), /profile=rotate-api/);
+    const encryptedAfterProvision = readFileSync(
+      join(dataRoot, "environments", readdirSync(join(dataRoot, "environments"))[0]!),
+      "utf8",
+    );
+    assert.doesNotMatch(encryptedAfterProvision, /generated-rotated-secret/);
+    assert.doesNotMatch(
+      readFileSync(join(dataRoot, "projects", "demo", "runs", provision.id, "job.json"), "utf8"),
+      /generated-rotated-secret/,
+    );
+    assert.equal(
+      existsSync(join(dataRoot, "projects", "demo", "runs", provision.id, "provisioning")),
+      false,
+    );
+    for (const file of ["source.tar", "environment.json", "release-config.json"]) {
+      assert.equal(
+        existsSync(join(dataRoot, "projects", "demo", "runs", provision.id, file)),
+        false,
+      );
+    }
+    await assert.rejects(
+      client.replay("demo", "repo", provision.id, "f".repeat(64)),
+      /not replayable/,
+    );
+
+    const invalidProvision = await client.submit(
+      "demo",
+      "repo",
+      "provision",
+      revision,
+      archive,
+      { provisionId: "invalid-result" },
+    );
+    const invalidProvisionCompleted = await completedJob(
+      client,
+      "demo",
+      "repo",
+      invalidProvision.id,
+    );
+    assert.equal(invalidProvisionCompleted.status, "failed");
+    assert.match(invalidProvisionCompleted.error ?? "", /mode 0600/);
+    assert.equal((await client.environment("demo", "repo")).revision, 3);
+    assert.doesNotMatch(await client.log("demo", invalidProvision.id), /generated-rotated-secret/);
+    assert.equal(
+      existsSync(join(dataRoot, "projects", "demo", "runs", invalidProvision.id, "provisioning")),
+      false,
+    );
+    for (const file of ["source.tar", "environment.json", "release-config.json"]) {
+      assert.equal(
+        existsSync(join(dataRoot, "projects", "demo", "runs", invalidProvision.id, file)),
+        false,
+      );
+    }
 
     const replayKey = "c".repeat(64);
     const replay = await client.replay("demo", "repo", dryRun.id, replayKey);
@@ -804,6 +946,10 @@ test("runner marks unfinished jobs interrupted on startup and retains recovery e
     assert.equal(recovered.error, "runner restarted before the job completed");
     assert.ok(recovered.completedAt);
     assert.match(readFileSync(join(runs, queuedId, "job.log"), "utf8"), /not restarted automatically/);
+    assert.equal(existsSync(join(runs, queuedId, "provisioning")), false);
+    for (const file of ["source.tar", "environment.json", "release-config.json"]) {
+      assert.equal(existsSync(join(runs, queuedId, file)), false);
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

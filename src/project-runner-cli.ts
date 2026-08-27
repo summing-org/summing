@@ -1,18 +1,21 @@
 import { readFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { GitInspector } from "./git-inspector.js";
-import { ProjectRunnerClient, type RunnerAction } from "./project-runner-client.js";
+import {
+  ProjectRunnerClient,
+  type RunnerSchedulableAction,
+} from "./project-runner-client.js";
 
 interface ScheduleConfig {
   projectId: string;
   workspaceId?: string;
-  action: RunnerAction;
+  action: RunnerSchedulableAction;
   repository: string;
   revision: string;
   runnerSocket?: string;
 }
 
-const ACTIONS = new Set<RunnerAction>(["build", "validate", "dry-run", "run"]);
+const ACTIONS = new Set<RunnerSchedulableAction>(["build", "validate", "dry-run", "run"]);
 
 async function main(): Promise<void> {
   const path = process.argv[2] ?? "";
@@ -22,7 +25,7 @@ async function main(): Promise<void> {
   const value = JSON.parse(readFileSync(resolve(path), "utf8")) as Partial<ScheduleConfig>;
   const projectId = String(value.projectId ?? "");
   const workspaceId = String(value.workspaceId ?? "repo");
-  const action = String(value.action ?? "") as RunnerAction;
+  const action = String(value.action ?? "") as RunnerSchedulableAction;
   const repository = String(value.repository ?? "");
   const revision = String(value.revision ?? "");
   if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(projectId)) throw new Error("invalid projectId");

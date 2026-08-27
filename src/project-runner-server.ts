@@ -29,6 +29,7 @@ import { createServer as createNetServer } from "node:net";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import {
   environmentRedactions,
+  parseProjectEnvironment,
   ProjectEnvironmentConflictError,
   ProjectEnvironmentError,
   ProjectEnvironmentStore,
@@ -43,6 +44,12 @@ import {
   type EnvironmentMigrationMarker,
   type LegacyEnvironmentMigrationTarget,
 } from "./project-environment-migration.js";
+import {
+  provisionedEnvironmentText,
+  readProvisioningProfile,
+  readProvisioningResult,
+  type ProvisioningProfile,
+} from "./project-provisioning.js";
 import type {
   RunnerAction,
   RunnerArtifactDeletion,
@@ -79,7 +86,7 @@ const MAX_JSON_BYTES = 1_100_000;
 const DRY_RUN_RETENTION = 30;
 const RELEASE_PAYLOAD_RETENTION = 20;
 const JOB_RETENTION = 100;
-const RUNNER_ACTIONS = new Set<RunnerAction>(["build", "validate", "dry-run", "run"]);
+const RUNNER_ACTIONS = new Set<RunnerAction>(["build", "validate", "dry-run", "run", "provision"]);
 const RUNNER_TRIGGERS = new Set<RunnerJobTrigger>(["manual", "schedule"]);
 const SERVICE_ACTIONS = new Set<RunnerServiceAction>(["start", "stop", "restart", "rollback"]);
 const SERVICE_MANIFEST_PATH = ".summing/services.json";
@@ -214,6 +221,7 @@ function run(
     logPath?: string;
     timeoutMs?: number;
     redactions?: string[];
+    suppressOutput?: boolean;
     signal?: AbortSignal;
   },
 ): Promise<CommandResult> {
@@ -250,6 +258,7 @@ function run(
       }
     };
     const record = (chunk: Buffer): void => {
+      if (options.suppressOutput) return;
       pendingLog += chunk.toString("utf8");
       const newline = pendingLog.lastIndexOf("\n");
       if (newline >= 0) {
@@ -419,7 +428,7 @@ export class ProjectRunnerServer {
       json(response, this.ready ? 200 : 503, {
         ok: this.ready,
         version: SUMMING_VERSION,
-        protocolVersion: 3,
+        protocolVersion: 4,
         queued: this.queue.length,
         running: this.activeJobs.size,
         maxParallelJobs: this.maxParallelJobs,
@@ -590,6 +599,7 @@ export class ProjectRunnerServer {
       const scheduleId = url.searchParams.get("schedule") ?? "";
       const scheduledFor = url.searchParams.get("scheduled_for") ?? "";
       const idempotencyKey = url.searchParams.get("idempotency_key") ?? "";
+      const provisionId = url.searchParams.get("provision") ?? "";
       if (!PROJECT_ID.test(projectId) || !WORKSPACE_ID.test(workspaceId)) {
         throw new RunnerHttpError(400, "invalid project or workspace id");
       }
@@ -600,6 +610,13 @@ export class ProjectRunnerServer {
       if (!RUNNER_TRIGGERS.has(trigger)) throw new RunnerHttpError(400, "invalid runner trigger");
       if (idempotencyKey && !IDEMPOTENCY_KEY.test(idempotencyKey)) {
         throw new RunnerHttpError(400, "invalid idempotency key");
+      }
+      if (action === "provision") {
+        if (trigger !== "manual" || !PROJECT_ID.test(provisionId)) {
+          throw new RunnerHttpError(400, "provision action requires one valid manual profile");
+        }
+      } else if (provisionId) {
+        throw new RunnerHttpError(400, "provision profile requires provision action");
       }
       if (trigger === "schedule") {
         if (!SCHEDULE_ID.test(scheduleId) || !scheduledFor || !Number.isFinite(Date.parse(scheduledFor))) {
@@ -615,6 +632,7 @@ export class ProjectRunnerServer {
         revision,
         trigger,
         ...(idempotencyKey ? { idempotencyKey } : {}),
+        ...(provisionId ? { provisionId } : {}),
       };
       const metadata: Omit<RunnerJob, "id" | "status" | "createdAt"> = trigger === "schedule"
         ? { ...commonMetadata, scheduleId, scheduledFor: new Date(scheduledFor).toISOString() }
@@ -834,7 +852,7 @@ export class ProjectRunnerServer {
       status: "queued",
       createdAt: new Date().toISOString(),
     };
-    job.releaseId = job.id;
+    if (job.action !== "provision") job.releaseId = job.id;
     const directory = this.jobDirectory(job.projectId, job.id);
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     try {
@@ -843,7 +861,7 @@ export class ProjectRunnerServer {
         job.environmentRevision = this.environments.writeJobSnapshot(
           job.projectId,
           job.workspaceId,
-          job.releaseId,
+          job.releaseId ?? job.id,
           resolve(directory, "environment.json"),
           project.environmentBootstrap.get(job.workspaceId),
         );
@@ -912,6 +930,9 @@ export class ProjectRunnerServer {
     }
     if (source.action === "build") {
       throw new RunnerHttpError(409, "build-only jobs are not replayable releases");
+    }
+    if (source.action === "provision") {
+      throw new RunnerHttpError(409, "provisioning jobs are intentionally not replayable");
     }
     if (
       !source.releaseId ||
@@ -993,7 +1014,8 @@ export class ProjectRunnerServer {
       job.action !== expected.action ||
       (job.trigger ?? "manual") !== expected.trigger ||
       (job.scheduleId ?? "") !== (expected.scheduleId ?? "") ||
-      (job.scheduledFor ?? "") !== (expected.scheduledFor ?? "")
+      (job.scheduledFor ?? "") !== (expected.scheduledFor ?? "") ||
+      (job.provisionId ?? "") !== (expected.provisionId ?? "")
     ) {
       throw new RunnerHttpError(409, "idempotency key was reused for a different runner job");
     }
@@ -1633,7 +1655,8 @@ export class ProjectRunnerServer {
       const project = this.projectConfig(projectId, workspaceId);
       const release = this.storedJob(projectId, sourceJobId);
       if (release.workspaceId !== workspaceId || release.status !== "completed" ||
-        release.action === "build" || !release.releaseId || !release.archiveSha256 ||
+        release.action === "build" || release.action === "provision" ||
+        !release.releaseId || !release.archiveSha256 ||
         !release.configSha256 || !release.imageId ||
         !Number.isSafeInteger(release.environmentRevision) || Number(release.environmentRevision) < 0) {
         throw new RunnerHttpError(409, "service deployment requires a completed non-build Release");
@@ -2187,6 +2210,7 @@ export class ProjectRunnerServer {
     writeFileSync(
       logPath,
       `[${job.startedAt}] ${job.action} ${job.projectId}/${job.workspaceId}@${job.revision}` +
+        `${job.provisionId ? ` profile=${job.provisionId}` : ""}` +
         `${job.replayOfJobId ? ` replay-of=${job.replayOfJobId} release=${job.releaseId}` : ""}\n`,
       { mode: 0o600 },
     );
@@ -2211,6 +2235,9 @@ export class ProjectRunnerServer {
       );
       if (extracted.code !== 0) throw new Error("source archive extraction failed");
       const project = this.projectConfig(job.projectId, job.workspaceId);
+      const provisionProfile = job.action === "provision"
+        ? readProvisioningProfile(source, job.provisionId ?? "")
+        : null;
       let configPath: string | null = null;
       if (job.action !== "build") {
         configPath = resolve(directory, "release-config.json");
@@ -2251,7 +2278,7 @@ export class ProjectRunnerServer {
       }
       const result = job.action === "build" || serviceRelease
         ? { code: 0 }
-        : await this.runImage(job, project, configPath!, logPath, signal);
+        : await this.runImage(job, project, configPath!, logPath, signal, provisionProfile);
       job.exitCode = result.code;
       if (result.code !== 0) throw new Error(`${job.action} exited with code ${result.code}`);
       if (signal.aborted) throw new RunnerCommandCancelledError("runner job cancelled");
@@ -2291,6 +2318,11 @@ export class ProjectRunnerServer {
       job.completedAt = new Date().toISOString();
       this.saveJob(job);
       rmSync(resolve(directory, "source"), { recursive: true, force: true });
+      if (job.action === "provision") {
+        for (const file of ["source.tar", "environment.json", "release-config.json"]) {
+          rmSync(resolve(directory, file), { force: true });
+        }
+      }
       this.pruneJobDirectories(job.projectId);
     }
   }
@@ -2360,6 +2392,7 @@ export class ProjectRunnerServer {
     configPath: string,
     logPath: string,
     signal: AbortSignal,
+    provisionProfile: ProvisioningProfile | null,
   ): Promise<{ code: number }> {
     mkdirSync(project.dataPath, { recursive: true, mode: 0o700 });
     if (job.action === "dry-run") {
@@ -2374,6 +2407,10 @@ export class ProjectRunnerServer {
       mkdirSync(directory, { recursive: true, mode: 0o700 });
     }
     const access = this.runtimeAccess(job, logPath);
+    const provisionDirectory = job.action === "provision"
+      ? resolve(this.jobDirectory(job.projectId, job.id), "provisioning")
+      : null;
+    if (provisionDirectory) mkdirSync(provisionDirectory, { mode: 0o700 });
     const containerName = `summing-${job.projectId}-${job.id.slice(0, 8)}`;
     try {
       const args = [
@@ -2411,6 +2448,24 @@ export class ProjectRunnerServer {
           "--env", "SUMMING_PROJECT_DATA_PATH=/app/data",
         );
       }
+      if (job.action === "provision") {
+        if (!provisionProfile || !provisionDirectory) {
+          throw new Error("provisioning profile was not loaded");
+        }
+        args.push(
+          "--env", `SUMMING_PROVISION_ID=${provisionProfile.id}`,
+          "--env", "SUMMING_PROVISION_RESULT=/run/summing-provision/result.json",
+          "--env", "SUMMING_PROJECT_DATA_PATH=/app/data",
+          "--env", `SUMMING_JOB_ID=${job.id}`,
+          "--env", `SUMMING_REVISION=${job.revision}`,
+          "--volume", `${provisionDirectory}:/run/summing-provision`,
+        );
+        writeFileSync(
+          logPath,
+          `[${new Date().toISOString()}] provision workload output is suppressed to protect generated secrets\n`,
+          { flag: "a", mode: 0o600 },
+        );
+      }
       args.push(job.imageId || this.image(job));
       if (job.action === "validate") args.push("node", "dist/src/main.js", "--validate");
       const result = await run(this.dockerBinary, args, {
@@ -2418,8 +2473,15 @@ export class ProjectRunnerServer {
         logPath,
         timeoutMs: job.action === "run" ? this.runTimeoutHours * 3_600_000 : 900_000,
         redactions: access.redactions,
+        suppressOutput: job.action === "provision",
         signal,
       });
+      if (job.action === "provision") {
+        job.exitCode = result.code;
+        if (result.code === 0) {
+          this.completeProvision(job, provisionProfile!, provisionDirectory!, logPath);
+        }
+      }
       return { code: result.code };
     } finally {
       try {
@@ -2433,9 +2495,43 @@ export class ProjectRunnerServer {
         this.redactArtifacts(job, project, access.redactions);
       } finally {
         if (access.envPath) rmSync(access.envPath, { force: true });
+        if (provisionDirectory) rmSync(provisionDirectory, { recursive: true, force: true });
         access.redactions.fill("");
       }
     }
+  }
+
+  private completeProvision(
+    job: RunnerJob,
+    profile: ProvisioningProfile,
+    provisionDirectory: string,
+    logPath: string,
+  ): void {
+    const result = readProvisioningResult(resolve(provisionDirectory, "result.json"), profile);
+    const snapshotPath = resolve(this.jobDirectory(job.projectId, job.id), "environment.json");
+    const baseline = existsSync(snapshotPath)
+      ? this.environments.readJobSnapshot(
+        job.projectId,
+        job.workspaceId,
+        job.releaseId ?? job.id,
+        snapshotPath,
+      )
+      : parseProjectEnvironment("");
+    const current = this.environments.get(job.projectId, job.workspaceId);
+    const text = provisionedEnvironmentText(current.text, baseline, profile, result.secrets);
+    const saved = this.environments.save(job.projectId, job.workspaceId, text, current.revision);
+    job.provisionedVariables = profile.outputs.map((output) => output.environment);
+    job.consumedVariables = [...profile.consume];
+    job.resultingEnvironmentRevision = saved.revision;
+    writeFileSync(
+      logPath,
+      `[${new Date().toISOString()}] provision '${profile.id}' stored ` +
+        `${job.provisionedVariables.join(", ")} in environment revision ${saved.revision}` +
+        `${job.consumedVariables.length > 0
+          ? `; consumed ${job.consumedVariables.join(", ")}`
+          : ""}\n`,
+      { flag: "a", mode: 0o600 },
+    );
   }
 
   private runtimeConfigPath(project: RunnerProjectConfig, source: string): string | null {
@@ -2538,14 +2634,20 @@ export class ProjectRunnerServer {
           ) {
             return [];
           }
-          return [{ id: entry, retentionAt: job.completedAt ?? job.createdAt }];
+          return [{
+            id: entry,
+            retentionAt: job.completedAt ?? job.createdAt,
+            releasePayload: job.action !== "provision",
+          }];
         } catch {
           return [];
         }
       })
       .sort((left, right) =>
         right.retentionAt.localeCompare(left.retentionAt) || right.id.localeCompare(left.id));
-    for (const job of terminal.slice(RELEASE_PAYLOAD_RETENTION)) {
+    for (const job of terminal
+      .filter((candidate) => candidate.releasePayload)
+      .slice(RELEASE_PAYLOAD_RETENTION)) {
       for (const file of ["source.tar", "environment.json", "release-config.json"]) {
         rmSync(resolve(root, job.id, file), { force: true });
       }
@@ -2574,6 +2676,7 @@ export class ProjectRunnerServer {
       for (const entry of readdirSync(runs)) {
         if (!JOB_ID.test(entry)) continue;
         const directory = resolve(runs, entry);
+        rmSync(resolve(directory, "provisioning"), { recursive: true, force: true });
         const metadataPath = resolve(directory, "job.json");
         try {
           const job = JSON.parse(readFileSync(metadataPath, "utf8")) as RunnerJob;
@@ -2594,6 +2697,11 @@ export class ProjectRunnerServer {
             { flag: "a", mode: 0o600 },
           );
           rmSync(resolve(directory, "source"), { recursive: true, force: true });
+          if (job.action === "provision") {
+            for (const file of ["source.tar", "environment.json", "release-config.json"]) {
+              rmSync(resolve(directory, file), { force: true });
+            }
+          }
         } catch {
           // Preserve malformed operator-recovery state for manual inspection.
         }

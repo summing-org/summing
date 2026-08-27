@@ -56,6 +56,13 @@ export class ProjectEnvironmentError extends Error {}
 
 export class ProjectEnvironmentConflictError extends ProjectEnvironmentError {}
 
+export function isProjectEnvironmentVariable(name: string): boolean {
+  return VARIABLE.test(name) &&
+    !RESERVED_VARIABLES.has(name) &&
+    !name.startsWith("SUMMING_") &&
+    !name.startsWith("LD_");
+}
+
 function identifier(value: string, field: string): string {
   if (!IDENTIFIER.test(value)) {
     throw new ProjectEnvironmentError(`${field} is invalid`);
@@ -98,11 +105,7 @@ export function parseProjectEnvironment(input: string): ParsedEnvironment {
     if (separator < 0 || !VARIABLE.test(name)) {
       throw new ProjectEnvironmentError(`environment line ${index + 1} is not NAME=value`);
     }
-    if (
-      RESERVED_VARIABLES.has(name) ||
-      name.startsWith("SUMMING_") ||
-      name.startsWith("LD_")
-    ) {
+    if (!isProjectEnvironmentVariable(name)) {
       throw new ProjectEnvironmentError(`environment variable '${name}' is reserved by the runner`);
     }
     if (values.has(name)) {

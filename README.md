@@ -560,6 +560,15 @@ misfire-окно. Project-specific cron/systemd timers намеренно не �
 догадке: перед включением эквивалентного agent-managed расписания оператор должен
 отдельно отключить legacy timer, чтобы не получить двойной запуск.
 
+Generated credentials передаются отдельным явным `Provision`, описанным в
+закреплённом `.summing/provisioning.json`. Workload пишет один private result,
+runner сверяет точный allowlist outputs и byte limits, затем атомарно обновляет
+encrypted env и удаляет объявленные one-shot inputs. Вывод workload полностью
+подавляется, временный handoff удаляется, а job хранит только имена переменных и
+env revisions. Provision нельзя планировать, повторять как Release или
+разворачивать как service. Полный контракт и пример:
+[ENVIRONMENTS_RU.md](ENVIRONMENTS_RU.md#provisioning-и-ротация-секретов).
+
 Job одновременно служит минимальным Release без отдельной CI/CD-сущности:
 `releaseId` равен job ID, а запись фиксирует полный Git SHA, SHA-256 переданного
 source archive и выбранного config, revision зашифрованного env и immutable Docker
