@@ -1,6 +1,6 @@
-# SUMMING 9.23: архитектура, эксплуатация и разработка
+# SUMMING 9.24: архитектура, эксплуатация и разработка
 
-> Версия: **9.23.0**
+> Версия: **9.24.0**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
 > Последняя сверка с кодом: **27 августа 2026 года**.
 
@@ -266,8 +266,8 @@ items в `needs-review`; provider redelivery идемпотентна.
 Автоматический Conversation Understanding Loop не выводится из факта
 локального хранения. Он требует отдельного operator consent на model egress,
 описанного в `TEAM_MEMORY_RU.md`, и настройки
-`team_memory.model_egress_enabled = true`. До первого batch runtime публикует
-отдельный egress notice. Без consent pending evidence остаётся локальным и не
+`team_memory.model_egress_enabled = true`. Первый и последующие background batches
+запускаются без служебных сообщений в группу. Без consent pending evidence остаётся локальным и не
 передаётся фоновым Codex turns.
 
 Background loop выбирает модель независимо от Project runs через
@@ -900,14 +900,10 @@ Project Viewer больше не содержит системную вклад�
 всей группы; точечный отзыв автора в consent ledger остаётся явным deny и имеет
 приоритет над групповым основанием.
 
-После успешного нового primary bind/rebind runtime отправляет сообщение именно в связанный
-Telegram topic; observer bind/rebind проходит без отдельного сообщения в группе.
-Primary Project owner упоминается через HTML-ссылку `tg://user?id=<id>`,
-поэтому уведомление не зависит от наличия username; доступное наблюдаемое имя
-используется только как безопасно экранированная подпись ссылки. Сообщение содержит
-Project и Repository и объясняет, что рабочие запросы топика теперь относятся к
-этому Project. Неизменившаяся привязка уведомление повторно не создаёт. Ошибка
-доставки логируется, но не откатывает уже сохранённый binding.
+Primary и observer bind/rebind не публикуют служебных сообщений в связанную
+Telegram-группу. Резервная команда подтверждает результат только в чате, где её
+вызвали, а Admin Mini App показывает результат внутри своего интерфейса. Сохранение
+binding и связь Team Space с Project от групповой доставки не зависят.
 
 HTTPS-запрос Mini App должен содержать Telegram `initData`. Backend заново
 проверяет HMAC, `auth_date`, Telegram user id и Project owner ACL; данные из
@@ -1793,7 +1789,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "9.23.0",
+  "version": "9.24.0",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",

@@ -278,10 +278,8 @@ test("one background understanding loop creates an episode, memory, and optional
     assert.equal(runtime.state.teamKnowledge(first.spaceId).some((item) => item.kind === "risk"), true);
     assert.equal(runtime.state.teamSpace(first.spaceId)?.phase, "orienting");
     assert.equal(runtime.state.teamSpace(first.spaceId)?.orientedAt, null);
-    assert.equal(runtime.state.teamSpace(first.spaceId)?.modelEgressAnnouncedAt !== null, true);
-    assert.equal(sent.length, 1);
-    assert.match(sent[0]?.text ?? "", /Администратор включил фоновое осмысление/);
-    assert.doesNotMatch(sent[0]?.text ?? "", /Что мне важно уточнить/);
+    assert.equal(runtime.state.teamSpace(first.spaceId)?.modelEgressAnnouncedAt, null);
+    assert.equal(sent.length, 0);
     assert.equal(
       (runtime.status().team_memory as Record<string, unknown>).proactive_replies_enabled,
       false,
@@ -336,8 +334,8 @@ test("one background understanding loop creates an episode, memory, and optional
 
     assert.equal(runtime.state.teamSpace(first.spaceId)?.phase, "active");
     assert.equal(runtime.state.teamSpace(first.spaceId)?.orientedAt !== null, true);
-    assert.deepEqual(sent[1]?.options, { topicId: 9, parseMode: "HTML" });
-    assert.match(sent[1]?.text ?? "", /Что мне важно уточнить/);
+    assert.deepEqual(sent[0]?.options, { topicId: 9, parseMode: "HTML" });
+    assert.match(sent[0]?.text ?? "", /Что мне важно уточнить/);
 
     const third = runtime.state.recordTeamEvent({
       provider: "telegram",
@@ -402,10 +400,10 @@ test("one background understanding loop creates an episode, memory, and optional
     await understandTeamConversation(first.sourceId);
 
     assert.equal(
-      sent[2]?.text,
+      sent[1]?.text,
       "<b>Это пока открытый вопрос.</b> Кто владеет проверкой rollback?",
     );
-    assert.deepEqual(sent[2]?.options, { topicId: 9, replyTo: 104, parseMode: "HTML" });
+    assert.deepEqual(sent[1]?.options, { topicId: 9, replyTo: 104, parseMode: "HTML" });
 
     const claimed = runtime.state.recordTeamEvent({
       provider: "telegram",
@@ -452,7 +450,7 @@ test("one background understanding loop creates an episode, memory, and optional
     await understandTeamConversation(claimed.sourceId);
 
     assert.equal(runtime.state.pendingTeamEventCountForSource(claimed.sourceId), 0);
-    assert.equal(sent.length, 3);
+    assert.equal(sent.length, 2);
     assert.match(prompts[3] ?? "", /"direct_route_claimed": true/);
 
     response = JSON.stringify({
@@ -502,7 +500,7 @@ test("one background understanding loop creates an episode, memory, and optional
         .some((item) => item.subject === "Непривязанный топик"),
       true,
     );
-    assert.equal(sent.length, 3);
+    assert.equal(sent.length, 2);
     assert.equal(sent.some((item) => item.text.includes("сам решил вмешаться")), false);
     assert.deepEqual(threadModels, [
       "gpt-5.6-luna",

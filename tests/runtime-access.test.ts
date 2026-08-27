@@ -235,22 +235,15 @@ test("owners control projects while group participants get read-only Q&A", async
 
     await send(42, "/bind alpha", -100, "supergroup", 5);
     assert.equal(runtime.state.byTopic(-100, 5)?.projectId, "alpha");
-    const ownerNotice = replies.findIndex((reply) =>
-      reply.includes("основным рабочим столом проекта <b>alpha</b>")
+    assert.equal(
+      replies.some((reply) => reply.includes("где вы назначены владельцем")),
+      false,
     );
-    assert.notEqual(ownerNotice, -1);
-    assert.equal(replyChats[ownerNotice], -100);
-    assert.match(replies[ownerNotice] ?? "", /tg:\/\/user\?id=42/);
-    assert.doesNotMatch(replies[ownerNotice] ?? "", /tg:\/\/user\?id=88/);
-    assert.match(replies[ownerNotice] ?? "", /Repository: <code>repo<\/code>/);
-    assert.deepEqual(replyOptions[ownerNotice], { topicId: 5, parseMode: "HTML" });
-    const ownerNoticeCount = replies.filter((reply) =>
-      reply.includes("где вы назначены владельцем")
-    ).length;
+    const groupMessagesAfterPrimaryBind = replyChats.filter((chatId) => chatId === -100).length;
     await send(42, "/bind alpha", -100, "supergroup", 5);
     assert.equal(
-      replies.filter((reply) => reply.includes("где вы назначены владельцем")).length,
-      ownerNoticeCount,
+      replyChats.filter((chatId) => chatId === -100).length,
+      groupMessagesAfterPrimaryBind + 1,
     );
     await send(77, "/bind beta", -100, "supergroup", 5);
     assert.equal(runtime.state.byTopic(-100, 5)?.projectId, "alpha");

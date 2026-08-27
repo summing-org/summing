@@ -143,14 +143,6 @@ function permanentPortalDeliveryError(error: unknown): boolean {
   ].some((marker) => message.includes(marker));
 }
 
-function telegramHtml(value: string): string {
-  return value.replace(/[&<>]/g, (character) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-  })[character]!);
-}
-
 function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, milliseconds));
 }
@@ -1366,24 +1358,6 @@ export class SummingRuntime {
     let usageRecorded = false;
     let applied = false;
     try {
-      if (space.modelEgressAnnouncedAt === null) {
-        const latest = events.at(-1);
-        if (!latest) return;
-        const announced = await this.publishTeamIntervention(
-          latest,
-          "egress-notice",
-          "operator enabled bounded Team Space model egress",
-          [
-            "Администратор включил фоновое осмысление Team Space.",
-            "После паузы разговора новые сообщения одного source одним пакетом передаются в Codex App Server администратора вместе с sender identity, message/reply ids, timestamps, метаданными вложений и доступными транскрипциями.",
-            "Один Conversation Understanding Loop одновременно собирает эпизод, обновляет память и решает, полезнее ответить или промолчать; отдельного ambient-вызова модели нет.",
-            "Codex работает в отдельном read-only контексте без Project, файлов, сети и внешних инструментов. Текущее состояние памяти доступно через /memory.",
-          ].join("\n"),
-          "",
-        );
-        if (!announced) throw new Error("Team Space model egress notice could not be delivered");
-        this.state.markTeamSpaceModelEgressAnnounced(spaceId);
-      }
       const account = await this.codex.account();
       this.accountState = account;
       if (!record(account.account)) throw new Error("Codex is not authenticated");
@@ -1575,16 +1549,14 @@ export class SummingRuntime {
 
   private async publishTeamIntervention(
     event: TeamEvent,
-    kind: "egress-notice" | "orientation" | "proactive",
+    kind: "orientation" | "proactive",
     reason: string,
     text: string,
     replyToExternalEventId: string,
   ): Promise<boolean> {
-    if (kind !== "egress-notice") {
-      if (!this.teamProactiveRepliesEnabled()) return false;
-      const currentEvent = this.state.teamEvent(event.id);
-      if (!currentEvent || currentEvent.directClaimedAt !== null) return false;
-    }
+    if (!this.teamProactiveRepliesEnabled()) return false;
+    const currentEvent = this.state.teamEvent(event.id);
+    if (!currentEvent || currentEvent.directClaimedAt !== null) return false;
     const source = this.state.teamSource(event.sourceId);
     if (!source || source.provider !== "telegram") return false;
     const chatId = Number(source.externalSpaceId);
@@ -3216,11 +3188,6 @@ export class SummingRuntime {
         const role = observerBinding
           ? "observer"
           : "primary";
-        const bindingChanged =
-          !targetConversation ||
-          targetConversation.projectId !== project.id ||
-          targetConversation.workspaceId !== workspace.id ||
-          targetConversation.role !== role;
         const bound = this.state.bind(
           targetChatId,
           targetTopicId,
@@ -3236,9 +3203,6 @@ export class SummingRuntime {
         );
         const teamSpace = this.state.teamSpaceForProvider("telegram", String(targetChatId));
         if (teamSpace) this.state.linkTeamProject(teamSpace.id, project.id);
-        if (bindingChanged && role === "primary") {
-          this.queuePrimaryProjectBindingNotification(targetChatId, targetTopicId);
-        }
         const targetTitle = targetChat.title || String(targetChat.chatId);
         const topicTitle = targetTopic.name || String(targetTopic.topicId);
         await this.reply(
@@ -3301,10 +3265,6 @@ export class SummingRuntime {
           return;
         }
         const workspace = project.workspace(parts[1] ?? "");
-        const bindingChanged =
-          !conversation ||
-          conversation.projectId !== project.id ||
-          conversation.workspaceId !== workspace.id;
         if (
           conversation &&
           (conversation.projectId !== project.id || conversation.workspaceId !== workspace.id)
@@ -3316,9 +3276,6 @@ export class SummingRuntime {
         const bound = this.state.bind(chatId, topicId, project.id, workspace.id);
         const teamSpace = this.state.teamSpaceForProvider("telegram", String(chatId));
         if (teamSpace) this.state.linkTeamProject(teamSpace.id, project.id);
-        if (bindingChanged && chatType === "supergroup") {
-          this.queuePrimaryProjectBindingNotification(chatId, topicId);
-        }
         await this.reply(
           chatId,
           topicId,
@@ -3800,42 +3757,6 @@ export class SummingRuntime {
     if (!conversation) return;
     const teamSpace = this.state.teamSpaceForProvider("telegram", String(chatId));
     if (teamSpace) this.state.linkTeamProject(teamSpace.id, conversation.projectId);
-    if (conversation.role === "primary") {
-      this.queuePrimaryProjectBindingNotification(chatId, topicId);
-    }
-  }
-
-  private queuePrimaryProjectBindingNotification(chatId: number, topicId: number): void {
-    void this.notifyPrimaryProjectBinding(chatId, topicId).catch((error) => {
-      console.warn("could not notify project owner about topic binding", errorText(error));
-    });
-  }
-
-  private async notifyPrimaryProjectBinding(chatId: number, topicId: number): Promise<void> {
-    const conversation = this.state.byTopic(chatId, topicId);
-    if (!conversation || conversation.role !== "primary") return;
-    const project = this.projects.project(conversation.projectId);
-    const ownerId = this.projects.owner(project.id);
-    const profile = this.state.listTelegramChatUsers(chatId)
-      .find((user) => user.userId === ownerId);
-    const profileName = [profile?.firstName, profile?.lastName]
-      .filter((part): part is string => Boolean(part))
-      .join(" ")
-      .trim();
-    const ownerLabel = profileName || (profile?.username ? `@${profile.username}` : `ID ${ownerId}`);
-    const mention = `<a href="tg://user?id=${ownerId}">${telegramHtml(ownerLabel)}</a>`;
-    await this.telegram.sendMessage(
-      chatId,
-      [
-        `👤 ${mention}, этот топик стал основным рабочим столом проекта ` +
-          `<b>${telegramHtml(project.name)}</b>, где вы назначены владельцем.`,
-        `Project: <code>${telegramHtml(project.id)}</code>`,
-        `Repository: <code>${telegramHtml(conversation.workspaceId)}</code>`,
-        "Только здесь owners и Codex принимают рабочие решения. Команда /publish отправляет " +
-          "безопасное обновление всем топикам-наблюдателям этого Workspace.",
-      ].join("\n"),
-      { topicId, parseMode: "HTML" },
-    );
   }
 
   private async sendAdminButton(chatId: number, replyTo: number): Promise<void> {

@@ -1,4 +1,4 @@
-# SUMMING 9.23
+# SUMMING 9.24
 
 SUMMING — один постоянно живущий агент с одним администратором и назначаемыми
 владельцами проектов. Он работает на Linux VPS, принимает команды из Telegram
@@ -313,8 +313,8 @@ memory, пока включён сам model egress.
 evidence-backed knowledge и `silent/reply` decision. Runtime принимает его только после
 проверки полноты episode, Source/Person boundaries, evidence ids, confidence,
 visibility, temporal validity, supersession links и reply target. Отдельного Project
-ambient model call нет. До первого batch Team Space получает уведомление о составе
-model egress; после `team_memory.orientation_event_threshold` событий SUMMING один раз
+ambient model call нет. Background batches запускаются без служебного уведомления в
+группу; после `team_memory.orientation_event_threshold` событий SUMMING один раз
 показывает понимание и уточняет главные пробелы. Дальнейшие replies ограничены
 `team_memory.intervention_cooldown_sec` и всегда привязаны к конкретному provider message.
 Сообщение, маршрутизированное в direct Project-turn, синхронно получает локальный
