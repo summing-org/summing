@@ -25,7 +25,7 @@ const DEFAULT_MAXIMUM_QUEUED_ATTACHMENT_BYTES = 250 * 1024 * 1024;
 const SENT_RETENTION_MILLISECONDS = 30 * 24 * 60 * 60 * 1_000;
 const FAILED_RETENTION_MILLISECONDS = 90 * 24 * 60 * 60 * 1_000;
 
-export type ProjectPortalMessageKind = "text" | "document";
+export type ProjectPortalMessageKind = "text" | "document" | "video";
 export type ProjectPortalDeliveryStatus =
   | "pending"
   | "sending"
@@ -162,6 +162,7 @@ export class ProjectPortalOutboxStore {
     portal?: ProjectPortalBinding;
     destination?: ProjectTopicDestination;
     text?: string;
+    kind?: ProjectPortalMessageKind;
     replyToEventId?: number | null;
     replyToMessageId?: number | null;
     attachment?: { fileName: string; mimeType: string; data: Uint8Array } | null;
@@ -172,12 +173,25 @@ export class ProjectPortalOutboxStore {
   }): ProjectPortalOutboxRecord {
     const text = String(input.text ?? "").trim();
     const attachment = input.attachment ?? null;
+    const kind = input.kind ?? (attachment ? "document" : "text");
+    if (!new Set<ProjectPortalMessageKind>(["text", "document", "video"]).has(kind)) {
+      throw new ProjectPortalOutboxError("portal message kind is invalid");
+    }
     if (!text && !attachment) throw new ProjectPortalOutboxError("portal message is empty");
     if (attachment && Array.from(text).length > 900) {
-      throw new ProjectPortalOutboxError("document caption is limited to 900 characters");
+      throw new ProjectPortalOutboxError("attachment caption is limited to 900 characters");
     }
     if (!attachment && Array.from(text).length > 3_500) {
       throw new ProjectPortalOutboxError("portal text is limited to 3500 characters");
+    }
+    if (kind === "text" && attachment) {
+      throw new ProjectPortalOutboxError("portal text cannot contain an attachment");
+    }
+    if ((kind === "document" || kind === "video") && !attachment) {
+      throw new ProjectPortalOutboxError("portal attachment message is missing its attachment");
+    }
+    if (kind === "video" && attachment?.mimeType !== "video/mp4") {
+      throw new ProjectPortalOutboxError("portal video attachment must be video/mp4");
     }
     if (
       !input.idempotencyKey ||
@@ -250,7 +264,7 @@ export class ProjectPortalOutboxStore {
       chatId: route.chatId,
       topicId: route.topicId,
       sourceId: route.sourceId,
-      kind: attachmentMetadata ? "document" as const : "text" as const,
+      kind,
       text,
       replyToEventId: input.replyToEventId ?? null,
       replyToMessageId: input.replyToMessageId ?? null,
@@ -313,6 +327,7 @@ export class ProjectPortalOutboxStore {
     workspaceId: string;
     destination: ProjectTopicDestination;
     text?: string;
+    kind?: ProjectPortalMessageKind;
     replyToEventId?: number | null;
     replyToMessageId?: number | null;
     attachment?: { fileName: string; mimeType: string; data: Uint8Array } | null;

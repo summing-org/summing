@@ -105,6 +105,48 @@ test("sendDocument uploads bytes as multipart and preserves Telegram reply scope
   }
 });
 
+test("sendVideo uploads a streaming MP4 as native Telegram video", async () => {
+  const api = new TelegramAPI("secret-token");
+  const originalFetch = globalThis.fetch;
+  let requestedUrl = "";
+  globalThis.fetch = async (input, init) => {
+    requestedUrl = String(input);
+    assert.equal(init?.method, "POST");
+    assert.ok(init?.body instanceof FormData);
+    const form = init.body;
+    assert.equal(form.get("chat_id"), "-10042");
+    assert.equal(form.get("message_thread_id"), "17");
+    assert.equal(form.get("caption"), "Live report");
+    assert.equal(form.get("supports_streaming"), "true");
+    const video = form.get("video");
+    assert.ok(video instanceof Blob);
+    assert.equal(video.type, "video/mp4");
+    assert.equal((video as Blob & { name: string }).name, "video-01.mp4");
+    assert.deepEqual([...new Uint8Array(await video.arrayBuffer())], [0, 1, 2, 3]);
+    return new Response(JSON.stringify({ ok: true, result: { message_id: 20 } }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  try {
+    assert.equal(
+      await api.sendVideo(
+        -10042,
+        Uint8Array.from([0, 1, 2, 3]),
+        "video-01.mp4",
+        "video/mp4",
+        { topicId: 17, caption: "Live report" },
+      ),
+      20,
+    );
+    assert.equal(requestedUrl, "https://api.telegram.org/botsecret-token/sendVideo");
+  } finally {
+    globalThis.fetch = originalFetch;
+    await api.close();
+  }
+});
+
 test("editMessage forwards Telegram HTML parse mode", async () => {
   const api = new TelegramAPI("token");
   let payload: Record<string, unknown> = {};

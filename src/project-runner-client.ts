@@ -68,7 +68,7 @@ export interface RunnerJob {
 
 export interface RunnerPortalMessage {
   id: string;
-  type: "text" | "document";
+  type: "text" | "document" | "video";
   text: string;
   artifact: string | null;
   portalKey?: string | null;
@@ -90,6 +90,10 @@ export interface RunnerArtifact {
 
 export interface RunnerArtifactContent extends RunnerArtifact {
   content: string;
+}
+
+export interface RunnerArtifactData extends RunnerArtifact {
+  data: Uint8Array;
 }
 
 export interface RunnerArtifactDeletion extends RunnerArtifact {
@@ -187,6 +191,58 @@ export class ProjectRunnerClient {
       requestHandle.once("error", (error) => reject(new ProjectRunnerClientError(error.message)));
       if (body) requestHandle.end(body);
       else requestHandle.end();
+    });
+  }
+
+  private callBinary(path: string, maximumBytes = 20_000_000): Promise<{
+    data: Uint8Array;
+    contentType: string;
+  }> {
+    return new Promise((resolveCall, reject) => {
+      const requestHandle = request(
+        {
+          socketPath: this.socketPath,
+          agent: false,
+          method: "GET",
+          path,
+          timeout: 120_000,
+        },
+        (response) => {
+          const chunks: Buffer[] = [];
+          let bytes = 0;
+          let tooLarge = false;
+          response.on("data", (chunk: Buffer) => {
+            bytes += chunk.length;
+            if (bytes <= maximumBytes) chunks.push(chunk);
+            else tooLarge = true;
+          });
+          response.on("end", () => {
+            if (tooLarge) {
+              reject(new ProjectRunnerClientError(`runner artifact exceeds ${maximumBytes} bytes`, 413));
+              return;
+            }
+            const data = Buffer.concat(chunks);
+            if ((response.statusCode ?? 500) >= 400) {
+              let message = data.toString("utf8") || `runner returned HTTP ${response.statusCode ?? 500}`;
+              try {
+                const parsed = JSON.parse(message) as { error?: unknown };
+                if (typeof parsed.error === "string") message = parsed.error;
+              } catch {
+                // Preserve the bounded response text when it is not JSON.
+              }
+              reject(new ProjectRunnerClientError(message, response.statusCode ?? 500));
+              return;
+            }
+            resolveCall({
+              data: Uint8Array.from(data),
+              contentType: String(response.headers["content-type"] ?? "application/octet-stream"),
+            });
+          });
+        },
+      );
+      requestHandle.once("timeout", () => requestHandle.destroy(new Error("runner request timed out")));
+      requestHandle.once("error", (error) => reject(new ProjectRunnerClientError(error.message)));
+      requestHandle.end();
     });
   }
 
@@ -355,6 +411,17 @@ export class ProjectRunnerClient {
       `/artifact?${query.toString()}`,
     );
     return result.artifact;
+  }
+
+  async artifactData(projectId: string, jobId: string, name: string): Promise<RunnerArtifactData> {
+    const query = new URLSearchParams({ project: projectId, job: jobId, name });
+    const result = await this.callBinary(`/artifact/data?${query.toString()}`);
+    return {
+      name,
+      bytes: result.data.byteLength,
+      contentType: result.contentType,
+      data: result.data,
+    };
   }
 
   async portalMessages(

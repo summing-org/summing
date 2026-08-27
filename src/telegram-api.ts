@@ -213,9 +213,45 @@ export class TelegramAPI {
     return messageId;
   }
 
+  async sendVideo(
+    chatId: number,
+    data: Uint8Array,
+    fileName: string,
+    mimeType: string,
+    options: {
+      topicId?: number;
+      replyTo?: number;
+      caption?: string;
+    } = {},
+  ): Promise<number> {
+    const buffer = new ArrayBuffer(data.byteLength);
+    new Uint8Array(buffer).set(data);
+    const video = new Blob([buffer], { type: mimeType || "video/mp4" });
+    const result = record(await this.request("sendVideo", () => {
+      const form = new FormData();
+      form.set("chat_id", String(chatId));
+      form.set("video", video, fileName);
+      form.set("supports_streaming", "true");
+      if (options.caption) form.set("caption", options.caption.slice(0, 1_024));
+      if (options.topicId) form.set("message_thread_id", String(options.topicId));
+      if (options.replyTo) {
+        form.set("reply_parameters", JSON.stringify({
+          message_id: options.replyTo,
+          allow_sending_without_reply: true,
+        }));
+      }
+      return { method: "POST", body: form };
+    }));
+    const messageId = Number(result?.message_id);
+    if (!Number.isInteger(messageId) || messageId <= 0) {
+      throw new TelegramError("sendVideo did not return message_id");
+    }
+    return messageId;
+  }
+
   async sendChatAction(
     chatId: number,
-    action: "typing" | "upload_document",
+    action: "typing" | "upload_document" | "upload_video",
     topicId = 0,
   ): Promise<void> {
     const payload: TelegramObject = { chat_id: chatId, action };

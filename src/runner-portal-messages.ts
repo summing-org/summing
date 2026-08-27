@@ -17,12 +17,13 @@ import { dirname, resolve } from "node:path";
 const IDENTIFIER = /^[A-Za-z0-9._-]{1,120}$/;
 const PORTAL_KEY = /^[a-z][a-z0-9_-]{0,47}$/;
 const MAXIMUM_REQUEST_BYTES = 64_000;
-const MAXIMUM_ARTIFACT_BYTES = 8_000_000;
+const MAXIMUM_DOCUMENT_BYTES = 8_000_000;
+const MAXIMUM_VIDEO_BYTES = 20_000_000;
 const MAXIMUM_MESSAGES = 20;
 
 export interface RunnerPortalMessage {
   id: string;
-  type: "text" | "document";
+  type: "text" | "document" | "video";
   text: string;
   artifact: string | null;
   portalKey?: string;
@@ -96,7 +97,7 @@ export class RunnerPortalMessageStore {
     workspaceId: string;
     jobId: string;
     artifactDirectory: string;
-    allowedArtifacts: ReadonlySet<string>;
+    allowedArtifacts: ReadonlyMap<string, string>;
   }): RunnerPortalMessageBatch | null {
     const requestPath = resolve(input.artifactDirectory, "portal-messages.json");
     if (!existsSync(requestPath)) return null;
@@ -145,35 +146,43 @@ export class RunnerPortalMessageStore {
         throw new RunnerPortalMessageError(409, "portal message id is invalid or duplicated");
       }
       identifiers.add(id);
-      if (!new Set(["text", "document"]).has(type)) {
+      if (!new Set(["text", "document", "video"]).has(type)) {
         throw new RunnerPortalMessageError(409, "portal message type is invalid");
       }
       if (portalKey !== null && !PORTAL_KEY.test(portalKey)) {
         throw new RunnerPortalMessageError(409, "portalKey is invalid");
       }
-      const maximumText = type === "document" ? 900 : 3_500;
+      const maximumText = type === "text" ? 3_500 : 900;
       if ((!text && type === "text") || Array.from(text).length > maximumText) {
         throw new RunnerPortalMessageError(409, "portal message text is outside Telegram limits");
       }
       if (type === "text" && artifact !== null) {
         throw new RunnerPortalMessageError(409, "text portal message cannot contain an artifact");
       }
-      if (type === "document") {
-        if (!artifact || !IDENTIFIER.test(artifact) || !input.allowedArtifacts.has(artifact)) {
-          throw new RunnerPortalMessageError(409, "portal document artifact is not allowed");
+      if (type === "document" || type === "video") {
+        const contentType = artifact ? input.allowedArtifacts.get(artifact) : null;
+        if (!artifact || !IDENTIFIER.test(artifact) || !contentType) {
+          throw new RunnerPortalMessageError(409, "portal attachment artifact is not allowed");
+        }
+        if (type === "video" && contentType !== "video/mp4") {
+          throw new RunnerPortalMessageError(409, "portal video artifact must be video/mp4");
+        }
+        if (type === "document" && contentType === "video/mp4") {
+          throw new RunnerPortalMessageError(409, "portal MP4 artifact must use the video message type");
         }
         const artifactPath = resolve(input.artifactDirectory, artifact);
         if (!existsSync(artifactPath)) {
-          throw new RunnerPortalMessageError(409, "portal document artifact is missing");
+          throw new RunnerPortalMessageError(409, "portal attachment artifact is missing");
         }
         const artifactMetadata = lstatSync(artifactPath);
+        const maximumBytes = type === "video" ? MAXIMUM_VIDEO_BYTES : MAXIMUM_DOCUMENT_BYTES;
         if (
           artifactMetadata.isSymbolicLink() ||
           !artifactMetadata.isFile() ||
           artifactMetadata.size <= 0 ||
-          artifactMetadata.size > MAXIMUM_ARTIFACT_BYTES
+          artifactMetadata.size > maximumBytes
         ) {
-          throw new RunnerPortalMessageError(409, "portal document artifact is unsafe");
+          throw new RunnerPortalMessageError(409, "portal attachment artifact is unsafe");
         }
       }
       return {

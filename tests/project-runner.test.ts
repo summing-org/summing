@@ -173,9 +173,11 @@ if [ "$1" = run ]; then
   previous=""
   provision=""
   provision_dir=""
+  live=false
   for value in "$@"; do
     case "$value" in SUMMING_JOB_ID=*) job="\${value#*=}" ;; esac
     case "$value" in SUMMING_PROVISION_ID=*) provision="\${value#*=}" ;; esac
+    case "$value" in DRY_RUN=false) live=true ;; esac
     if [ "$previous" = "--env-file" ]; then runtime_env="$value"; fi
     if [ "$previous" = "--volume" ]; then
       case "$value" in *:/run/summing-provision) provision_dir="\${value%:*}" ;; esac
@@ -199,8 +201,13 @@ if [ "$1" = run ]; then
   if [ -n "$job" ]; then
     mkdir -p "${appData}/dry-runs/$job"
     printf '{"status":"completed","key":"%s"}\n' "$secret" > "${appData}/dry-runs/$job/manifest.json"
-    printf '<html>report</html>\n' > "${appData}/dry-runs/$job/report.html"
-    printf '{"schemaVersion":1,"messages":[{"id":"dry-run-report","type":"document","text":"Informational dry-run report is ready.","artifact":"report.html"}]}\n' > "${appData}/dry-runs/$job/portal-messages.json"
+    if [ "$live" = true ]; then
+      printf 'fake-mp4' > "${appData}/dry-runs/$job/video-01.mp4"
+      printf '{"schemaVersion":1,"messages":[{"id":"live-video","type":"video","text":"Live-run video is ready.","artifact":"video-01.mp4"}]}\n' > "${appData}/dry-runs/$job/portal-messages.json"
+    else
+      printf '<html>report</html>\n' > "${appData}/dry-runs/$job/report.html"
+      printf '{"schemaVersion":1,"messages":[{"id":"dry-run-report","type":"document","text":"Informational dry-run report is ready.","artifact":"report.html"}]}\n' > "${appData}/dry-runs/$job/portal-messages.json"
+    fi
   fi
 fi
 exit 0
@@ -223,7 +230,7 @@ exit 0
     assert.deepEqual(await client.health(), {
       ok: true,
       version: readFileSync(join(process.cwd(), "VERSION"), "utf8").trim(),
-      protocolVersion: 4,
+      protocolVersion: 5,
       queued: 0,
       running: 0,
       maxParallelJobs: 2,
@@ -354,6 +361,34 @@ exit 0
     assert.equal(existsSync(join(releaseDirectory, "source.tar")), true);
     assert.equal(existsSync(join(releaseDirectory, "environment.json")), true);
     assert.equal(existsSync(join(releaseDirectory, "release-config.json")), true);
+
+    const liveRun = await client.submit("demo", "repo", "run", revision, archive);
+    const liveRunCompleted = await completedJob(client, "demo", "repo", liveRun.id);
+    assert.equal(liveRunCompleted.status, "completed");
+    assert.equal(liveRunCompleted.artifactCount, 3);
+    assert.equal(liveRunCompleted.portalMessageCount, 1);
+    assert.deepEqual(
+      (await client.artifacts("demo", liveRun.id)).map((artifact) => artifact.name),
+      ["manifest.json", "portal-messages.json", "video-01.mp4"],
+    );
+    assert.deepEqual((await client.portalMessages("demo", "repo", liveRun.id)).messages, [{
+      id: "live-video",
+      type: "video",
+      text: "Live-run video is ready.",
+      artifact: "video-01.mp4",
+    }]);
+    const liveVideo = await client.artifactData("demo", liveRun.id, "video-01.mp4");
+    assert.equal(liveVideo.contentType, "video/mp4");
+    assert.equal(Buffer.from(liveVideo.data).toString("utf8"), "fake-mp4");
+    await assert.rejects(
+      client.artifact("demo", liveRun.id, "video-01.mp4"),
+      /binary artifact is not available as text/,
+    );
+    const liveArgs = readFileSync(dockerArgs, "utf8");
+    assert.match(liveArgs, new RegExp(`SUMMING_JOB_ID=${liveRun.id}`));
+    assert.match(liveArgs, /DRY_RUN=false/);
+    assert.match(liveArgs, /SUMMING_PORTAL_TRANSPORT=true/);
+    assert.match(liveArgs, new RegExp(`DRY_RUN_ARTIFACT_DIR=/app/data/dry-runs/${liveRun.id}`));
 
     await assert.rejects(
       client.submit("demo", "repo", "provision", revision, archive, {

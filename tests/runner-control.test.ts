@@ -611,13 +611,13 @@ test("provision requires an explicit profile and forwards only pinned metadata",
   }
 });
 
-test("a completed manual dry-run routes portal messages to the originating actor and conversation", async () => {
+test("a completed manual live-run routes portal messages to the originating actor and conversation", async () => {
   const root = mkdtempSync(join(tmpdir(), "summing-runner-portal-watch-"));
   const job: RunnerJob = {
     id: "b4a0bb44-d858-40ba-93b9-5e8f0c105c85",
     projectId: "demo",
     workspaceId: "repo",
-    action: "dry-run",
+    action: "run",
     revision: "a".repeat(40),
     status: "completed",
     portalMessageCount: 1,

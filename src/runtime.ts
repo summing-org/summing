@@ -1688,18 +1688,19 @@ export class SummingRuntime {
     for (const { message, portal } of resolved) {
       if (!portal) continue;
       const artifact = message.artifact
-        ? await this.viewer.runner.artifact(job.projectId, job.id, message.artifact)
+        ? await this.viewer.runner.artifactData(job.projectId, job.id, message.artifact)
         : null;
       this.projectPortalOutbox.enqueue({
         projectId: job.projectId,
         workspaceId: job.workspaceId,
         portal,
+        kind: message.type,
         ...(message.text ? { text: message.text } : {}),
         attachment: artifact
           ? {
               fileName: artifact.name,
               mimeType: artifact.contentType,
-              data: new TextEncoder().encode(artifact.content),
+              data: artifact.data,
             }
           : null,
         idempotencyKey: `runner:${job.id}:${message.id}`,
@@ -1744,7 +1745,7 @@ export class SummingRuntime {
       );
       for (const message of batch.messages) {
         const artifact = message.artifact
-          ? await this.viewer.runner.artifact(job.projectId, job.id, message.artifact)
+          ? await this.viewer.runner.artifactData(job.projectId, job.id, message.artifact)
           : null;
         this.projectPortalOutbox.enqueueTopic({
           projectId: job.projectId,
@@ -1755,12 +1756,13 @@ export class SummingRuntime {
             topicId: schedule.delivery.topicId,
             sourceId: source?.id ?? null,
           },
+          kind: message.type,
           ...(message.text ? { text: message.text } : {}),
           attachment: artifact
             ? {
                 fileName: artifact.name,
                 mimeType: artifact.contentType,
-                data: new TextEncoder().encode(artifact.content),
+                data: artifact.data,
               }
             : null,
           idempotencyKey: `runner:${job.id}:${message.id}`,
@@ -1809,18 +1811,19 @@ export class SummingRuntime {
     for (const { message, portal } of legacy) {
       if (!portal) continue;
       const artifact = message.artifact
-        ? await this.viewer.runner.artifact(job.projectId, job.id, message.artifact)
+        ? await this.viewer.runner.artifactData(job.projectId, job.id, message.artifact)
         : null;
       this.projectPortalOutbox.enqueue({
         projectId: job.projectId,
         workspaceId: job.workspaceId,
         portal,
+        kind: message.type,
         ...(message.text ? { text: message.text } : {}),
         attachment: artifact
           ? {
               fileName: artifact.name,
               mimeType: artifact.contentType,
-              data: new TextEncoder().encode(artifact.content),
+              data: artifact.data,
             }
           : null,
         idempotencyKey: `runner:${job.id}:${message.id}`,
@@ -5649,25 +5652,38 @@ export class SummingRuntime {
         }
       }
       let messageId: number;
-      if (record.kind === "document" && record.attachment) {
+      if ((record.kind === "document" || record.kind === "video") && record.attachment) {
         try {
-          await this.telegram.sendChatAction(record.chatId, "upload_document", record.topicId);
+          await this.telegram.sendChatAction(
+            record.chatId,
+            record.kind === "video" ? "upload_video" : "upload_document",
+            record.topicId,
+          );
         } catch {
           // Delivery does not depend on the best-effort typing action.
         }
         const data = this.projectPortalOutbox.attachmentData(record);
         if (!data) throw new Error("portal attachment is missing");
-        messageId = await this.telegram.sendDocument(
-          record.chatId,
-          data,
-          record.attachment.fileName,
-          record.attachment.mimeType,
-          {
-            topicId: record.topicId,
-            ...(record.replyToMessageId ? { replyTo: record.replyToMessageId } : {}),
-            ...(record.text ? { caption: record.text } : {}),
-          },
-        );
+        const options = {
+          topicId: record.topicId,
+          ...(record.replyToMessageId ? { replyTo: record.replyToMessageId } : {}),
+          ...(record.text ? { caption: record.text } : {}),
+        };
+        messageId = record.kind === "video"
+          ? await this.telegram.sendVideo(
+              record.chatId,
+              data,
+              record.attachment.fileName,
+              record.attachment.mimeType,
+              options,
+            )
+          : await this.telegram.sendDocument(
+              record.chatId,
+              data,
+              record.attachment.fileName,
+              record.attachment.mimeType,
+              options,
+            );
         transportAccepted = true;
       } else {
         messageId = await this.telegram.sendMessage(record.chatId, record.text, {

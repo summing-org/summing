@@ -1659,7 +1659,7 @@ export class RunnerControlPlane {
         );
         if (
           status === "completed" &&
-          job.action === "dry-run" &&
+          (job.action === "dry-run" || job.action === "run") &&
           (job.portalMessageCount ?? 0) > 0 &&
           schedule
         ) {
@@ -1708,7 +1708,7 @@ export class RunnerControlPlane {
         try {
           if (
             job.status === "completed" &&
-            job.action === "dry-run" &&
+            (job.action === "dry-run" || job.action === "run") &&
             (job.portalMessageCount ?? 0) > 0 &&
             watch.actorUserId > 0 &&
             await this.notifyPortalMessages(job, watch.conversationId, watch.actorUserId)

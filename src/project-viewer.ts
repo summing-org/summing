@@ -129,9 +129,11 @@ function asset(response: ServerResponse, contentType: string, value: string): vo
 
 function artifactDownload(
   response: ServerResponse,
-  artifact: { content: string; contentType: string; name: string },
+  artifact: { content?: string; data?: Uint8Array; contentType: string; name: string },
 ): void {
-  const body = Buffer.from(artifact.content, "utf8");
+  const body = artifact.data
+    ? Buffer.from(artifact.data)
+    : Buffer.from(artifact.content ?? "", "utf8");
   const contentType = /^(?:text\/|application\/(?:json|xml)(?:$|;))/i.test(artifact.contentType)
     ? `${artifact.contentType}; charset=utf-8`
     : artifact.contentType;
@@ -1080,7 +1082,9 @@ export class ProjectViewerServer {
       throw new ViewerHttpError(404, "artifact download not found");
     }
     const scope = await this.scope(grant.conversationId, grant.userId);
-    const artifact = await this.runner.artifact(scope.project.id, grant.jobId, grant.name);
+    const artifact = grant.name.endsWith(".mp4")
+      ? await this.runner.artifactData(scope.project.id, grant.jobId, grant.name)
+      : await this.runner.artifact(scope.project.id, grant.jobId, grant.name);
     if (artifact.name !== grant.name) {
       throw new ViewerHttpError(404, "artifact download not found");
     }

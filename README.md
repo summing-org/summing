@@ -1,4 +1,4 @@
-# SUMMING 9.26
+# SUMMING 9.27
 
 SUMMING — один постоянно живущий агент с одним администратором и назначаемыми
 владельцами проектов. Он работает на Linux VPS, принимает команды из Telegram
@@ -128,9 +128,12 @@ Team Space: создаётся при подключении командног�
 - надёжный transport использует ограниченную постоянную outbox-очередь с idempotency key,
   SHA-256, retry/dead-letter и
   администраторскими Retry/Cancel. Рестарт во время отправки создаёт `uncertain`,
-  который никогда не повторяется автоматически. Dry-run использует тот же transport
-  через `portal-messages.json`; новое расписание маршрутизирует весь batch в сохранённый
-  топик без `portalKey`. Старые observer bindings и legacy routes сохраняются только для
+  который никогда не повторяется автоматически. Dry-run и live-run используют тот же
+  transport через `portal-messages.json`; помимо bounded text/document отчётов live-run
+  может приложить job-scoped `video-NN.mp4` до 20 МБ, который проходит проверку regular-file,
+  MIME и размера и отправляется в Telegram через нативный `sendVideo`. Новое расписание
+  маршрутизирует весь batch в сохранённый топик без `portalKey`. Старые observer bindings
+  и legacy routes сохраняются только для
   чтения истории и совместимой доставки уже созданных записей, но не участвуют в новом
   bind UI, Project Q&A или host tools.
 

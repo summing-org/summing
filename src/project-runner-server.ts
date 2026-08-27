@@ -82,8 +82,9 @@ const IDEMPOTENCY_KEY = /^[0-9a-f]{64}$/;
 const REVISION = /^[0-9a-f]{40}$/;
 const MAX_ARCHIVE_BYTES = 50_000_000;
 const MAX_ARTIFACT_BYTES = 8_000_000;
+const MAX_VIDEO_ARTIFACT_BYTES = 20_000_000;
 const MAX_JSON_BYTES = 1_100_000;
-const DRY_RUN_RETENTION = 30;
+const JOB_ARTIFACT_RETENTION = 30;
 const RELEASE_PAYLOAD_RETENTION = 20;
 const JOB_RETENTION = 100;
 const RUNNER_ACTIONS = new Set<RunnerAction>(["build", "validate", "dry-run", "run", "provision"]);
@@ -100,6 +101,15 @@ const ARTIFACTS = new Map([
   ["report.html", "text/html"],
   ["portal-messages.json", "application/json"],
 ]);
+const VIDEO_ARTIFACT = /^video-(?:preview|0[1-9]|[1-4][0-9]|50)\.mp4$/;
+
+function artifactContentType(name: string): string | null {
+  return ARTIFACTS.get(name) ?? (VIDEO_ARTIFACT.test(name) ? "video/mp4" : null);
+}
+
+function maximumArtifactBytes(name: string): number {
+  return VIDEO_ARTIFACT.test(name) ? MAX_VIDEO_ARTIFACT_BYTES : MAX_ARTIFACT_BYTES;
+}
 
 type RunnerProjectConfigSource =
   | { kind: "host"; path: string }
@@ -428,7 +438,7 @@ export class ProjectRunnerServer {
       json(response, this.ready ? 200 : 503, {
         ok: this.ready,
         version: SUMMING_VERSION,
-        protocolVersion: 4,
+        protocolVersion: 5,
         queued: this.queue.length,
         running: this.activeJobs.size,
         maxParallelJobs: this.maxParallelJobs,
@@ -754,7 +764,10 @@ export class ProjectRunnerServer {
       }
       this.projectConfig(projectId, workspaceId);
       const job = this.storedJob(projectId, jobId);
-      if (job.workspaceId !== workspaceId || job.action !== "dry-run") {
+      if (
+        job.workspaceId !== workspaceId ||
+        (job.action !== "dry-run" && job.action !== "run")
+      ) {
         throw new RunnerHttpError(404, "portal messages were not found for this job");
       }
       const batch = this.portalMessages.byJob(projectId, workspaceId, jobId);
@@ -762,18 +775,43 @@ export class ProjectRunnerServer {
       json(response, 200, { batch });
       return;
     }
-    if (request.method === "GET" && url.pathname === "/artifact") {
-      const { projectId, jobId, project } = this.artifactScope(url);
+    if (request.method === "GET" && url.pathname === "/artifact/data") {
+      const { jobId, project } = this.artifactScope(url);
       const name = url.searchParams.get("name") ?? "";
-      const contentType = ARTIFACTS.get(name);
+      const contentType = artifactContentType(name);
       if (!contentType) throw new RunnerHttpError(400, "invalid artifact name");
       const directory = this.safeArtifactDirectory(project, jobId);
       if (!directory) throw new RunnerHttpError(404, "artifact not found");
       const path = resolve(directory, name);
       if (!existsSync(path)) throw new RunnerHttpError(404, "artifact not found");
       const metadata = lstatSync(path);
+      if (!metadata.isFile() || metadata.isSymbolicLink()) {
+        throw new RunnerHttpError(404, "artifact not found");
+      }
+      if (metadata.size <= 0 || metadata.size > maximumArtifactBytes(name)) {
+        throw new RunnerHttpError(413, "artifact exceeds its delivery size limit");
+      }
+      response.statusCode = 200;
+      response.setHeader("content-type", contentType);
+      response.setHeader("content-length", String(metadata.size));
+      response.end(readFileSync(path));
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/artifact") {
+      const { projectId, jobId, project } = this.artifactScope(url);
+      const name = url.searchParams.get("name") ?? "";
+      const contentType = artifactContentType(name);
+      if (!contentType) throw new RunnerHttpError(400, "invalid artifact name");
+      if (contentType === "video/mp4") {
+        throw new RunnerHttpError(415, "binary artifact is not available as text");
+      }
+      const directory = this.safeArtifactDirectory(project, jobId);
+      if (!directory) throw new RunnerHttpError(404, "artifact not found");
+      const path = resolve(directory, name);
+      if (!existsSync(path)) throw new RunnerHttpError(404, "artifact not found");
+      const metadata = lstatSync(path);
       if (!metadata.isFile()) throw new RunnerHttpError(404, "artifact not found");
-      if (metadata.size > MAX_ARTIFACT_BYTES) {
+      if (metadata.size > maximumArtifactBytes(name)) {
         throw new RunnerHttpError(413, "artifact exceeds 8 MB");
       }
       json(response, 200, {
@@ -2114,8 +2152,12 @@ export class ProjectRunnerServer {
     const metadataPath = resolve(this.jobDirectory(projectId, jobId), "job.json");
     if (!existsSync(metadataPath)) throw new RunnerHttpError(404, "runner job not found");
     const job = JSON.parse(readFileSync(metadataPath, "utf8")) as RunnerJob;
-    if (job.projectId !== projectId || job.id !== jobId || job.action !== "dry-run") {
-      throw new RunnerHttpError(404, "dry-run artifacts are not available for this job");
+    if (
+      job.projectId !== projectId ||
+      job.id !== jobId ||
+      (job.action !== "dry-run" && job.action !== "run")
+    ) {
+      throw new RunnerHttpError(404, "job artifacts are not available for this job");
     }
     return { projectId, jobId, project, job };
   }
@@ -2126,7 +2168,7 @@ export class ProjectRunnerServer {
     name: string,
     project: RunnerProjectConfig,
   ): RunnerArtifactDeletion {
-    const contentType = ARTIFACTS.get(name);
+    const contentType = artifactContentType(name);
     if (!contentType) throw new RunnerHttpError(400, "invalid artifact name");
     const directory = this.safeArtifactDirectory(project, jobId);
     if (!directory) throw new RunnerHttpError(404, "artifact not found");
@@ -2161,11 +2203,20 @@ export class ProjectRunnerServer {
   }> {
     const directory = this.safeArtifactDirectory(project, jobId);
     if (!directory) return [];
-    return [...ARTIFACTS.entries()].flatMap(([name, contentType]) => {
+    const names = new Set([
+      ...ARTIFACTS.keys(),
+      ...readdirSync(directory).filter((name) => VIDEO_ARTIFACT.test(name)),
+    ]);
+    return [...names].flatMap((name) => {
+      const contentType = artifactContentType(name);
+      if (!contentType) return [];
       const path = resolve(directory, name);
       if (!existsSync(path)) return [];
       const metadata = lstatSync(path);
-      return metadata.isFile() ? [{ name, bytes: metadata.size, contentType }] : [];
+      return metadata.isFile() && !metadata.isSymbolicLink() &&
+          metadata.size > 0 && metadata.size <= maximumArtifactBytes(name)
+        ? [{ name, bytes: metadata.size, contentType }]
+        : [];
     });
   }
 
@@ -2282,18 +2333,21 @@ export class ProjectRunnerServer {
       job.exitCode = result.code;
       if (result.code !== 0) throw new Error(`${job.action} exited with code ${result.code}`);
       if (signal.aborted) throw new RunnerCommandCancelledError("runner job cancelled");
-      if (job.action === "dry-run") {
+      if (job.action === "dry-run" || job.action === "run") {
         const project = this.projectConfig(job.projectId, job.workspaceId);
         const artifactDirectory = this.safeArtifactDirectory(project, job.id);
         if (artifactDirectory) {
+          const allowedArtifacts = new Map(
+            this.listArtifacts(job.id, project)
+              .filter((artifact) => artifact.name !== "portal-messages.json")
+              .map((artifact) => [artifact.name, artifact.contentType]),
+          );
           const batch = this.portalMessages.capture({
             projectId: job.projectId,
             workspaceId: job.workspaceId,
             jobId: job.id,
             artifactDirectory,
-            allowedArtifacts: new Set(
-              [...ARTIFACTS.keys()].filter((name) => name !== "portal-messages.json"),
-            ),
+            allowedArtifacts,
           });
           if (batch) job.portalMessageCount = batch.messages.length;
         }
@@ -2310,10 +2364,10 @@ export class ProjectRunnerServer {
         writeFileSync(logPath, `[${new Date().toISOString()}] ERROR ${job.error}\n`, { flag: "a" });
       }
     } finally {
-      if (job.action === "dry-run") {
+      if (job.action === "dry-run" || job.action === "run") {
         const project = this.projectConfig(job.projectId);
         job.artifactCount = this.listArtifacts(job.id, project).length;
-        this.pruneDryRunArtifacts(job.projectId, project);
+        this.pruneJobArtifacts(job.projectId, project);
       }
       job.completedAt = new Date().toISOString();
       this.saveJob(job);
@@ -2395,14 +2449,14 @@ export class ProjectRunnerServer {
     provisionProfile: ProvisioningProfile | null,
   ): Promise<{ code: number }> {
     mkdirSync(project.dataPath, { recursive: true, mode: 0o700 });
-    if (job.action === "dry-run") {
+    if (job.action === "dry-run" || job.action === "run") {
       const root = resolve(project.dataPath, "dry-runs");
       if (existsSync(root) && !lstatSync(root).isDirectory()) {
-        throw new Error("dry-run artifact root is not a directory");
+        throw new Error("job artifact root is not a directory");
       }
       const directory = resolve(root, job.id);
       if (existsSync(directory) && !lstatSync(directory).isDirectory()) {
-        throw new Error("dry-run artifact job path is not a directory");
+        throw new Error("job artifact path is not a directory");
       }
       mkdirSync(directory, { recursive: true, mode: 0o700 });
     }
@@ -2445,7 +2499,11 @@ export class ProjectRunnerServer {
       if (job.action === "run") {
         args.push(
           "--env", "DRY_RUN=false",
+          "--env", "SUMMING_PORTAL_TRANSPORT=true",
           "--env", "SUMMING_PROJECT_DATA_PATH=/app/data",
+          "--env", `SUMMING_JOB_ID=${job.id}`,
+          "--env", `SUMMING_REVISION=${job.revision}`,
+          "--env", `DRY_RUN_ARTIFACT_DIR=/app/data/dry-runs/${job.id}`,
         );
       }
       if (job.action === "provision") {
@@ -2580,7 +2638,7 @@ export class ProjectRunnerServer {
   }
 
   private redactArtifacts(job: RunnerJob, project: RunnerProjectConfig, secrets: string[]): void {
-    if (job.action !== "dry-run" || secrets.length === 0) return;
+    if ((job.action !== "dry-run" && job.action !== "run") || secrets.length === 0) return;
     const directory = this.safeArtifactDirectory(project, job.id);
     if (!directory) return;
     for (const name of ARTIFACTS.keys()) {
@@ -2599,13 +2657,13 @@ export class ProjectRunnerServer {
     }
   }
 
-  private pruneDryRunArtifacts(projectId: string, project: RunnerProjectConfig): void {
+  private pruneJobArtifacts(projectId: string, project: RunnerProjectConfig): void {
     const root = resolve(project.dataPath, "dry-runs");
     if (!existsSync(root) || !lstatSync(root).isDirectory()) return;
     const keep = new Set(
       this.listJobs(projectId)
-        .filter((job) => job.action === "dry-run")
-        .slice(0, DRY_RUN_RETENTION)
+        .filter((job) => job.action === "dry-run" || job.action === "run")
+        .slice(0, JOB_ARTIFACT_RETENTION)
         .map((job) => job.id),
     );
     for (const entry of readdirSync(root)) {

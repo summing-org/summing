@@ -82,6 +82,56 @@ test("Project portal outbox persists, retries, verifies and deduplicates a docum
   }
 });
 
+test("Project portal outbox persists a native video delivery kind", () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-project-portal-video-"));
+  const store = new ProjectPortalOutboxStore(root, 20_000_000);
+  const portal: ProjectPortalBinding = {
+    portalId: "tg-video",
+    portalKey: "main",
+    isDefault: true,
+    transport: "telegram",
+    projectId: "ash-shorts",
+    workspaceId: "repo",
+    chatId: -100500,
+    topicId: 9,
+    sourceId: null,
+    title: "Videos",
+  };
+  try {
+    const queued = store.enqueue({
+      projectId: "ash-shorts",
+      workspaceId: "repo",
+      portal,
+      kind: "video",
+      text: "Нативное видео готово.",
+      attachment: {
+        fileName: "video-01.mp4",
+        mimeType: "video/mp4",
+        data: Uint8Array.from([0, 1, 2, 3]),
+      },
+      idempotencyKey: "runner:job:video-01",
+      createdBy: 42,
+    });
+    assert.equal(queued.kind, "video");
+    assert.deepEqual([...store.attachmentData(store.claimDue()[0]!)!], [0, 1, 2, 3]);
+    assert.throws(() => store.enqueue({
+      projectId: "ash-shorts",
+      workspaceId: "repo",
+      portal,
+      kind: "video",
+      attachment: {
+        fileName: "wrong.bin",
+        mimeType: "application/octet-stream",
+        data: Uint8Array.from([1]),
+      },
+      idempotencyKey: "runner:job:wrong-video",
+      createdBy: 42,
+    }), /must be video\/mp4/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("an interrupted send becomes uncertain and requires an explicit retry", () => {
   const root = mkdtempSync(join(tmpdir(), "summing-project-portal-uncertain-"));
   let clock = new Date("2026-08-23T08:00:00.000Z");

@@ -38,7 +38,7 @@ function fixture(): {
   return { root, repository, runtime };
 }
 
-test("runner messages use the same durable Project portal transport", async () => {
+test("live runner messages deliver documents and native videos through the durable Project portal transport", async () => {
   const { root, runtime } = fixture();
   const internal = runtime.state.bind(1, 0, "demo", "repo");
   runtime.state.bind(-100500, 9, "demo", "repo", "observer", {
@@ -53,10 +53,10 @@ test("runner messages use the same durable Project portal transport", async () =
     id: "768d307d-1234-4567-89ab-123456789012",
     projectId: "demo",
     workspaceId: "repo",
-    action: "dry-run",
+    action: "run",
     revision: "a".repeat(40),
     status: "completed",
-    portalMessageCount: 1,
+    portalMessageCount: 2,
     createdAt: "2026-08-20T08:00:00.000Z",
   };
   runtime.viewer.runner.portalMessages = async () => ({
@@ -69,16 +69,25 @@ test("runner messages use the same durable Project portal transport", async () =
       text: "Информационный dry-run готов.",
       artifact: "report.html",
       portalKey: "reports",
+    }, {
+      id: "live-video",
+      type: "video",
+      text: "Нативное видео готово.",
+      artifact: "video-01.mp4",
+      portalKey: "reports",
     }],
     createdAt: "2026-08-20T08:00:00.000Z",
   });
-  runtime.viewer.runner.artifact = async () => ({
-    name: "report.html",
-    bytes: 19,
-    contentType: "text/html",
-    content: "<html>report</html>",
-  });
+  runtime.viewer.runner.artifactData = async (_projectId, _jobId, name) => name === "video-01.mp4"
+    ? { name, bytes: 4, contentType: "video/mp4", data: Uint8Array.from([0, 1, 2, 3]) }
+    : {
+        name: "report.html",
+        bytes: 19,
+        contentType: "text/html",
+        data: new TextEncoder().encode("<html>report</html>"),
+      };
   const deliveries: Array<{ chatId: number; fileName: string; topicId?: number; caption?: string }> = [];
+  const videos: Array<{ chatId: number; fileName: string; topicId?: number; caption?: string; data: number[] }> = [];
   runtime.telegram.sendChatAction = async () => {};
   runtime.telegram.sendDocument = async (chatId, _content, fileName, _contentType, options) => {
     deliveries.push({
@@ -88,6 +97,16 @@ test("runner messages use the same durable Project portal transport", async () =
       ...(options?.caption === undefined ? {} : { caption: options.caption }),
     });
     return 245;
+  };
+  runtime.telegram.sendVideo = async (chatId, content, fileName, _contentType, options) => {
+    videos.push({
+      chatId,
+      fileName,
+      data: [...content],
+      ...(options?.topicId === undefined ? {} : { topicId: options.topicId }),
+      ...(options?.caption === undefined ? {} : { caption: options.caption }),
+    });
+    return 246;
   };
   try {
     const delivered = await (
@@ -106,9 +125,21 @@ test("runner messages use the same durable Project portal transport", async () =
       topicId: 10,
       caption: "Информационный dry-run готов.",
     }]);
+    assert.deepEqual(videos, [{
+      chatId: -100501,
+      fileName: "video-01.mp4",
+      topicId: 10,
+      caption: "Нативное видео готово.",
+      data: [0, 1, 2, 3],
+    }]);
     const source = runtime.state.teamSourceForProvider("telegram", "-100501", "10");
     assert.ok(source);
-    assert.equal(runtime.state.recentTeamEvents(source.spaceId, source.id)[0]?.externalEventId, "245");
+    assert.deepEqual(
+      runtime.state.recentTeamEvents(source.spaceId, source.id)
+        .map((event) => event.externalEventId)
+        .sort(),
+      ["245", "246"],
+    );
   } finally {
     runtime.state.close();
     await runtime.telegram.close();
@@ -203,11 +234,11 @@ test("scheduled reports deliver to an observed topic without an observer binding
     }],
     createdAt: "2026-08-20T05:31:00.000Z",
   });
-  runtime.viewer.runner.artifact = async () => ({
+  runtime.viewer.runner.artifactData = async () => ({
     name: "report.html",
     bytes: 19,
     contentType: "text/html",
-    content: "<html>report</html>",
+    data: new TextEncoder().encode("<html>report</html>"),
   });
   const deliveries: Array<{ chatId: number; topicId?: number; fileName: string }> = [];
   runtime.telegram.sendChatAction = async () => {};
