@@ -16,7 +16,16 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
+import {
+  isProjectPortalAttachmentKind,
+  isProjectPortalMessageKind,
+  projectPortalMaximumArtifactBytes,
+  projectPortalMimeTypeAllowed,
+  type ProjectPortalMessageKind,
+} from "./project-portal-message.js";
 import type { ProjectPortalBinding } from "./state-store.js";
+
+export type { ProjectPortalMessageKind } from "./project-portal-message.js";
 
 const OUTBOX_ID = /^[a-f0-9]{64}$/;
 const MAXIMUM_ATTEMPTS = 5;
@@ -25,7 +34,6 @@ const DEFAULT_MAXIMUM_QUEUED_ATTACHMENT_BYTES = 250 * 1024 * 1024;
 const SENT_RETENTION_MILLISECONDS = 30 * 24 * 60 * 60 * 1_000;
 const FAILED_RETENTION_MILLISECONDS = 90 * 24 * 60 * 60 * 1_000;
 
-export type ProjectPortalMessageKind = "text" | "document" | "video";
 export type ProjectPortalDeliveryStatus =
   | "pending"
   | "sending"
@@ -174,7 +182,7 @@ export class ProjectPortalOutboxStore {
     const text = String(input.text ?? "").trim();
     const attachment = input.attachment ?? null;
     const kind = input.kind ?? (attachment ? "document" : "text");
-    if (!new Set<ProjectPortalMessageKind>(["text", "document", "video"]).has(kind)) {
+    if (!isProjectPortalMessageKind(kind)) {
       throw new ProjectPortalOutboxError("portal message kind is invalid");
     }
     if (!text && !attachment) throw new ProjectPortalOutboxError("portal message is empty");
@@ -187,11 +195,15 @@ export class ProjectPortalOutboxStore {
     if (kind === "text" && attachment) {
       throw new ProjectPortalOutboxError("portal text cannot contain an attachment");
     }
-    if ((kind === "document" || kind === "video") && !attachment) {
+    if (isProjectPortalAttachmentKind(kind) && !attachment) {
       throw new ProjectPortalOutboxError("portal attachment message is missing its attachment");
     }
-    if (kind === "video" && attachment?.mimeType !== "video/mp4") {
-      throw new ProjectPortalOutboxError("portal video attachment must be video/mp4");
+    if (
+      isProjectPortalAttachmentKind(kind) &&
+      attachment &&
+      !projectPortalMimeTypeAllowed(kind, attachment.mimeType)
+    ) {
+      throw new ProjectPortalOutboxError(`portal ${kind} attachment MIME type is not supported`);
     }
     if (
       !input.idempotencyKey ||
@@ -241,12 +253,15 @@ export class ProjectPortalOutboxStore {
       throw new ProjectPortalOutboxError("topic destination is invalid");
     }
     const attachmentData = attachment ? Uint8Array.from(attachment.data) : null;
+    const attachmentLimit = isProjectPortalAttachmentKind(kind)
+      ? Math.min(this.maximumAttachmentBytes, projectPortalMaximumArtifactBytes(kind))
+      : this.maximumAttachmentBytes;
     if (
       attachmentData &&
-      (attachmentData.byteLength <= 0 || attachmentData.byteLength > this.maximumAttachmentBytes)
+      (attachmentData.byteLength <= 0 || attachmentData.byteLength > attachmentLimit)
     ) {
       throw new ProjectPortalOutboxError(
-        `portal attachment must contain 1-${this.maximumAttachmentBytes} bytes`,
+        `portal attachment must contain 1-${attachmentLimit} bytes`,
       );
     }
     const attachmentMetadata: ProjectPortalOutboxAttachment | null = attachmentData && attachment
@@ -352,6 +367,7 @@ export class ProjectPortalOutboxStore {
       record.schemaVersion !== 1 ||
       record.id !== id ||
       !OUTBOX_ID.test(String(record.payloadDigest ?? "")) ||
+      !isProjectPortalMessageKind(String(record.kind ?? "")) ||
       !this.validStatus(record.status)
     ) {
       throw new ProjectPortalOutboxError("invalid portal outbox record");

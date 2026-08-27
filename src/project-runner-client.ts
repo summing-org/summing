@@ -3,6 +3,7 @@ import type { ProjectEnvironmentDocument } from "./project-environment.js";
 import type {
   EnvironmentVerificationMarker,
 } from "./project-environment-migration.js";
+import type { ProjectPortalMessageKind } from "./project-portal-message.js";
 import type { RunnerService, RunnerServiceAction } from "./project-service.js";
 
 export type {
@@ -68,7 +69,7 @@ export interface RunnerJob {
 
 export interface RunnerPortalMessage {
   id: string;
-  type: "text" | "document" | "video";
+  type: ProjectPortalMessageKind;
   text: string;
   artifact: string | null;
   portalKey?: string | null;

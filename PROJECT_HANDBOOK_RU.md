@@ -1,6 +1,6 @@
-# SUMMING 9.27: архитектура, эксплуатация и разработка
+# SUMMING 9.28: архитектура, эксплуатация и разработка
 
-> Версия: **9.27.0**
+> Версия: **9.28.0**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
 > Последняя сверка с кодом: **27 августа 2026 года**.
 
@@ -1184,6 +1184,14 @@ Runner по-прежнему принимает декларативный bound
 }
 ```
 
+Поле `type` имеет единый исчерпывающий набор: `text`, `document`, `photo`,
+`audio`, `video`, `animation`, `voice`. Нативные media-сообщения ссылаются на
+job-scoped артефакты `photo-NN.jpg|jpeg|png`, `audio-NN.mp3|m4a`, `video-NN.mp4`,
+`animation-NN.gif|mp4` или `voice-NN.ogg|mp3|m4a`; вместо `NN` разрешён
+`preview`, а числовой диапазон ограничен `01..50`. Runner сверяет имя, MIME,
+regular-file и размер до фиксации batch, а runtime передаёт бинарные байты через
+durable outbox в соответствующий нативный метод Telegram.
+
 Runtime копирует payload в filesystem outbox до Bot API call. Новый route — прямой
 Telegram `chat_id/topic_id`; legacy binding остаётся compatibility-only. Запись содержит
 idempotency key, SHA-256, route, actor, attempts, origin Conversation и ограниченный
@@ -1798,7 +1806,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "9.27.0",
+  "version": "9.28.0",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",

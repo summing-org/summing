@@ -1082,9 +1082,7 @@ export class ProjectViewerServer {
       throw new ViewerHttpError(404, "artifact download not found");
     }
     const scope = await this.scope(grant.conversationId, grant.userId);
-    const artifact = grant.name.endsWith(".mp4")
-      ? await this.runner.artifactData(scope.project.id, grant.jobId, grant.name)
-      : await this.runner.artifact(scope.project.id, grant.jobId, grant.name);
+    const artifact = await this.runner.artifactData(scope.project.id, grant.jobId, grant.name);
     if (artifact.name !== grant.name) {
       throw new ViewerHttpError(404, "artifact download not found");
     }

@@ -38,7 +38,7 @@ function fixture(): {
   return { root, repository, runtime };
 }
 
-test("live runner messages deliver documents and native videos through the durable Project portal transport", async () => {
+test("live runner messages deliver every native media kind through the durable Project portal transport", async () => {
   const { root, runtime } = fixture();
   const internal = runtime.state.bind(1, 0, "demo", "repo");
   runtime.state.bind(-100500, 9, "demo", "repo", "observer", {
@@ -49,6 +49,14 @@ test("live runner messages deliver documents and native videos through the durab
     portalKey: "reports",
     isDefault: false,
   });
+  const attachments = [
+    { id: "report", type: "document", text: "Report ready.", artifact: "report.html", contentType: "text/html" },
+    { id: "photo", type: "photo", text: "Photo ready.", artifact: "photo-01.jpg", contentType: "image/jpeg" },
+    { id: "audio", type: "audio", text: "Audio ready.", artifact: "audio-01.mp3", contentType: "audio/mpeg" },
+    { id: "video", type: "video", text: "Video ready.", artifact: "video-01.mp4", contentType: "video/mp4" },
+    { id: "animation", type: "animation", text: "Animation ready.", artifact: "animation-01.gif", contentType: "image/gif" },
+    { id: "voice", type: "voice", text: "Voice ready.", artifact: "voice-01.ogg", contentType: "audio/ogg" },
+  ] as const;
   const job: RunnerJob = {
     id: "768d307d-1234-4567-89ab-123456789012",
     projectId: "demo",
@@ -56,57 +64,57 @@ test("live runner messages deliver documents and native videos through the durab
     action: "run",
     revision: "a".repeat(40),
     status: "completed",
-    portalMessageCount: 2,
+    portalMessageCount: attachments.length,
     createdAt: "2026-08-20T08:00:00.000Z",
   };
   runtime.viewer.runner.portalMessages = async () => ({
     projectId: "demo",
     workspaceId: "repo",
     jobId: job.id,
-    messages: [{
-      id: "dry-run-report",
-      type: "document",
-      text: "Информационный dry-run готов.",
-      artifact: "report.html",
+    messages: attachments.map((attachment) => ({
+      id: attachment.id,
+      type: attachment.type,
+      text: attachment.text,
+      artifact: attachment.artifact,
       portalKey: "reports",
-    }, {
-      id: "live-video",
-      type: "video",
-      text: "Нативное видео готово.",
-      artifact: "video-01.mp4",
-      portalKey: "reports",
-    }],
+    })),
     createdAt: "2026-08-20T08:00:00.000Z",
   });
-  runtime.viewer.runner.artifactData = async (_projectId, _jobId, name) => name === "video-01.mp4"
-    ? { name, bytes: 4, contentType: "video/mp4", data: Uint8Array.from([0, 1, 2, 3]) }
-    : {
-        name: "report.html",
-        bytes: 19,
-        contentType: "text/html",
-        data: new TextEncoder().encode("<html>report</html>"),
-      };
-  const deliveries: Array<{ chatId: number; fileName: string; topicId?: number; caption?: string }> = [];
-  const videos: Array<{ chatId: number; fileName: string; topicId?: number; caption?: string; data: number[] }> = [];
-  runtime.telegram.sendChatAction = async () => {};
-  runtime.telegram.sendDocument = async (chatId, _content, fileName, _contentType, options) => {
-    deliveries.push({
-      chatId,
-      fileName,
-      ...(options?.topicId === undefined ? {} : { topicId: options.topicId }),
-      ...(options?.caption === undefined ? {} : { caption: options.caption }),
-    });
-    return 245;
+  runtime.viewer.runner.artifactData = async (_projectId, _jobId, name) => {
+    const index = attachments.findIndex((attachment) => attachment.artifact === name);
+    const attachment = attachments[index];
+    assert.ok(attachment);
+    return {
+      name,
+      bytes: 1,
+      contentType: attachment.contentType,
+      data: Uint8Array.from([index]),
+    };
   };
-  runtime.telegram.sendVideo = async (chatId, content, fileName, _contentType, options) => {
-    videos.push({
+  const deliveries: Array<{
+    kind: string;
+    chatId: number;
+    fileName: string;
+    contentType: string;
+    topicId?: number;
+    caption?: string;
+    data: number[];
+  }> = [];
+  const actions: string[] = [];
+  runtime.telegram.sendChatAction = async (_chatId, action) => {
+    actions.push(action);
+  };
+  runtime.telegram.sendAttachment = async (kind, chatId, content, fileName, contentType, options) => {
+    deliveries.push({
+      kind,
       chatId,
       fileName,
+      contentType,
       data: [...content],
       ...(options?.topicId === undefined ? {} : { topicId: options.topicId }),
       ...(options?.caption === undefined ? {} : { caption: options.caption }),
     });
-    return 246;
+    return 245 + deliveries.length - 1;
   };
   try {
     const delivered = await (
@@ -119,26 +127,30 @@ test("live runner messages deliver documents and native videos through the durab
       }
     ).sendRunnerPortalMessages(job, internal.id, 1);
     assert.equal(delivered, true);
-    assert.deepEqual(deliveries, [{
+    assert.deepEqual(deliveries, attachments.map((attachment, index) => ({
+      kind: attachment.type,
       chatId: -100501,
-      fileName: "report.html",
+      fileName: attachment.artifact,
+      contentType: attachment.contentType,
       topicId: 10,
-      caption: "Информационный dry-run готов.",
-    }]);
-    assert.deepEqual(videos, [{
-      chatId: -100501,
-      fileName: "video-01.mp4",
-      topicId: 10,
-      caption: "Нативное видео готово.",
-      data: [0, 1, 2, 3],
-    }]);
+      caption: attachment.text,
+      data: [index],
+    })));
+    assert.deepEqual(actions, [
+      "upload_document",
+      "upload_photo",
+      "upload_document",
+      "upload_video",
+      "upload_video",
+      "upload_voice",
+    ]);
     const source = runtime.state.teamSourceForProvider("telegram", "-100501", "10");
     assert.ok(source);
     assert.deepEqual(
       runtime.state.recentTeamEvents(source.spaceId, source.id)
         .map((event) => event.externalEventId)
         .sort(),
-      ["245", "246"],
+      ["245", "246", "247", "248", "249", "250"],
     );
   } finally {
     runtime.state.close();
@@ -242,7 +254,7 @@ test("scheduled reports deliver to an observed topic without an observer binding
   });
   const deliveries: Array<{ chatId: number; topicId?: number; fileName: string }> = [];
   runtime.telegram.sendChatAction = async () => {};
-  runtime.telegram.sendDocument = async (chatId, _content, fileName, _contentType, options) => {
+  runtime.telegram.sendAttachment = async (_kind, chatId, _content, fileName, _contentType, options) => {
     deliveries.push({
       chatId,
       fileName,
@@ -487,7 +499,7 @@ test("an authorized Project agent can forward an incoming workspace attachment",
     replyTo?: number;
   }> = [];
   runtime.telegram.sendChatAction = async () => {};
-  runtime.telegram.sendDocument = async (chatId, data, fileName, _contentType, options) => {
+  runtime.telegram.sendAttachment = async (_kind, chatId, data, fileName, _contentType, options) => {
     deliveries.push({
       chatId,
       data: Buffer.from(data).toString("utf8"),

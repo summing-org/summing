@@ -64,6 +64,7 @@ import {
   ProjectPortalOutboxStore,
   type ProjectPortalOutboxRecord,
 } from "./project-portal-outbox.js";
+import { isProjectPortalAttachmentKind } from "./project-portal-message.js";
 import { ProjectPortalArtifactStore } from "./project-portal-artifacts.js";
 import {
   type ProjectPortalToolContext,
@@ -5652,13 +5653,16 @@ export class SummingRuntime {
         }
       }
       let messageId: number;
-      if ((record.kind === "document" || record.kind === "video") && record.attachment) {
+      if (isProjectPortalAttachmentKind(record.kind) && record.attachment) {
+        const action = record.kind === "photo"
+          ? "upload_photo"
+          : record.kind === "video" || record.kind === "animation"
+            ? "upload_video"
+            : record.kind === "voice"
+              ? "upload_voice"
+              : "upload_document";
         try {
-          await this.telegram.sendChatAction(
-            record.chatId,
-            record.kind === "video" ? "upload_video" : "upload_document",
-            record.topicId,
-          );
+          await this.telegram.sendChatAction(record.chatId, action, record.topicId);
         } catch {
           // Delivery does not depend on the best-effort typing action.
         }
@@ -5669,28 +5673,23 @@ export class SummingRuntime {
           ...(record.replyToMessageId ? { replyTo: record.replyToMessageId } : {}),
           ...(record.text ? { caption: record.text } : {}),
         };
-        messageId = record.kind === "video"
-          ? await this.telegram.sendVideo(
-              record.chatId,
-              data,
-              record.attachment.fileName,
-              record.attachment.mimeType,
-              options,
-            )
-          : await this.telegram.sendDocument(
-              record.chatId,
-              data,
-              record.attachment.fileName,
-              record.attachment.mimeType,
-              options,
-            );
+        messageId = await this.telegram.sendAttachment(
+          record.kind,
+          record.chatId,
+          data,
+          record.attachment.fileName,
+          record.attachment.mimeType,
+          options,
+        );
         transportAccepted = true;
-      } else {
+      } else if (record.kind === "text") {
         messageId = await this.telegram.sendMessage(record.chatId, record.text, {
           topicId: record.topicId,
           ...(record.replyToMessageId ? { replyTo: record.replyToMessageId } : {}),
         });
         transportAccepted = true;
+      } else {
+        throw new Error(`portal ${record.kind} attachment is missing`);
       }
       const sent = this.projectPortalOutbox.markSent(record.id, messageId);
       if (sent.context?.kind === "runner-report") {

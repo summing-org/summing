@@ -79,16 +79,26 @@ test("viewer exposes short-lived authorized HTTPS downloads instead of blob URLs
   Object.assign(viewer.runner, {
     artifacts: async (projectId: string, requestedJobId: string) => {
       assert.deepEqual([projectId, requestedJobId], ["demo", jobId]);
-      return [{ name: "report.html", bytes: 42, contentType: "text/html" }];
+      return [
+        { name: "report.html", bytes: 42, contentType: "text/html" },
+        { name: "photo-01.jpg", bytes: 4, contentType: "image/jpeg" },
+      ];
     },
-    artifact: async (projectId: string, requestedJobId: string, name: string) => {
-      assert.deepEqual([projectId, requestedJobId, name], ["demo", jobId, "report.html"]);
-      return {
-        name,
-        bytes: 42,
-        contentType: "text/html",
-        content: "<!doctype html><title>Dry run</title>",
-      };
+    artifactData: async (projectId: string, requestedJobId: string, name: string) => {
+      assert.deepEqual([projectId, requestedJobId], ["demo", jobId]);
+      return name === "report.html"
+        ? {
+            name,
+            bytes: 42,
+            contentType: "text/html",
+            data: new TextEncoder().encode("<!doctype html><title>Dry run</title>"),
+          }
+        : {
+            name,
+            bytes: 4,
+            contentType: "image/jpeg",
+            data: Uint8Array.from([0xff, 0xd8, 0xff, 0xd9]),
+          };
     },
   });
   const endpoint = `http://127.0.0.1:${port}`;
@@ -108,8 +118,8 @@ test("viewer exposes short-lived authorized HTTPS downloads instead of blob URLs
         name: string;
       }>;
     };
-    assert.equal(payload.artifacts.length, 1);
-    const artifact = payload.artifacts[0]!;
+    assert.equal(payload.artifacts.length, 2);
+    const artifact = payload.artifacts.find((candidate) => candidate.name === "report.html")!;
     assert.equal(artifact.name, "report.html");
     assert.match(artifact.downloadExpiresAt, /^\d{4}-\d{2}-\d{2}T/);
     assert.match(
@@ -128,6 +138,15 @@ test("viewer exposes short-lived authorized HTTPS downloads instead of blob URLs
     assert.equal(downloaded.headers.get("cache-control"), "private, no-store");
     assert.equal(downloaded.headers.get("x-content-type-options"), "nosniff");
     assert.equal(await downloaded.text(), "<!doctype html><title>Dry run</title>");
+
+    const photo = payload.artifacts.find((candidate) => candidate.name === "photo-01.jpg")!;
+    const downloadedPhoto = await fetch(new URL(photo.downloadUrl, endpoint));
+    assert.equal(downloadedPhoto.status, 200);
+    assert.equal(downloadedPhoto.headers.get("content-type"), "image/jpeg");
+    assert.deepEqual(
+      [...new Uint8Array(await downloadedPhoto.arrayBuffer())],
+      [0xff, 0xd8, 0xff, 0xd9],
+    );
 
     const wrongName = await fetch(
       new URL(artifact.downloadUrl.replace(/report\.html$/, "errors.json"), endpoint),

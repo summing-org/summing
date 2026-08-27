@@ -1,4 +1,35 @@
+import type { ProjectPortalAttachmentKind } from "./project-portal-message.js";
+
 export type TelegramObject = Record<string, unknown>;
+
+export interface TelegramAttachmentOptions {
+  topicId?: number;
+  replyTo?: number;
+  caption?: string;
+}
+
+const TELEGRAM_ATTACHMENT_UPLOADS: Record<ProjectPortalAttachmentKind, {
+  method: string;
+  field: string;
+  defaultMimeType: string;
+  supportsStreaming?: boolean;
+}> = {
+  document: {
+    method: "sendDocument",
+    field: "document",
+    defaultMimeType: "application/octet-stream",
+  },
+  photo: { method: "sendPhoto", field: "photo", defaultMimeType: "image/jpeg" },
+  audio: { method: "sendAudio", field: "audio", defaultMimeType: "audio/mpeg" },
+  video: {
+    method: "sendVideo",
+    field: "video",
+    defaultMimeType: "video/mp4",
+    supportsStreaming: true,
+  },
+  animation: { method: "sendAnimation", field: "animation", defaultMimeType: "image/gif" },
+  voice: { method: "sendVoice", field: "voice", defaultMimeType: "audio/ogg" },
+};
 
 export class TelegramError extends Error {}
 
@@ -178,24 +209,23 @@ export class TelegramAPI {
     return messageId;
   }
 
-  async sendDocument(
+  async sendAttachment(
+    kind: ProjectPortalAttachmentKind,
     chatId: number,
     data: Uint8Array,
     fileName: string,
     mimeType: string,
-    options: {
-      topicId?: number;
-      replyTo?: number;
-      caption?: string;
-    } = {},
+    options: TelegramAttachmentOptions = {},
   ): Promise<number> {
+    const upload = TELEGRAM_ATTACHMENT_UPLOADS[kind];
     const buffer = new ArrayBuffer(data.byteLength);
     new Uint8Array(buffer).set(data);
-    const document = new Blob([buffer], { type: mimeType || "application/octet-stream" });
-    const result = record(await this.request("sendDocument", () => {
+    const attachment = new Blob([buffer], { type: mimeType || upload.defaultMimeType });
+    const result = record(await this.request(upload.method, () => {
       const form = new FormData();
       form.set("chat_id", String(chatId));
-      form.set("document", document, fileName);
+      form.set(upload.field, attachment, fileName);
+      if (upload.supportsStreaming) form.set("supports_streaming", "true");
       if (options.caption) form.set("caption", options.caption.slice(0, 1_024));
       if (options.topicId) form.set("message_thread_id", String(options.topicId));
       if (options.replyTo) {
@@ -208,9 +238,39 @@ export class TelegramAPI {
     }));
     const messageId = Number(result?.message_id);
     if (!Number.isInteger(messageId) || messageId <= 0) {
-      throw new TelegramError("sendDocument did not return message_id");
+      throw new TelegramError(`${upload.method} did not return message_id`);
     }
     return messageId;
+  }
+
+  async sendDocument(
+    chatId: number,
+    data: Uint8Array,
+    fileName: string,
+    mimeType: string,
+    options: TelegramAttachmentOptions = {},
+  ): Promise<number> {
+    return this.sendAttachment("document", chatId, data, fileName, mimeType, options);
+  }
+
+  async sendPhoto(
+    chatId: number,
+    data: Uint8Array,
+    fileName: string,
+    mimeType: string,
+    options: TelegramAttachmentOptions = {},
+  ): Promise<number> {
+    return this.sendAttachment("photo", chatId, data, fileName, mimeType, options);
+  }
+
+  async sendAudio(
+    chatId: number,
+    data: Uint8Array,
+    fileName: string,
+    mimeType: string,
+    options: TelegramAttachmentOptions = {},
+  ): Promise<number> {
+    return this.sendAttachment("audio", chatId, data, fileName, mimeType, options);
   }
 
   async sendVideo(
@@ -218,40 +278,34 @@ export class TelegramAPI {
     data: Uint8Array,
     fileName: string,
     mimeType: string,
-    options: {
-      topicId?: number;
-      replyTo?: number;
-      caption?: string;
-    } = {},
+    options: TelegramAttachmentOptions = {},
   ): Promise<number> {
-    const buffer = new ArrayBuffer(data.byteLength);
-    new Uint8Array(buffer).set(data);
-    const video = new Blob([buffer], { type: mimeType || "video/mp4" });
-    const result = record(await this.request("sendVideo", () => {
-      const form = new FormData();
-      form.set("chat_id", String(chatId));
-      form.set("video", video, fileName);
-      form.set("supports_streaming", "true");
-      if (options.caption) form.set("caption", options.caption.slice(0, 1_024));
-      if (options.topicId) form.set("message_thread_id", String(options.topicId));
-      if (options.replyTo) {
-        form.set("reply_parameters", JSON.stringify({
-          message_id: options.replyTo,
-          allow_sending_without_reply: true,
-        }));
-      }
-      return { method: "POST", body: form };
-    }));
-    const messageId = Number(result?.message_id);
-    if (!Number.isInteger(messageId) || messageId <= 0) {
-      throw new TelegramError("sendVideo did not return message_id");
-    }
-    return messageId;
+    return this.sendAttachment("video", chatId, data, fileName, mimeType, options);
+  }
+
+  async sendAnimation(
+    chatId: number,
+    data: Uint8Array,
+    fileName: string,
+    mimeType: string,
+    options: TelegramAttachmentOptions = {},
+  ): Promise<number> {
+    return this.sendAttachment("animation", chatId, data, fileName, mimeType, options);
+  }
+
+  async sendVoice(
+    chatId: number,
+    data: Uint8Array,
+    fileName: string,
+    mimeType: string,
+    options: TelegramAttachmentOptions = {},
+  ): Promise<number> {
+    return this.sendAttachment("voice", chatId, data, fileName, mimeType, options);
   }
 
   async sendChatAction(
     chatId: number,
-    action: "typing" | "upload_document" | "upload_video",
+    action: "typing" | "upload_document" | "upload_photo" | "upload_video" | "upload_voice",
     topicId = 0,
   ): Promise<void> {
     const payload: TelegramObject = { chat_id: chatId, action };

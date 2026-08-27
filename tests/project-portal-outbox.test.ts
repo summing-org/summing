@@ -82,7 +82,7 @@ test("Project portal outbox persists, retries, verifies and deduplicates a docum
   }
 });
 
-test("Project portal outbox persists a native video delivery kind", () => {
+test("Project portal outbox persists every native media delivery kind", () => {
   const root = mkdtempSync(join(tmpdir(), "summing-project-portal-video-"));
   const store = new ProjectPortalOutboxStore(root, 20_000_000);
   const portal: ProjectPortalBinding = {
@@ -98,22 +98,31 @@ test("Project portal outbox persists a native video delivery kind", () => {
     title: "Videos",
   };
   try {
-    const queued = store.enqueue({
-      projectId: "ash-shorts",
-      workspaceId: "repo",
-      portal,
-      kind: "video",
-      text: "Нативное видео готово.",
-      attachment: {
-        fileName: "video-01.mp4",
-        mimeType: "video/mp4",
-        data: Uint8Array.from([0, 1, 2, 3]),
-      },
-      idempotencyKey: "runner:job:video-01",
-      createdBy: 42,
-    });
-    assert.equal(queued.kind, "video");
-    assert.deepEqual([...store.attachmentData(store.claimDue()[0]!)!], [0, 1, 2, 3]);
+    const media = [
+      { kind: "photo", fileName: "photo-01.jpg", mimeType: "image/jpeg" },
+      { kind: "audio", fileName: "audio-01.mp3", mimeType: "audio/mpeg" },
+      { kind: "video", fileName: "video-01.mp4", mimeType: "video/mp4" },
+      { kind: "animation", fileName: "animation-01.gif", mimeType: "image/gif" },
+      { kind: "voice", fileName: "voice-01.ogg", mimeType: "audio/ogg" },
+    ] as const;
+    for (const [index, item] of media.entries()) {
+      const queued = store.enqueue({
+        projectId: "ash-shorts",
+        workspaceId: "repo",
+        portal,
+        kind: item.kind,
+        text: `Native ${item.kind} is ready.`,
+        attachment: {
+          fileName: item.fileName,
+          mimeType: item.mimeType,
+          data: Uint8Array.from([index, 1, 2, 3]),
+        },
+        idempotencyKey: `runner:job:${item.kind}-01`,
+        createdBy: 42,
+      });
+      assert.equal(queued.kind, item.kind);
+      assert.deepEqual([...store.attachmentData(queued)!], [index, 1, 2, 3]);
+    }
     assert.throws(() => store.enqueue({
       projectId: "ash-shorts",
       workspaceId: "repo",
@@ -126,7 +135,7 @@ test("Project portal outbox persists a native video delivery kind", () => {
       },
       idempotencyKey: "runner:job:wrong-video",
       createdBy: 42,
-    }), /must be video\/mp4/);
+    }), /portal video attachment MIME type is not supported/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

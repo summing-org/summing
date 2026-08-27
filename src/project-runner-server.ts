@@ -50,6 +50,10 @@ import {
   readProvisioningResult,
   type ProvisioningProfile,
 } from "./project-provisioning.js";
+import {
+  projectPortalMaximumArtifactBytes,
+  type ProjectPortalAttachmentKind,
+} from "./project-portal-message.js";
 import type {
   RunnerAction,
   RunnerArtifactDeletion,
@@ -82,7 +86,6 @@ const IDEMPOTENCY_KEY = /^[0-9a-f]{64}$/;
 const REVISION = /^[0-9a-f]{40}$/;
 const MAX_ARCHIVE_BYTES = 50_000_000;
 const MAX_ARTIFACT_BYTES = 8_000_000;
-const MAX_VIDEO_ARTIFACT_BYTES = 20_000_000;
 const MAX_JSON_BYTES = 1_100_000;
 const JOB_ARTIFACT_RETENTION = 30;
 const RELEASE_PAYLOAD_RETENTION = 20;
@@ -101,14 +104,75 @@ const ARTIFACTS = new Map([
   ["report.html", "text/html"],
   ["portal-messages.json", "application/json"],
 ]);
-const VIDEO_ARTIFACT = /^video-(?:preview|0[1-9]|[1-4][0-9]|50)\.mp4$/;
+const MEDIA_ARTIFACT_SUFFIX = "(?:preview|0[1-9]|[1-4][0-9]|50)";
+const MEDIA_ARTIFACTS: ReadonlyArray<{
+  pattern: RegExp;
+  contentType: string;
+  kind: Exclude<ProjectPortalAttachmentKind, "document">;
+}> = [
+  {
+    pattern: new RegExp(`^photo-${MEDIA_ARTIFACT_SUFFIX}\\.jpe?g$`),
+    contentType: "image/jpeg",
+    kind: "photo",
+  },
+  {
+    pattern: new RegExp(`^photo-${MEDIA_ARTIFACT_SUFFIX}\\.png$`),
+    contentType: "image/png",
+    kind: "photo",
+  },
+  {
+    pattern: new RegExp(`^audio-${MEDIA_ARTIFACT_SUFFIX}\\.mp3$`),
+    contentType: "audio/mpeg",
+    kind: "audio",
+  },
+  {
+    pattern: new RegExp(`^audio-${MEDIA_ARTIFACT_SUFFIX}\\.m4a$`),
+    contentType: "audio/mp4",
+    kind: "audio",
+  },
+  {
+    pattern: new RegExp(`^video-${MEDIA_ARTIFACT_SUFFIX}\\.mp4$`),
+    contentType: "video/mp4",
+    kind: "video",
+  },
+  {
+    pattern: new RegExp(`^animation-${MEDIA_ARTIFACT_SUFFIX}\\.gif$`),
+    contentType: "image/gif",
+    kind: "animation",
+  },
+  {
+    pattern: new RegExp(`^animation-${MEDIA_ARTIFACT_SUFFIX}\\.mp4$`),
+    contentType: "video/mp4",
+    kind: "animation",
+  },
+  {
+    pattern: new RegExp(`^voice-${MEDIA_ARTIFACT_SUFFIX}\\.ogg$`),
+    contentType: "audio/ogg",
+    kind: "voice",
+  },
+  {
+    pattern: new RegExp(`^voice-${MEDIA_ARTIFACT_SUFFIX}\\.mp3$`),
+    contentType: "audio/mpeg",
+    kind: "voice",
+  },
+  {
+    pattern: new RegExp(`^voice-${MEDIA_ARTIFACT_SUFFIX}\\.m4a$`),
+    contentType: "audio/mp4",
+    kind: "voice",
+  },
+];
+
+function mediaArtifact(name: string): typeof MEDIA_ARTIFACTS[number] | null {
+  return MEDIA_ARTIFACTS.find((candidate) => candidate.pattern.test(name)) ?? null;
+}
 
 function artifactContentType(name: string): string | null {
-  return ARTIFACTS.get(name) ?? (VIDEO_ARTIFACT.test(name) ? "video/mp4" : null);
+  return ARTIFACTS.get(name) ?? mediaArtifact(name)?.contentType ?? null;
 }
 
 function maximumArtifactBytes(name: string): number {
-  return VIDEO_ARTIFACT.test(name) ? MAX_VIDEO_ARTIFACT_BYTES : MAX_ARTIFACT_BYTES;
+  const media = mediaArtifact(name);
+  return media ? projectPortalMaximumArtifactBytes(media.kind) : MAX_ARTIFACT_BYTES;
 }
 
 type RunnerProjectConfigSource =
@@ -438,7 +502,7 @@ export class ProjectRunnerServer {
       json(response, this.ready ? 200 : 503, {
         ok: this.ready,
         version: SUMMING_VERSION,
-        protocolVersion: 5,
+        protocolVersion: 6,
         queued: this.queue.length,
         running: this.activeJobs.size,
         maxParallelJobs: this.maxParallelJobs,
@@ -802,7 +866,7 @@ export class ProjectRunnerServer {
       const name = url.searchParams.get("name") ?? "";
       const contentType = artifactContentType(name);
       if (!contentType) throw new RunnerHttpError(400, "invalid artifact name");
-      if (contentType === "video/mp4") {
+      if (mediaArtifact(name)) {
         throw new RunnerHttpError(415, "binary artifact is not available as text");
       }
       const directory = this.safeArtifactDirectory(project, jobId);
@@ -2205,7 +2269,7 @@ export class ProjectRunnerServer {
     if (!directory) return [];
     const names = new Set([
       ...ARTIFACTS.keys(),
-      ...readdirSync(directory).filter((name) => VIDEO_ARTIFACT.test(name)),
+      ...readdirSync(directory).filter((name) => mediaArtifact(name) !== null),
     ]);
     return [...names].flatMap((name) => {
       const contentType = artifactContentType(name);

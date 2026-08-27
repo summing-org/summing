@@ -147,6 +147,44 @@ test("sendVideo uploads a streaming MP4 as native Telegram video", async () => {
   }
 });
 
+test("native portal media use their exact Telegram multipart methods and fields", async () => {
+  const api = new TelegramAPI("secret-token");
+  const originalFetch = globalThis.fetch;
+  const uploads = [
+    { method: "sendPhoto", field: "photo", fileName: "photo-01.jpg", mimeType: "image/jpeg", send: () => api.sendPhoto(-10042, Uint8Array.from([1]), "photo-01.jpg", "image/jpeg") },
+    { method: "sendAudio", field: "audio", fileName: "audio-01.mp3", mimeType: "audio/mpeg", send: () => api.sendAudio(-10042, Uint8Array.from([1]), "audio-01.mp3", "audio/mpeg") },
+    { method: "sendAnimation", field: "animation", fileName: "animation-01.gif", mimeType: "image/gif", send: () => api.sendAnimation(-10042, Uint8Array.from([1]), "animation-01.gif", "image/gif") },
+    { method: "sendVoice", field: "voice", fileName: "voice-01.ogg", mimeType: "audio/ogg", send: () => api.sendVoice(-10042, Uint8Array.from([1]), "voice-01.ogg", "audio/ogg") },
+  ];
+  let expected = uploads[0]!;
+  let messageId = 20;
+  globalThis.fetch = async (input, init) => {
+    assert.equal(String(input), `https://api.telegram.org/botsecret-token/${expected.method}`);
+    assert.ok(init?.body instanceof FormData);
+    const attachment = init.body.get(expected.field);
+    assert.ok(attachment instanceof Blob);
+    assert.equal(attachment.type, expected.mimeType);
+    assert.equal((attachment as Blob & { name: string }).name, expected.fileName);
+    assert.equal(init.body.get("supports_streaming"), null);
+    messageId += 1;
+    return new Response(JSON.stringify({ ok: true, result: { message_id: messageId } }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  try {
+    for (const upload of uploads) {
+      expected = upload;
+      const expectedMessageId = messageId + 1;
+      assert.equal(await upload.send(), expectedMessageId);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    await api.close();
+  }
+});
+
 test("editMessage forwards Telegram HTML parse mode", async () => {
   const api = new TelegramAPI("token");
   let payload: Record<string, unknown> = {};

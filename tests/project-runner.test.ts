@@ -202,8 +202,12 @@ if [ "$1" = run ]; then
     mkdir -p "${appData}/dry-runs/$job"
     printf '{"status":"completed","key":"%s"}\n' "$secret" > "${appData}/dry-runs/$job/manifest.json"
     if [ "$live" = true ]; then
+      printf 'fake-photo' > "${appData}/dry-runs/$job/photo-01.jpg"
+      printf 'fake-audio' > "${appData}/dry-runs/$job/audio-01.mp3"
       printf 'fake-mp4' > "${appData}/dry-runs/$job/video-01.mp4"
-      printf '{"schemaVersion":1,"messages":[{"id":"live-video","type":"video","text":"Live-run video is ready.","artifact":"video-01.mp4"}]}\n' > "${appData}/dry-runs/$job/portal-messages.json"
+      printf 'fake-animation' > "${appData}/dry-runs/$job/animation-01.gif"
+      printf 'fake-voice' > "${appData}/dry-runs/$job/voice-01.ogg"
+      printf '{"schemaVersion":1,"messages":[{"id":"live-photo","type":"photo","text":"Photo ready.","artifact":"photo-01.jpg"},{"id":"live-audio","type":"audio","text":"Audio ready.","artifact":"audio-01.mp3"},{"id":"live-video","type":"video","text":"Video ready.","artifact":"video-01.mp4"},{"id":"live-animation","type":"animation","text":"Animation ready.","artifact":"animation-01.gif"},{"id":"live-voice","type":"voice","text":"Voice ready.","artifact":"voice-01.ogg"}]}\n' > "${appData}/dry-runs/$job/portal-messages.json"
     else
       printf '<html>report</html>\n' > "${appData}/dry-runs/$job/report.html"
       printf '{"schemaVersion":1,"messages":[{"id":"dry-run-report","type":"document","text":"Informational dry-run report is ready.","artifact":"report.html"}]}\n' > "${appData}/dry-runs/$job/portal-messages.json"
@@ -230,7 +234,7 @@ exit 0
     assert.deepEqual(await client.health(), {
       ok: true,
       version: readFileSync(join(process.cwd(), "VERSION"), "utf8").trim(),
-      protocolVersion: 5,
+      protocolVersion: 6,
       queued: 0,
       running: 0,
       maxParallelJobs: 2,
@@ -365,17 +369,45 @@ exit 0
     const liveRun = await client.submit("demo", "repo", "run", revision, archive);
     const liveRunCompleted = await completedJob(client, "demo", "repo", liveRun.id);
     assert.equal(liveRunCompleted.status, "completed");
-    assert.equal(liveRunCompleted.artifactCount, 3);
-    assert.equal(liveRunCompleted.portalMessageCount, 1);
+    assert.equal(liveRunCompleted.artifactCount, 7);
+    assert.equal(liveRunCompleted.portalMessageCount, 5);
     assert.deepEqual(
-      (await client.artifacts("demo", liveRun.id)).map((artifact) => artifact.name),
-      ["manifest.json", "portal-messages.json", "video-01.mp4"],
+      (await client.artifacts("demo", liveRun.id)).map((artifact) => artifact.name).sort(),
+      [
+        "animation-01.gif",
+        "audio-01.mp3",
+        "manifest.json",
+        "photo-01.jpg",
+        "portal-messages.json",
+        "video-01.mp4",
+        "voice-01.ogg",
+      ],
     );
     assert.deepEqual((await client.portalMessages("demo", "repo", liveRun.id)).messages, [{
+      id: "live-photo",
+      type: "photo",
+      text: "Photo ready.",
+      artifact: "photo-01.jpg",
+    }, {
+      id: "live-audio",
+      type: "audio",
+      text: "Audio ready.",
+      artifact: "audio-01.mp3",
+    }, {
       id: "live-video",
       type: "video",
-      text: "Live-run video is ready.",
+      text: "Video ready.",
       artifact: "video-01.mp4",
+    }, {
+      id: "live-animation",
+      type: "animation",
+      text: "Animation ready.",
+      artifact: "animation-01.gif",
+    }, {
+      id: "live-voice",
+      type: "voice",
+      text: "Voice ready.",
+      artifact: "voice-01.ogg",
     }]);
     const liveVideo = await client.artifactData("demo", liveRun.id, "video-01.mp4");
     assert.equal(liveVideo.contentType, "video/mp4");
