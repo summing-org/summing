@@ -48,6 +48,7 @@ function schedule(overrides: Partial<RunnerSchedule> = {}): RunnerSchedule {
     overlapPolicy: "skip",
     misfireGraceMinutes: 30,
     delivery: null,
+    deliveryCondition: "success",
     originConversationId: "conversation-1",
     createdBy: 42,
     updatedBy: 42,
@@ -163,6 +164,7 @@ test("runner control migrates schedules created before direct report destination
   try {
     const migrated = store.schedules("demo", "repo")[0]!;
     assert.equal(migrated.delivery, null);
+    assert.equal(migrated.deliveryCondition, "success");
     assert.equal(migrated.originConversationId, "");
   } finally {
     store.close();
@@ -228,6 +230,7 @@ test("scheduled dry-run resolves and hands off its exact Telegram destination on
       topicId: 67800,
       label: "«Customer» / «Reports»",
     });
+    assert.equal(stored.deliveryCondition, "success");
     assert.equal(stored.originConversationId, "conversation-1");
 
     const execution = control.store.claimExecution(stored, {
@@ -246,6 +249,82 @@ test("scheduled dry-run resolves and hands off its exact Telegram destination on
   } finally {
     control.close();
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("scheduled live-run report delivery follows the configured terminal condition", async () => {
+  for (const [deliveryCondition, expectedDeliveries] of [
+    ["success", 0],
+    ["failure", 1],
+    ["always", 1],
+  ] as const) {
+    const root = mkdtempSync(join(tmpdir(), `summing-runner-live-report-${deliveryCondition}-`));
+    const now = Date.parse("2026-08-20T09:01:15.000Z");
+    const job: RunnerJob = {
+      id: "61c813ba-bfe7-4669-b590-b5bfb60ce9fa",
+      projectId: "demo",
+      workspaceId: "repo",
+      action: "run",
+      revision: "b".repeat(40),
+      trigger: "schedule",
+      status: "failed",
+      error: "partial publication failed",
+      portalMessageCount: 1,
+      createdAt: "2026-08-20T09:00:00.000Z",
+      completedAt: "2026-08-20T09:01:00.000Z",
+    };
+    const deliveries: string[] = [];
+    const runner = {
+      available: async () => true,
+      jobs: async () => [job],
+    } as unknown as ProjectRunnerClient;
+    const control = new RunnerControlPlane(
+      join(root, "control.sqlite3"),
+      {} as ProjectCatalog,
+      runner,
+      async () => {},
+      () => now,
+      15_000,
+      async () => false,
+      async (deliveredJob) => {
+        deliveries.push(deliveredJob.id);
+        return true;
+      },
+      () => ({ chatId: -100500, topicId: 67800, label: "«Customer» / «Reports»" }),
+    );
+    try {
+      const plan = control.planSchedule(context(`turn-plan-${deliveryCondition}`), {
+        operation: "upsert",
+        name: `Live report ${deliveryCondition}`,
+        action: "run",
+        time: "12:00",
+        timeZone: "Europe/Moscow",
+        weekdays: [1, 2, 3, 4, 5],
+        enabled: false,
+        deliveryTopic: "Customer reports",
+        deliveryCondition,
+      });
+      const stored = control.applySchedule(
+        context(`turn-confirm-${deliveryCondition}`),
+        plan.token,
+      )!;
+      assert.equal(stored.deliveryCondition, deliveryCondition);
+      const execution = control.store.claimExecution(stored, {
+        key: `2026-08-20T12:00@Europe/Moscow-${deliveryCondition}`,
+        scheduledFor: "2026-08-20T09:00:00.000Z",
+      }, now)!;
+      control.store.updateExecution(execution.id, "queued", {
+        jobId: job.id,
+        revision: job.revision,
+      }, now);
+      await control.tick();
+      await control.tick();
+      assert.equal(deliveries.length, expectedDeliveries);
+      assert.equal(control.store.execution(execution.id)?.status, "failed");
+    } finally {
+      control.close();
+      rmSync(root, { recursive: true, force: true });
+    }
   }
 });
 

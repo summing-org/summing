@@ -103,9 +103,11 @@ export const RUNNER_DYNAMIC_TOOLS: DynamicToolNamespaceSpec[] = [{
         "Prepare, but do not apply, a schedule create/update/delete. Show the returned Russian " +
         "summary to the user and ask for explicit confirmation. Applying in the same turn is " +
         "blocked by the host. New schedules require an explicit IANA timeZone. Weekdays use ISO " +
-        "numbers: Monday=1 through Sunday=7. For a scheduled dry-run report, pass the topic name " +
-        "in deliveryTopic; the host resolves and freezes its Telegram IDs. If resolution asks the " +
-        "owner to mark a topic, retry with deliveryTopic '@marked' after the owner confirms the mark.",
+        "numbers: Monday=1 through Sunday=7. For a scheduled dry-run or live-run report, pass the " +
+        "topic name in deliveryTopic; the host resolves and freezes its Telegram IDs. Use " +
+        "deliveryCondition to choose success-only, failure-only, or every terminal result. If " +
+        "resolution asks the owner to mark a topic, retry with deliveryTopic '@marked' after the " +
+        "owner confirms the mark.",
       inputSchema: {
         ...OBJECT_SCHEMA,
         properties: {
@@ -128,8 +130,16 @@ export const RUNNER_DYNAMIC_TOOLS: DynamicToolNamespaceSpec[] = [{
             minLength: 1,
             maxLength: 200,
             description:
-              "Human topic name for scheduled dry-run report delivery, or internal @marked after " +
-              "the owner marks an unknown topic by mentioning the bot there with 'отчёты сюда'.",
+              "Human topic name for scheduled dry-run or live-run report delivery, or internal " +
+              "@marked after the owner marks an unknown topic by mentioning the bot there with " +
+              "'отчёты сюда'.",
+          },
+          deliveryCondition: {
+            type: "string",
+            enum: ["success", "failure", "always"],
+            description:
+              "When an explicit portal-messages.json batch is delivered: only a completed job, " +
+              "only an unsuccessful terminal job, or every terminal job. Defaults to success.",
           },
           clearDeliveryTopic: {
             type: "boolean",

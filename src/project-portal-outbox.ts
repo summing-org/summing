@@ -57,11 +57,14 @@ export interface ProjectTopicDestination {
   sourceId?: string | null;
 }
 
-export interface ProjectPortalOutboxContext {
+export type ProjectPortalOutboxContext = {
   kind: "runner-report";
   jobId: string;
   scheduleId?: string | null;
-}
+} | {
+  kind: "result-reply";
+  resultId: string;
+};
 
 export interface ProjectPortalOutboxRecord {
   schemaVersion: 1;

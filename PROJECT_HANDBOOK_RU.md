@@ -1,8 +1,8 @@
-# SUMMING 9.28: архитектура, эксплуатация и разработка
+# SUMMING 9.29: архитектура, эксплуатация и разработка
 
-> Версия: **9.28.0**
+> Версия: **9.29.0**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
-> Последняя сверка с кодом: **27 августа 2026 года**.
+> Последняя сверка с кодом: **29 августа 2026 года**.
 
 Это единый технический документ о проекте. Он описывает продуктовую модель,
 архитектуру, состояние на диске, протокол выполнения, авторизацию ChatGPT,
@@ -1031,7 +1031,8 @@ owner-команде доступны запуск одной фиксирова
 Расписания хранятся в `runner-control.sqlite3`: action, локальное `HH:MM`, IANA
 timezone, ISO weekdays, enabled, `revisionRef=master`, `overlapPolicy=skip`,
 misfire grace и необязательный точный Telegram destination (`chat_id/topic_id` плюс
-человекочитаемый label). Scheduler сериализует claim каждой occurrence, не стартует при
+человекочитаемый label), а для доставки — `deliveryCondition`: `success`, `failure`
+или `always` (по умолчанию `success`). Scheduler сериализует claim каждой occurrence, не стартует при
 недоступном runner и пропускает следующий occurrence, пока job этого расписания
 активен. На каждом occurrence полный SHA заново разрешается из текущего `master`.
 Create/update/delete формируют 15-минутный точный план и token; host запрещает
@@ -1039,15 +1040,18 @@ Create/update/delete формируют 15-минутный точный пла�
 сообщение. Pause/resume обратимы и выполняются только по явной инструкции.
 Ошибки расписаний отправляются всем текущим owners Project.
 
-Для scheduled `dry-run` owner задаёт destination естественным названием топика.
+Для scheduled `dry-run` или `run` owner задаёт destination естественным названием топика.
 Runtime ищет точное имя среди уже обнаруженных Telegram topics, предпочитает текущую
 группу и сразу фиксирует numeric IDs в подтверждаемом плане. Если имя неизвестно или
 неоднозначно, owner упоминает бота непосредственно в нужном forum topic сообщением
 `@bot отчёты сюда`; краткоживущая метка позволяет повторить план без ручного копирования
-ID. Ни метка, ни доставка не создают Project binding. После завершения job scheduler
-передаёт весь `portal-messages.json` в durable outbox по сохранённым IDs до фиксации
-execution как completed. `portalKey` внутри нового scheduled batch на выбор destination
-не влияет. Расписания, созданные до появления exact destination, временно сохраняют
+ID. Ни метка, ни доставка не создают Project binding. Когда job достигает terminal
+status, scheduler сопоставляет его с `deliveryCondition` и передаёт весь явный
+`portal-messages.json` в durable outbox по сохранённым IDs до фиксации execution.
+Runner захватывает manifest и allowlist-артефакты до преобразования ненулевого exit в
+`failed`, поэтому `failure`/`always` могут доставить описание частичного результата.
+Без `portal-messages.json` отправки нет, даже при совпавшем условии. `portalKey` внутри
+нового scheduled batch на выбор destination не влияет. Расписания, созданные до появления exact destination, временно сохраняют
 legacy `portalKey/default` routing до явной перенастройки.
 
 Очередь имеет глобальный предел `SUMMING_RUNNER_MAX_PARALLEL_JOBS` (по умолчанию
@@ -1155,8 +1159,14 @@ result discussion.
 уведомление в primary. Это evidence, а не intent: runtime не запускает job, service,
 Codex write-turn и не меняет требования автоматически. `project_context` показывает
 owner только consent-visible feedback для текущего Project/Workspace; owner должен
-явно решить, что взять в работу. `/publish`, observer fan-out, постоянный observer Q&A
-и `project_portal` host namespace больше не используются.
+явно решить, что взять в работу. По отдельному явному запросу owner
+`project_context.results` выдаёт конкретные публикации, а `project_context.send`
+принимает обязательный точный `resultId` и отправляет текст или до десяти safe
+workspace-файлов только в его discussion. Host повторно проверяет active owner turn,
+Project/Workspace, customer channel и reply target, сам разрешает `chat_id/topic_id` и
+пишет сообщение через durable outbox с idempotency key; модель не может выбрать иной
+destination или сделать fan-out. `/publish`, observer fan-out, постоянный observer Q&A
+и широкий `project_portal` host namespace больше не используются.
 
 Существующие `external-readonly` Conversations и `project_portal_bindings` не удаляются:
 они мигрируются в customer-channel catalog и остаются читаемыми для истории и
@@ -1164,10 +1174,11 @@ owner только consent-visible feedback для текущего Project/Work
 processors и Project host tools их игнорируют. Резервные `/bind_observer_topic` и
 `/bind_external_topic` отвечают сообщением о новой модели, но ничего не создают.
 
-Runner по-прежнему принимает декларативный bounded `portal-messages.json`. В новом
-расписании весь batch идёт в сохранённый exact destination, поэтому `portalKey`
-игнорируется. Он читается только для расписаний без destination, мигрированных со
-старой версии:
+Runner принимает одинаковый декларативный bounded `portal-messages.json` для dry-run и
+live-run, независимо от итогового exit-кода. В новом расписании весь batch идёт в
+сохранённый exact destination, когда terminal status совпадает с `deliveryCondition`,
+поэтому `portalKey` игнорируется. Он читается только для расписаний без destination,
+мигрированных со старой версии:
 
 ```json
 {
@@ -1806,7 +1817,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "9.28.0",
+  "version": "9.29.0",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",

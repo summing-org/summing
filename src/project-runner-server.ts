@@ -2395,7 +2395,6 @@ export class ProjectRunnerServer {
         ? { code: 0 }
         : await this.runImage(job, project, configPath!, logPath, signal, provisionProfile);
       job.exitCode = result.code;
-      if (result.code !== 0) throw new Error(`${job.action} exited with code ${result.code}`);
       if (signal.aborted) throw new RunnerCommandCancelledError("runner job cancelled");
       if (job.action === "dry-run" || job.action === "run") {
         const project = this.projectConfig(job.projectId, job.workspaceId);
@@ -2416,6 +2415,7 @@ export class ProjectRunnerServer {
           if (batch) job.portalMessageCount = batch.messages.length;
         }
       }
+      if (result.code !== 0) throw new Error(`${job.action} exited with code ${result.code}`);
       job.status = "completed";
     } catch (error) {
       if (signal.aborted || error instanceof RunnerCommandCancelledError) {

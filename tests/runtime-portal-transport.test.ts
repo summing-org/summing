@@ -215,6 +215,7 @@ test("scheduled reports deliver to an observed topic without an observer binding
       topicId: 67800,
       label: "«Customer» / «Reports»",
     },
+    deliveryCondition: "success",
     originConversationId: runtime.state.byTopic(1, 0)!.id,
     createdBy: 1,
     updatedBy: 1,
@@ -456,6 +457,148 @@ test("owner context sees consented feedback linked to a concrete result", async 
       topicId: 9,
       title: "Customer results",
     }]);
+  } finally {
+    runtime.state.close();
+    await runtime.telegram.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an authorized owner can idempotently send only into one exact result discussion", async () => {
+  const { root, repository, runtime } = fixture();
+  const primary = runtime.state.bind(1, 0, "demo", "repo", "primary");
+  runtime.state.recordTelegramChat({
+    chatId: -100500,
+    type: "supergroup",
+    title: "Customer",
+    isForum: true,
+    observedAt: 100,
+  });
+  runtime.state.recordTelegramTopic(-100500, 9, "Customer results", 100);
+  const publication = runtime.state.recordResultPublication({
+    projectId: "demo",
+    workspaceId: "repo",
+    jobId: "daily-report",
+    scheduleId: "morning",
+    outboxId: "result-send-test",
+    reportText: "Published project result",
+    chatId: -100500,
+    topicId: 9,
+    channelTitle: "Customer results",
+    telegramMessageId: 700,
+    createdAt: 100,
+  });
+  runtime.state.recordResultPublication({
+    projectId: "other-project",
+    workspaceId: "repo",
+    jobId: "other-report",
+    outboxId: "other-result-send-test",
+    chatId: -100501,
+    topicId: 10,
+    telegramMessageId: 800,
+    createdAt: 101,
+  });
+  const otherResult = runtime.state.resultPublicationsForProject("other-project", "repo")[0]!;
+  writeFileSync(join(repository, "customer-summary.txt"), "customer-safe summary\n");
+  const active = {
+    conversation: primary,
+    prepared: {
+      path: repository,
+      readableRoot: repository,
+      gitMetadataRoots: [],
+      projectMemorySnapshot: "",
+    },
+    access: "write",
+    actorUserId: 1,
+    turnId: "turn-result-send",
+  };
+  (runtime as unknown as { activeByThread: Map<string, unknown> }).activeByThread
+    .set("thread-result-send", active);
+  const textDeliveries: Array<{ chatId: number; text: string; topicId?: number; replyTo?: number }> = [];
+  const fileDeliveries: Array<{ chatId: number; fileName: string; topicId?: number; replyTo?: number }> = [];
+  runtime.telegram.sendMessage = async (chatId, text, options) => {
+    textDeliveries.push({
+      chatId,
+      text,
+      ...(options?.topicId === undefined ? {} : { topicId: options.topicId }),
+      ...(options?.replyTo === undefined ? {} : { replyTo: options.replyTo }),
+    });
+    return 701;
+  };
+  runtime.telegram.sendChatAction = async () => {};
+  runtime.telegram.sendAttachment = async (_kind, chatId, _data, fileName, _mimeType, options) => {
+    fileDeliveries.push({
+      chatId,
+      fileName,
+      ...(options?.topicId === undefined ? {} : { topicId: options.topicId }),
+      ...(options?.replyTo === undefined ? {} : { replyTo: options.replyTo }),
+    });
+    return 702;
+  };
+  const context = {
+    projectId: "demo",
+    workspaceId: "repo",
+    conversationId: primary.id,
+    actorUserId: 1,
+    turnId: "turn-result-send",
+  };
+  try {
+    const first = await runtime.projectContextTool(context, "send", {
+      resultId: publication.id,
+      text: "Уточнённый итог готов.",
+      idempotencyKey: "owner-update-v1",
+    }) as { outboxId: string; status: string; telegramMessageId: number };
+    const duplicate = await runtime.projectContextTool(context, "send", {
+      resultId: publication.id,
+      text: "Уточнённый итог готов.",
+      idempotencyKey: "owner-update-v1",
+    }) as { outboxId: string; status: string; telegramMessageId: number };
+    assert.deepEqual(duplicate, first);
+    assert.deepEqual(textDeliveries, [{
+      chatId: -100500,
+      text: "Уточнённый итог готов.",
+      topicId: 9,
+      replyTo: 700,
+    }]);
+    const attachment = await runtime.projectContextTool(context, "send", {
+      resultId: publication.id,
+      text: "Файл к уточнению.",
+      filePaths: ["customer-summary.txt"],
+      replyToMessageId: 701,
+      idempotencyKey: "owner-update-file-v1",
+    }) as { status: string };
+    assert.equal(attachment.status, "sent");
+    assert.deepEqual(fileDeliveries, [{
+      chatId: -100500,
+      fileName: "customer-summary.txt",
+      topicId: 9,
+      replyTo: 701,
+    }]);
+    assert.deepEqual(
+      runtime.state.resultDiscussion(publication.id).map((message) => message.author),
+      ["publication", "agent", "agent"],
+    );
+    assert.deepEqual(
+      runtime.projectPortalOutbox.list({ projectId: "demo" }).map((record) => record.context),
+      [
+        { kind: "result-reply", resultId: publication.id },
+        { kind: "result-reply", resultId: publication.id },
+      ],
+    );
+    await assert.rejects(
+      runtime.projectContextTool(context, "send", {
+        resultId: otherResult.id,
+        text: "Cross-project send",
+      }),
+      /not published by the active Project workspace/,
+    );
+    await assert.rejects(
+      runtime.projectContextTool({ ...context, turnId: "wrong-turn" }, "send", {
+        resultId: publication.id,
+        text: "Wrong turn",
+      }),
+      /active authorized owner turn/,
+    );
   } finally {
     runtime.state.close();
     await runtime.telegram.close();

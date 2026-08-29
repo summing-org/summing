@@ -27,6 +27,17 @@ const MANUAL_JOB_TERMINAL_STATUSES = new Set(["completed", "cancelled", "failed"
 
 type Row = Record<string, unknown>;
 
+function deliveryConditionMatches(
+  condition: RunnerDeliveryCondition,
+  status: RunnerScheduleExecutionStatus,
+): boolean {
+  if (condition === "always") {
+    return status === "completed" || status === "failed" || status === "cancelled";
+  }
+  if (condition === "success") return status === "completed";
+  return status === "failed" || status === "cancelled";
+}
+
 export interface RunnerControlContext {
   projectId: string;
   workspaceId: string;
@@ -41,6 +52,8 @@ export interface RunnerScheduleDestination {
   topicId: number;
   label: string;
 }
+
+export type RunnerDeliveryCondition = "success" | "failure" | "always";
 
 export interface RunnerSchedule {
   id: string;
@@ -57,6 +70,7 @@ export interface RunnerSchedule {
   overlapPolicy: "skip";
   misfireGraceMinutes: number;
   delivery: RunnerScheduleDestination | null;
+  deliveryCondition: RunnerDeliveryCondition;
   originConversationId: string;
   createdBy: number;
   updatedBy: number;
@@ -116,6 +130,7 @@ export interface SchedulePlanInput {
   misfireGraceMinutes?: number;
   deliveryTopic?: string;
   clearDeliveryTopic?: boolean;
+  deliveryCondition?: RunnerDeliveryCondition;
 }
 
 export interface SchedulePlan {
@@ -339,6 +354,8 @@ export class RunnerControlStore {
         delivery_chat_id INTEGER,
         delivery_topic_id INTEGER,
         delivery_label TEXT NOT NULL DEFAULT '',
+        delivery_condition TEXT NOT NULL DEFAULT 'success'
+          CHECK(delivery_condition IN ('success', 'failure', 'always')),
         origin_conversation_id TEXT NOT NULL DEFAULT '',
         created_by INTEGER NOT NULL,
         updated_by INTEGER NOT NULL,
@@ -477,6 +494,12 @@ export class RunnerControlStore {
         "ALTER TABLE runner_schedules ADD COLUMN delivery_label TEXT NOT NULL DEFAULT ''",
       );
     }
+    if (!scheduleColumns.some((column) => column.name === "delivery_condition")) {
+      this.db.exec(
+        "ALTER TABLE runner_schedules ADD COLUMN delivery_condition TEXT NOT NULL DEFAULT 'success' " +
+          "CHECK(delivery_condition IN ('success', 'failure', 'always'))",
+      );
+    }
     if (!scheduleColumns.some((column) => column.name === "origin_conversation_id")) {
       this.db.exec(
         "ALTER TABLE runner_schedules ADD COLUMN origin_conversation_id TEXT NOT NULL DEFAULT ''",
@@ -570,9 +593,9 @@ export class RunnerControlStore {
           INSERT INTO runner_schedules
             (id, project_id, workspace_id, name, action, local_time, time_zone,
              weekdays_json, enabled, revision_ref, overlap_policy, misfire_grace_minutes,
-             delivery_chat_id, delivery_topic_id, delivery_label, origin_conversation_id,
-             created_by, updated_by, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             delivery_chat_id, delivery_topic_id, delivery_label, delivery_condition,
+             origin_conversation_id, created_by, updated_by, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             action = excluded.action,
@@ -586,6 +609,7 @@ export class RunnerControlStore {
             delivery_chat_id = excluded.delivery_chat_id,
             delivery_topic_id = excluded.delivery_topic_id,
             delivery_label = excluded.delivery_label,
+            delivery_condition = excluded.delivery_condition,
             origin_conversation_id = excluded.origin_conversation_id,
             updated_by = excluded.updated_by,
             updated_at = excluded.updated_at
@@ -607,6 +631,7 @@ export class RunnerControlStore {
           schedule.delivery?.chatId ?? null,
           schedule.delivery?.topicId ?? null,
           schedule.delivery?.label ?? "",
+          schedule.deliveryCondition,
           schedule.originConversationId === undefined
             ? context.conversationId
             : schedule.originConversationId,
@@ -901,6 +926,11 @@ export class RunnerControlStore {
             topicId: Number(row.delivery_topic_id),
             label: String(row.delivery_label || `topic ${String(row.delivery_topic_id)}`),
           },
+      deliveryCondition: (["success", "failure", "always"] as const).includes(
+        String(row.delivery_condition ?? "success") as RunnerDeliveryCondition,
+      )
+        ? String(row.delivery_condition ?? "success") as RunnerDeliveryCondition
+        : "success",
       originConversationId: String(row.origin_conversation_id ?? ""),
       createdBy: Number(row.created_by),
       updatedBy: Number(row.updated_by),
@@ -1467,8 +1497,14 @@ export class RunnerControlPlane {
       }
       delivery = this.resolveScheduleDestination(context, query);
     }
-    if (delivery && action !== "dry-run") {
-      throw new RunnerControlError("automatic report delivery is supported only for dry-run schedules");
+    if (delivery && action !== "dry-run" && action !== "run") {
+      throw new RunnerControlError("automatic report delivery is supported only for dry-run and run schedules");
+    }
+    const deliveryCondition = String(
+      input.deliveryCondition ?? existing?.deliveryCondition ?? "success",
+    ) as RunnerDeliveryCondition;
+    if (!(new Set<RunnerDeliveryCondition>(["success", "failure", "always"])).has(deliveryCondition)) {
+      throw new RunnerControlError("deliveryCondition must be success, failure, or always");
     }
     const timestamp = iso(nowMilliseconds);
     const schedule: RunnerSchedule = {
@@ -1485,6 +1521,7 @@ export class RunnerControlPlane {
       overlapPolicy: "skip",
       misfireGraceMinutes,
       delivery,
+      deliveryCondition,
       originConversationId: existing ? existing.originConversationId : context.conversationId,
       createdBy: existing?.createdBy ?? context.actorUserId,
       updatedBy: context.actorUserId,
@@ -1493,7 +1530,11 @@ export class RunnerControlPlane {
     };
     const days = weekdays.length === 7 ? "ежедневно" : `дни ISO ${weekdays.join(",")}`;
     const deliverySummary = schedule.delivery
-      ? `, отчёт → ${schedule.delivery.label}`
+      ? `, отчёт → ${schedule.delivery.label} (${({
+          success: "при успехе",
+          failure: "при ошибке",
+          always: "при любом результате",
+        } as const)[schedule.deliveryCondition]})`
       : "";
     return this.store.savePlan(
       context,
@@ -1658,7 +1699,7 @@ export class RunnerControlPlane {
           execution.workspaceId,
         );
         if (
-          status === "completed" &&
+          deliveryConditionMatches(schedule?.deliveryCondition ?? "success", status) &&
           (job.action === "dry-run" || job.action === "run") &&
           (job.portalMessageCount ?? 0) > 0 &&
           schedule

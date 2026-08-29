@@ -111,6 +111,7 @@ test("runner snapshots an encrypted workspace environment and injects one tempor
   const fakeDocker = join(root, "docker");
   const dockerArgs = join(root, "docker.args");
   const imageBuilt = join(root, "image-built");
+  const failLiveRun = join(root, "fail-live-run");
   const appData = join(root, "app-data");
   mkdirSync(repository);
   mkdirSync(configRoot);
@@ -208,6 +209,7 @@ if [ "$1" = run ]; then
       printf 'fake-animation' > "${appData}/dry-runs/$job/animation-01.gif"
       printf 'fake-voice' > "${appData}/dry-runs/$job/voice-01.ogg"
       printf '{"schemaVersion":1,"messages":[{"id":"live-photo","type":"photo","text":"Photo ready.","artifact":"photo-01.jpg"},{"id":"live-audio","type":"audio","text":"Audio ready.","artifact":"audio-01.mp3"},{"id":"live-video","type":"video","text":"Video ready.","artifact":"video-01.mp4"},{"id":"live-animation","type":"animation","text":"Animation ready.","artifact":"animation-01.gif"},{"id":"live-voice","type":"voice","text":"Voice ready.","artifact":"voice-01.ogg"}]}\n' > "${appData}/dry-runs/$job/portal-messages.json"
+      if [ -f "${failLiveRun}" ]; then exit 7; fi
     else
       printf '<html>report</html>\n' > "${appData}/dry-runs/$job/report.html"
       printf '{"schemaVersion":1,"messages":[{"id":"dry-run-report","type":"document","text":"Informational dry-run report is ready.","artifact":"report.html"}]}\n' > "${appData}/dry-runs/$job/portal-messages.json"
@@ -421,6 +423,24 @@ exit 0
     assert.match(liveArgs, /DRY_RUN=false/);
     assert.match(liveArgs, /SUMMING_PORTAL_TRANSPORT=true/);
     assert.match(liveArgs, new RegExp(`DRY_RUN_ARTIFACT_DIR=/app/data/dry-runs/${liveRun.id}`));
+
+    writeFileSync(failLiveRun, "fail\n");
+    const failedLiveRun = await client.submit("demo", "repo", "run", revision, archive);
+    const failedLiveRunCompleted = await completedJob(
+      client,
+      "demo",
+      "repo",
+      failedLiveRun.id,
+    );
+    assert.equal(failedLiveRunCompleted.status, "failed");
+    assert.equal(failedLiveRunCompleted.exitCode, 7);
+    assert.equal(failedLiveRunCompleted.artifactCount, 7);
+    assert.equal(failedLiveRunCompleted.portalMessageCount, 5);
+    assert.equal(
+      (await client.portalMessages("demo", "repo", failedLiveRun.id)).messages.length,
+      5,
+    );
+    rmSync(failLiveRun);
 
     await assert.rejects(
       client.submit("demo", "repo", "provision", revision, archive, {

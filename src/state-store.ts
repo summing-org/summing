@@ -3111,6 +3111,27 @@ export class StateStore {
       .map((row) => this.toCustomerChannel(row));
   }
 
+  resultPublication(id: string): ResultPublication | null {
+    const row = this.db.prepare("SELECT * FROM result_publications WHERE id = ?")
+      .get(id) as Row | undefined;
+    return row ? this.toResultPublication(row) : null;
+  }
+
+  resultPublicationsForProject(
+    projectId: string,
+    workspaceId: string,
+    channelId = "",
+    limit = 20,
+  ): ResultPublication[] {
+    const bounded = Math.max(1, Math.min(50, Math.trunc(limit)));
+    return (this.db.prepare(`
+      SELECT * FROM result_publications
+      WHERE project_id = ? AND workspace_id = ? AND (? = '' OR channel_id = ?)
+      ORDER BY created_at DESC, id DESC LIMIT ?
+    `).all(projectId, workspaceId, channelId, channelId, bounded) as Row[])
+      .map((row) => this.toResultPublication(row));
+  }
+
   recordResultPublication(input: {
     projectId: string;
     workspaceId: string;
