@@ -63,7 +63,7 @@ export function helpMessage(isAdministrator: boolean): string {
       bold("Только для администратора"),
       text("Команды ниже остаются резервным интерфейсом для диагностики и восстановления."),
       command("/admin", "открыть центр управления Mini App"),
-      text("В Admin → Telegram роль Portal привязывает внешний топик к Project по стабильному portalKey."),
+      text("В Admin → Telegram роль «Внешний» разрешает Project точную пару chatId/topicId; групп может быть несколько."),
       command("/login", "войти в ChatGPT через device code в личном чате"),
       command("/limits", "показать 5-часовой и недельный Codex limits этого VPS"),
       command("/sync_status [chat_id]", "показать состояние синхронизации базы знаний"),

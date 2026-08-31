@@ -26,12 +26,15 @@ const ARTIFACT_ID = /^[0-9a-f-]{36}$/;
 const KEY_BYTES = 32;
 
 export interface ProjectPortalArtifactRecord {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   id: string;
-  projectId: string;
-  workspaceId: string;
-  portalId: string;
-  portalKey: string;
+  projectId?: string;
+  workspaceId?: string;
+  portalId?: string;
+  portalKey?: string;
+  sourceId?: string;
+  chatId?: number;
+  topicId?: number;
   eventId: number;
   telegramMessageId: number;
   providerFileId: string;
@@ -109,10 +112,13 @@ export class ProjectPortalArtifactStore {
   }
 
   store(input: {
-    projectId: string;
-    workspaceId: string;
-    portalId: string;
-    portalKey: string;
+    projectId?: string;
+    workspaceId?: string;
+    portalId?: string;
+    portalKey?: string;
+    sourceId?: string;
+    chatId?: number;
+    topicId?: number;
     eventId: number;
     telegramMessageId: number;
     providerFileId?: string;
@@ -135,13 +141,30 @@ export class ProjectPortalArtifactStore {
     const cipher = createCipheriv("aes-256-gcm", this.key, iv);
     const encrypted = Buffer.concat([cipher.update(data), cipher.final()]);
     const createdAt = this.now();
+    const sourceScoped = Boolean(input.sourceId) &&
+      Number.isSafeInteger(input.chatId) && input.chatId !== 0 &&
+      Number.isSafeInteger(input.topicId) && Number(input.topicId) >= 0;
+    const legacyScoped = Boolean(
+      input.projectId && input.workspaceId && input.portalId && input.portalKey,
+    );
+    if (!sourceScoped && !legacyScoped) {
+      throw new ProjectPortalArtifactError("portal artifact scope is invalid");
+    }
     const record: ProjectPortalArtifactRecord = {
-      schemaVersion: 1,
+      schemaVersion: sourceScoped ? 2 : 1,
       id,
-      projectId: input.projectId,
-      workspaceId: input.workspaceId,
-      portalId: input.portalId,
-      portalKey: input.portalKey,
+      ...(sourceScoped
+        ? {
+            sourceId: input.sourceId!,
+            chatId: input.chatId!,
+            topicId: input.topicId!,
+          }
+        : {
+            projectId: input.projectId!,
+            workspaceId: input.workspaceId!,
+            portalId: input.portalId!,
+            portalKey: input.portalKey!,
+          }),
       eventId: input.eventId,
       telegramMessageId: input.telegramMessageId,
       providerFileId: String(input.providerFileId ?? "").slice(0, 512),
@@ -177,12 +200,19 @@ export class ProjectPortalArtifactStore {
     }
     const record = JSON.parse(readFileSync(path, "utf8")) as ProjectPortalArtifactRecord;
     if (
-      record.schemaVersion !== 1 ||
+      (record.schemaVersion !== 1 && record.schemaVersion !== 2) ||
       record.id !== id ||
       !/^[a-f0-9]{64}$/.test(String(record.sha256 ?? "")) ||
       !Number.isSafeInteger(record.size) ||
       record.size <= 0 ||
-      record.size > this.maximumBytes
+      record.size > this.maximumBytes ||
+      (record.schemaVersion === 1 && !(
+        record.projectId && record.workspaceId && record.portalId && record.portalKey
+      )) ||
+      (record.schemaVersion === 2 && !(
+        record.sourceId && Number.isSafeInteger(record.chatId) && record.chatId !== 0 &&
+        Number.isSafeInteger(record.topicId) && Number(record.topicId) >= 0
+      ))
     ) {
       throw new ProjectPortalArtifactError("invalid portal artifact metadata");
     }

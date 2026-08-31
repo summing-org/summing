@@ -741,6 +741,20 @@ export class ProjectViewerServer {
       if (!Number.isSafeInteger(topicId) || topicId < 0) {
         throw new ViewerHttpError(400, "некорректный topicId");
       }
+      const role = String(body?.role ?? "primary");
+      if (role === "external") {
+        const project = this.projects.project(String(body?.projectId ?? ""));
+        const workspace = project.workspace(String(body?.workspaceId ?? ""));
+        const destination = this.state.unbindProjectTopicDestination(
+          project.id,
+          workspace.id,
+          chatId,
+          topicId,
+        );
+        json(response, 200, { destination });
+        return;
+      }
+      if (role !== "primary") throw new ViewerHttpError(400, "некорректная роль топика");
       const current = this.state.topicConversation(chatId, topicId);
       if (!current) {
         json(response, 200, { conversation: null });
@@ -776,36 +790,41 @@ export class ProjectViewerServer {
       if (!chat || !topic) {
         throw new ViewerHttpError(404, "Telegram-топик ещё не обнаружен SUMMING");
       }
-      if (chat.type !== "supergroup") {
-        throw new ViewerHttpError(409, "привязать можно только топик Telegram supergroup");
+      if (!["group", "supergroup"].includes(chat.type) || (topicId > 0 && chat.type !== "supergroup")) {
+        throw new ViewerHttpError(
+          409,
+          "внешним направлением может быть группа целиком или топик Telegram supergroup",
+        );
       }
       if (["left", "kicked"].includes(chat.botStatus)) {
         throw new ViewerHttpError(409, "бот больше не состоит в выбранной группе");
       }
       const project = this.projects.project(body?.projectId as string);
       const workspace = project.workspace(String(body?.workspaceId ?? ""));
-      const legacyBindingMode = String(body?.bindingMode ?? "");
-      if (body?.role === undefined && legacyBindingMode &&
-          legacyBindingMode !== "project") {
-        throw new ViewerHttpError(400, "некорректная legacy-роль топика");
-      }
       const role = body?.role === undefined ? "primary" : String(body.role);
-      if (role !== "primary" && role !== "portal") {
-        throw new ViewerHttpError(400, "роль топика должна быть primary или portal");
+      if (role !== "primary" && role !== "external") {
+        throw new ViewerHttpError(400, "роль топика должна быть primary или external");
       }
-      const portalKey = String(body?.portalKey ?? "").trim();
-      if (role === "portal" && !portalKey) {
-        throw new ViewerHttpError(400, "для portal-топика требуется portalKey");
+      if (role === "primary" && chat.type !== "supergroup") {
+        throw new ViewerHttpError(409, "рабочим топиком может быть только Telegram supergroup");
+      }
+      if (role === "external") {
+        const destination = this.state.bindProjectTopicDestination({
+          projectId: project.id,
+          workspaceId: workspace.id,
+          chatId,
+          topicId,
+          title: topic.name || chat.title,
+          createdBy: telegramUser,
+        });
+        json(response, 200, { destination });
+        return;
       }
       const current = this.state.topicConversation(chatId, topicId);
-      const currentPortal = current?.role === "observer"
-        ? this.state.projectPortal(current.projectId, current.workspaceId, current.id)
-        : null;
       if (
         current?.projectId === project.id &&
         current.workspaceId === workspace.id &&
-        (role === "portal" ? current.role === "observer" : current.role === "primary") &&
-        (role !== "portal" || currentPortal?.portalKey === portalKey)
+        current.role === "primary"
       ) {
         json(response, 200, { conversation: current });
         return;
@@ -828,20 +847,12 @@ export class ProjectViewerServer {
           topicId,
           project.id,
           workspace.id,
-          role === "portal" ? "observer" : "primary",
-          role === "portal"
-            ? {
-                portalKey,
-                ...(typeof body?.isDefault === "boolean"
-                  ? { isDefault: body.isDefault }
-                  : {}),
-              }
-            : {},
+          "primary",
         );
       } catch (error) {
         throw new ViewerHttpError(409, error instanceof Error ? error.message : String(error));
       }
-      if (role === "primary") this.afterTopicBound(chatId, topicId);
+      this.afterTopicBound(chatId, topicId);
       json(response, 200, { conversation });
       return;
     }
@@ -1219,17 +1230,34 @@ export class ProjectViewerServer {
 
   private adminOverview(): Record<string, unknown> {
     const conversations = this.state.listConversations();
+    const primaryConversations = conversations.filter((conversation) => conversation.role === "primary");
     const bindingsByTopic = new Map(
-      conversations.map((conversation) => [
+      primaryConversations.map((conversation) => [
         `${conversation.chatId}:${conversation.topicId}`,
         conversation,
       ]),
     );
+    const allDestinations = this.projects.all().flatMap((entry) =>
+      this.state.projectTopicDestinations(entry.project.id)
+    );
+    const destinationsByTopic = new Map<string, typeof allDestinations>();
+    for (const destination of allDestinations) {
+      const key = `${destination.chatId}:${destination.topicId}`;
+      const entries = destinationsByTopic.get(key) ?? [];
+      entries.push(destination);
+      destinationsByTopic.set(key, entries);
+    }
     const projectBindings = new Map<string, number>();
-    for (const conversation of conversations) {
+    for (const conversation of primaryConversations) {
       projectBindings.set(
         conversation.projectId,
         (projectBindings.get(conversation.projectId) ?? 0) + 1,
+      );
+    }
+    for (const destination of allDestinations) {
+      projectBindings.set(
+        destination.projectId,
+        (projectBindings.get(destination.projectId) ?? 0) + 1,
       );
     }
     const projects = this.projects.all().map((entry) => ({
@@ -1257,14 +1285,8 @@ export class ProjectViewerServer {
       topics: this.state.listTelegramTopics(chat.chatId).map((topic) => {
         topics += 1;
         const conversation = bindingsByTopic.get(`${topic.chatId}:${topic.topicId}`);
-        const portal = conversation?.role === "observer"
-          ? this.state.projectPortal(
-              conversation.projectId,
-              conversation.workspaceId,
-              conversation.id,
-            )
-          : null;
-        if (conversation) bindings += 1;
+        const destinations = destinationsByTopic.get(`${topic.chatId}:${topic.topicId}`) ?? [];
+        bindings += (conversation ? 1 : 0) + destinations.length;
         return {
           topicId: topic.topicId,
           name: topic.name,
@@ -1275,15 +1297,20 @@ export class ProjectViewerServer {
                 conversationId: conversation.id,
                 projectId: conversation.projectId,
                 workspaceId: conversation.workspaceId,
-                role: conversation.role === "observer" ? "portal" : "primary",
-                portalKey: portal?.portalKey ?? null,
-                default: portal?.isDefault ?? false,
+                role: "primary",
                 busy:
                   conversation.activeTurnId !== null ||
                   this.state.pendingAll(conversation.id).length > 0 ||
                   this.bindingBusy(conversation),
               }
             : null,
+          destinations: destinations.map((destination) => ({
+            projectId: destination.projectId,
+            workspaceId: destination.workspaceId,
+            chatId: destination.chatId,
+            topicId: destination.topicId,
+            title: destination.title,
+          })),
         };
       }),
     }));

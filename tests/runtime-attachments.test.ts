@@ -135,7 +135,7 @@ test("voice is transcribed through the configured provider while documents remai
   }
 });
 
-test("a Project portal captures an inbound attachment without reply, mention, or agent turn", async () => {
+test("an exact external destination captures an inbound attachment without a conversation or agent turn", async () => {
   const root = mkdtempSync(join(tmpdir(), "summing-runtime-portal-attachment-"));
   const repository = join(root, "repository");
   mkdirSync(repository);
@@ -156,8 +156,13 @@ test("a Project portal captures an inbound attachment without reply, mention, or
     true,
     new Map([["demo", project]]),
   ));
-  runtime.state.bind(-100, 5, "demo", "repo", "observer", {
-    portalKey: "releases",
+  runtime.state.bindProjectTopicDestination({
+    projectId: "demo",
+    workspaceId: "repo",
+    chatId: -100,
+    topicId: 5,
+    title: "Customer releases",
+    createdBy: 1,
   });
   let processorStarts = 0;
   let replies = 0;
@@ -214,6 +219,8 @@ test("a Project portal captures an inbound attachment without reply, mention, or
       .find((item) => item.providerFileId === "release-notes-file");
     assert.match(attachment?.artifactId ?? "", /^[0-9a-f-]{36}$/);
     const artifact = runtime.projectPortalArtifacts.read(attachment!.artifactId!);
+    assert.equal(artifact.schemaVersion, 2);
+    assert.equal(artifact.sourceId, source.id);
     assert.equal(new TextDecoder().decode(artifact.data), "customer release notes");
   } finally {
     runtime.state.close();

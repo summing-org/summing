@@ -53,6 +53,15 @@ export interface RunnerScheduleDestination {
   label: string;
 }
 
+export type RunnerNotificationWhen = "started" | "succeeded" | "failed" | "finished";
+
+export interface RunnerLifecycleNotification {
+  chatId: number;
+  topicId: number;
+  when: RunnerNotificationWhen;
+  text: string;
+}
+
 export type RunnerDeliveryCondition = "success" | "failure" | "always";
 
 export interface RunnerSchedule {
@@ -71,6 +80,7 @@ export interface RunnerSchedule {
   misfireGraceMinutes: number;
   delivery: RunnerScheduleDestination | null;
   deliveryCondition: RunnerDeliveryCondition;
+  notifications: RunnerLifecycleNotification[];
   originConversationId: string;
   createdBy: number;
   updatedBy: number;
@@ -131,6 +141,8 @@ export interface SchedulePlanInput {
   deliveryTopic?: string;
   clearDeliveryTopic?: boolean;
   deliveryCondition?: RunnerDeliveryCondition;
+  notifications?: RunnerLifecycleNotification[];
+  clearNotifications?: boolean;
 }
 
 export interface SchedulePlan {
@@ -192,6 +204,7 @@ interface RunnerJobWatch {
   createdAt: string;
   updatedAt: string;
   notifiedAt: string | null;
+  notifications: RunnerLifecycleNotification[];
 }
 
 export class RunnerControlError extends Error {}
@@ -241,6 +254,49 @@ function validateWeekdays(value: unknown): number[] {
     throw new RunnerControlError("weekdays must contain integers from 1 (Monday) to 7 (Sunday)");
   }
   return weekdays;
+}
+
+function validateLifecycleNotifications(value: unknown): RunnerLifecycleNotification[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 12) {
+    throw new RunnerControlError("notifications must contain at most 12 items");
+  }
+  return value.map((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new RunnerControlError("notification must be an object");
+    }
+    const input = item as Record<string, unknown>;
+    const chatId = Number(input.chatId);
+    const topicId = Number(input.topicId);
+    const when = String(input.when ?? "") as RunnerNotificationWhen;
+    const text = String(input.text ?? "").trim();
+    if (!Number.isSafeInteger(chatId) || chatId === 0) {
+      throw new RunnerControlError("notification chatId must be a non-zero safe integer");
+    }
+    if (!Number.isSafeInteger(topicId) || topicId < 0) {
+      throw new RunnerControlError("notification topicId must be a non-negative safe integer");
+    }
+    if (!(new Set<RunnerNotificationWhen>([
+      "started",
+      "succeeded",
+      "failed",
+      "finished",
+    ])).has(when)) {
+      throw new RunnerControlError(
+        "notification when must be started, succeeded, failed, or finished",
+      );
+    }
+    if (!text || Array.from(text).length > 3_500) {
+      throw new RunnerControlError("notification text must contain 1-3500 characters");
+    }
+    return { chatId, topicId, when, text };
+  });
+}
+
+function terminalNotificationKinds(job: RunnerJob): RunnerNotificationWhen[] {
+  return job.status === "completed"
+    ? ["succeeded", "finished"]
+    : ["failed", "finished"];
 }
 
 function scheduleParts(epochMilliseconds: number, timeZone: string): {
@@ -356,6 +412,7 @@ export class RunnerControlStore {
         delivery_label TEXT NOT NULL DEFAULT '',
         delivery_condition TEXT NOT NULL DEFAULT 'success'
           CHECK(delivery_condition IN ('success', 'failure', 'always')),
+        notifications_json TEXT NOT NULL DEFAULT '[]',
         origin_conversation_id TEXT NOT NULL DEFAULT '',
         created_by INTEGER NOT NULL,
         updated_by INTEGER NOT NULL,
@@ -420,7 +477,8 @@ export class RunnerControlStore {
         last_status TEXT NOT NULL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
-        notified_at TEXT
+        notified_at TEXT,
+        notifications_json TEXT NOT NULL DEFAULT '[]'
       );
       CREATE INDEX IF NOT EXISTS runner_job_watches_pending
         ON runner_job_watches(notified_at, project_id, workspace_id, created_at);
@@ -450,6 +508,11 @@ export class RunnerControlStore {
         "ALTER TABLE runner_job_watches ADD COLUMN actor_user_id INTEGER NOT NULL DEFAULT 0",
       );
     }
+    if (!watchColumns.some((column) => column.name === "notifications_json")) {
+      this.db.exec(
+        "ALTER TABLE runner_job_watches ADD COLUMN notifications_json TEXT NOT NULL DEFAULT '[]'",
+      );
+    }
     const watchSchema = this.db.prepare(
       "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'runner_job_watches'",
     ).get() as Row | undefined;
@@ -468,13 +531,15 @@ export class RunnerControlStore {
           last_status TEXT NOT NULL,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL,
-          notified_at TEXT
+          notified_at TEXT,
+          notifications_json TEXT NOT NULL DEFAULT '[]'
         );
         INSERT INTO runner_job_watches
           (job_id, project_id, workspace_id, conversation_id, actor_user_id, action,
-           last_status, created_at, updated_at, notified_at)
+           last_status, created_at, updated_at, notified_at, notifications_json)
         SELECT job_id, project_id, workspace_id, conversation_id, actor_user_id, action,
-               last_status, created_at, updated_at, notified_at
+               last_status, created_at, updated_at, notified_at,
+               COALESCE(notifications_json, '[]')
         FROM runner_job_watches_legacy;
         DROP TABLE runner_job_watches_legacy;
         CREATE INDEX runner_job_watches_pending
@@ -498,6 +563,11 @@ export class RunnerControlStore {
       this.db.exec(
         "ALTER TABLE runner_schedules ADD COLUMN delivery_condition TEXT NOT NULL DEFAULT 'success' " +
           "CHECK(delivery_condition IN ('success', 'failure', 'always'))",
+      );
+    }
+    if (!scheduleColumns.some((column) => column.name === "notifications_json")) {
+      this.db.exec(
+        "ALTER TABLE runner_schedules ADD COLUMN notifications_json TEXT NOT NULL DEFAULT '[]'",
       );
     }
     if (!scheduleColumns.some((column) => column.name === "origin_conversation_id")) {
@@ -594,8 +664,8 @@ export class RunnerControlStore {
             (id, project_id, workspace_id, name, action, local_time, time_zone,
              weekdays_json, enabled, revision_ref, overlap_policy, misfire_grace_minutes,
              delivery_chat_id, delivery_topic_id, delivery_label, delivery_condition,
-             origin_conversation_id, created_by, updated_by, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             notifications_json, origin_conversation_id, created_by, updated_by, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             action = excluded.action,
@@ -610,6 +680,7 @@ export class RunnerControlStore {
             delivery_topic_id = excluded.delivery_topic_id,
             delivery_label = excluded.delivery_label,
             delivery_condition = excluded.delivery_condition,
+            notifications_json = excluded.notifications_json,
             origin_conversation_id = excluded.origin_conversation_id,
             updated_by = excluded.updated_by,
             updated_at = excluded.updated_at
@@ -632,6 +703,7 @@ export class RunnerControlStore {
           schedule.delivery?.topicId ?? null,
           schedule.delivery?.label ?? "",
           schedule.deliveryCondition,
+          JSON.stringify(schedule.notifications),
           schedule.originConversationId === undefined
             ? context.conversationId
             : schedule.originConversationId,
@@ -801,13 +873,18 @@ export class RunnerControlStore {
     `).all() as Row[]).map((row) => this.toExecution(row));
   }
 
-  watchJob(context: RunnerControlContext, job: RunnerJob, nowMilliseconds: number): void {
+  watchJob(
+    context: RunnerControlContext,
+    job: RunnerJob,
+    nowMilliseconds: number,
+    notifications: RunnerLifecycleNotification[] = [],
+  ): void {
     const timestamp = iso(nowMilliseconds);
     this.db.prepare(`
       INSERT OR IGNORE INTO runner_job_watches
         (job_id, project_id, workspace_id, conversation_id, actor_user_id, action,
-         last_status, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         last_status, created_at, updated_at, notifications_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       job.id,
       context.projectId,
@@ -818,6 +895,7 @@ export class RunnerControlStore {
       job.status,
       timestamp,
       timestamp,
+      JSON.stringify(notifications),
     );
   }
 
@@ -837,6 +915,7 @@ export class RunnerControlStore {
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
       notifiedAt: row.notified_at === null ? null : String(row.notified_at),
+      notifications: validateLifecycleNotifications(parseJson(row.notifications_json, "notifications")),
     }));
   }
 
@@ -856,6 +935,7 @@ export class RunnerControlStore {
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
       notifiedAt: row.notified_at === null ? null : String(row.notified_at),
+      notifications: validateLifecycleNotifications(parseJson(row.notifications_json, "notifications")),
     };
   }
 
@@ -931,6 +1011,9 @@ export class RunnerControlStore {
       )
         ? String(row.delivery_condition ?? "success") as RunnerDeliveryCondition
         : "success",
+      notifications: validateLifecycleNotifications(
+        parseJson(row.notifications_json ?? "[]", "schedule notifications"),
+      ),
       originConversationId: String(row.origin_conversation_id ?? ""),
       createdBy: Number(row.created_by),
       updatedBy: Number(row.updated_by),
@@ -989,6 +1072,18 @@ export class RunnerControlPlane {
     ) => RunnerScheduleDestination = () => {
       throw new RunnerControlError("schedule delivery destination resolver is unavailable");
     },
+    readonly validateLifecycleDestination: (
+      context: Pick<RunnerControlContext, "projectId" | "workspaceId">,
+      notification: RunnerLifecycleNotification,
+    ) => void = () => {
+      throw new RunnerControlError("external notification destination validator is unavailable");
+    },
+    readonly deliverLifecycleNotification: (
+      job: RunnerJob,
+      notification: RunnerLifecycleNotification,
+      idempotencyKey: string,
+      createdBy: number,
+    ) => Promise<boolean> = async () => false,
   ) {
     this.store = new RunnerControlStore(storePath);
   }
@@ -1113,7 +1208,12 @@ export class RunnerControlPlane {
     action: RunnerAction,
     requestId: string,
     provisionId?: string,
+    requestedNotifications: RunnerLifecycleNotification[] = [],
   ): Promise<RunnerJob> {
+    const notifications = validateLifecycleNotifications(requestedNotifications);
+    for (const notification of notifications) {
+      this.validateLifecycleDestination(context, notification);
+    }
     if (!(new Set<RunnerAction>(["build", "validate", "dry-run", "run", "provision"])).has(action)) {
       throw new RunnerControlError("runner action is invalid");
     }
@@ -1142,7 +1242,17 @@ export class RunnerControlPlane {
       ) {
         throw new RunnerControlError("runner request id was reused for a different job");
       }
-      this.store.watchJob(context, existing, this.now());
+      this.store.watchJob(context, existing, this.now(), notifications);
+      try {
+        await this.deliverNotifications(
+          existing,
+          notifications.filter((notification) => notification.when === "started"),
+          `manual:${existing.id}:started`,
+          context.actorUserId,
+        );
+      } catch (error) {
+        console.warn(`could not queue started notifications for runner job ${existing.id}`, error);
+      }
       return existing;
     }
     const inspector = new GitInspector(context.repositoryPath);
@@ -1166,7 +1276,7 @@ export class RunnerControlPlane {
         ...(provisionId ? { provisionId } : {}),
       },
     );
-    this.store.watchJob(context, job, this.now());
+    this.store.watchJob(context, job, this.now(), notifications);
     this.store.audit(
       context,
       "runner.start",
@@ -1174,6 +1284,16 @@ export class RunnerControlPlane {
       { action, revision, ...(provisionId ? { provisionId } : {}) },
       this.now(),
     );
+    try {
+      await this.deliverNotifications(
+        job,
+        notifications.filter((notification) => notification.when === "started"),
+        `manual:${job.id}:started`,
+        context.actorUserId,
+      );
+    } catch (error) {
+      console.warn(`could not queue started notifications for runner job ${job.id}`, error);
+    }
     return job;
   }
 
@@ -1471,6 +1591,9 @@ export class RunnerControlPlane {
     if (input.clearDeliveryTopic && input.deliveryTopic) {
       throw new RunnerControlError("deliveryTopic and clearDeliveryTopic cannot be combined");
     }
+    if (input.clearNotifications && input.notifications !== undefined) {
+      throw new RunnerControlError("notifications and clearNotifications cannot be combined");
+    }
     const name = String(input.name ?? existing?.name ?? "").trim();
     if (!SCHEDULE_NAME.test(name)) throw new RunnerControlError("schedule name is invalid");
     const action = String(input.action ?? existing?.action ?? "") as RunnerSchedulableAction;
@@ -1506,6 +1629,14 @@ export class RunnerControlPlane {
     if (!(new Set<RunnerDeliveryCondition>(["success", "failure", "always"])).has(deliveryCondition)) {
       throw new RunnerControlError("deliveryCondition must be success, failure, or always");
     }
+    const notifications = input.clearNotifications
+      ? []
+      : input.notifications === undefined
+        ? existing?.notifications ?? []
+        : validateLifecycleNotifications(input.notifications);
+    for (const notification of notifications) {
+      this.validateLifecycleDestination(context, notification);
+    }
     const timestamp = iso(nowMilliseconds);
     const schedule: RunnerSchedule = {
       id: existing?.id ?? randomUUID(),
@@ -1522,6 +1653,7 @@ export class RunnerControlPlane {
       misfireGraceMinutes,
       delivery,
       deliveryCondition,
+      notifications,
       originConversationId: existing ? existing.originConversationId : context.conversationId,
       createdBy: existing?.createdBy ?? context.actorUserId,
       updatedBy: context.actorUserId,
@@ -1536,11 +1668,14 @@ export class RunnerControlPlane {
           always: "при любом результате",
         } as const)[schedule.deliveryCondition]})`
       : "";
+    const notificationSummary = schedule.notifications.length > 0
+      ? `, внешних lifecycle-сообщений: ${schedule.notifications.length}`
+      : "";
     return this.store.savePlan(
       context,
       { operation: "upsert", schedule },
       `${existing ? "Изменить" : "Создать"} расписание «${name}»: ${action}, ${days} в ${time} (${timeZone}), ` +
-        `${schedule.enabled ? "включено" : "выключено"}${deliverySummary}`,
+        `${schedule.enabled ? "включено" : "выключено"}${deliverySummary}${notificationSummary}`,
       nowMilliseconds,
     );
   }
@@ -1648,6 +1783,16 @@ export class RunnerControlPlane {
         { jobId: job.id, revision },
         this.now(),
       );
+      try {
+        await this.deliverNotifications(
+          job,
+          schedule.notifications.filter((notification) => notification.when === "started"),
+          `schedule:${schedule.id}:${execution.occurrenceKey}:started`,
+          schedule.updatedBy,
+        );
+      } catch (error) {
+        console.warn(`could not queue started notifications for schedule ${schedule.id}`, error);
+      }
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       this.store.updateExecution(execution.id, "failed", { reason }, this.now());
@@ -1706,6 +1851,20 @@ export class RunnerControlPlane {
         ) {
           if (!(await this.deliverScheduledPortalMessages(job, schedule))) continue;
         }
+        if (schedule && TERMINAL_EXECUTION_STATUSES.has(status)) {
+          try {
+            await this.deliverNotifications(
+              job,
+              schedule.notifications.filter((notification) =>
+                terminalNotificationKinds(job).includes(notification.when)
+              ),
+              `schedule:${schedule.id}:${execution.occurrenceKey}:${status}`,
+              schedule.updatedBy,
+            );
+          } catch (error) {
+            console.warn(`could not queue terminal notifications for schedule ${schedule.id}`, error);
+          }
+        }
         this.store.updateExecution(
           execution.id,
           status,
@@ -1747,6 +1906,14 @@ export class RunnerControlPlane {
         if (job.status !== watch.lastStatus) this.store.updateJobWatch(job, this.now());
         if (!MANUAL_JOB_TERMINAL_STATUSES.has(job.status)) continue;
         try {
+          await this.deliverNotifications(
+            job,
+            watch.notifications.filter((notification) =>
+              terminalNotificationKinds(job).includes(notification.when)
+            ),
+            `manual:${job.id}:${job.status}`,
+            watch.actorUserId,
+          );
           if (
             job.status === "completed" &&
             (job.action === "dry-run" || job.action === "run") &&
@@ -1762,6 +1929,27 @@ export class RunnerControlPlane {
         } catch (error) {
           console.warn(`could not notify conversation about runner job ${job.id}`, error);
         }
+      }
+    }
+  }
+
+  private async deliverNotifications(
+    job: RunnerJob,
+    notifications: RunnerLifecycleNotification[],
+    scope: string,
+    createdBy: number,
+  ): Promise<void> {
+    for (const [index, notification] of notifications.entries()) {
+      const accepted = await this.deliverLifecycleNotification(
+        job,
+        notification,
+        idempotencyKey(scope, notification.when, String(index)),
+        createdBy,
+      );
+      if (!accepted) {
+        throw new RunnerControlError(
+          `external ${notification.when} notification was not accepted by the outbox`,
+        );
       }
     }
   }

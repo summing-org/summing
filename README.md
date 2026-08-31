@@ -21,8 +21,8 @@ Team Space: создаётся при подключении командног�
               ├── Editor Codex thread: administrator / Project owner
               ├── Read-only Codex thread: other group participants
               └── Active run: 0..1
-        └── Project portals: любое число внешних topics
-              ├── стабильный portalKey → exact chat/topic
+        └── External destinations: любое число точных Telegram routes
+              ├── Project/Workspace ↔ (chatId, topicId), включая разные группы
               └── consent-visible history + owner-scoped send
 ```
 
@@ -113,15 +113,17 @@ Team Space: создаётся при подключении командног�
   сообщении. Автоматические commit/merge/push, force push, Claudexor, swarm,
   произвольные MCP/marketplaces, local models и автономная Evolution отсутствуют.
 - основной топик — единственное место Project/Workspace, где owners и Codex запускают
-  изменения. Внешний topic можно оставить общим customer channel для discussion одного
-  опубликованного результата (`resultId`) либо явно привязать как постоянный Project portal
-  со стабильным `portalKey`, например `releases`, `support` или `content`;
-- portal binding не создаёт внешний Project Q&A: сообщения и вложения попадают в
+  изменения. Для внешней отправки Project может иметь любое число точных пар
+  `(chatId, topicId)` в одной или нескольких Telegram-группах; логических ключей и
+  единственной «группы заказчика» нет;
+- external binding не создаёт внешний Project Q&A: сообщения и вложения попадают в
   недоверенную consent-aware историю без `reply`, `@mention` и автоматического ответа.
-  В активном owner-turn агент сначала получает allowlist `project_portal.sources`, а затем
-  может отправить произвольный текст или до десяти safe-файлов только в один обязательный
-  `portalKey`. Host повторно проверяет owner, Project/Workspace и точный route, а доставка
-  проходит через durable idempotent outbox без передачи модели raw `chat_id/topic_id`;
+  В активном owner-turn агент получает allowlist `external_message.destinations`, а затем
+  может отправить произвольный текст или до десяти safe-файлов только в одну обязательную
+  разрешённую пару `(chatId, topicId)`. Привязка и удаление пары также доступны тем же
+  инструментом только по явной просьбе owner. Host повторно проверяет owner,
+  Project/Workspace и точный route; outbox и idempotency остаются внутренними гарантиями,
+  а не параметрами пользовательского контракта;
 - Для scheduled dry-run или live-run агент разрешает указанное owner название обнаруженного топика
   и сохраняет его numeric IDs в расписании. Если название неизвестно или неоднозначно,
   owner упоминает бота в нужном топике сообщением «отчёты сюда». Доставка регистрирует
@@ -144,13 +146,16 @@ Team Space: создаётся при подключении командног�
   `animation-NN.gif|mp4` или `voice-NN.ogg|mp3|m4a`. Каждый файл проходит проверку имени,
   regular-file, MIME и размера и отправляется нативным Telegram-методом соответствующего
   типа. Суффикс `preview` разрешён вместо `NN`, а `NN` ограничен диапазоном `01..50`.
-  Новое расписание маршрутизирует весь batch в сохранённый топик без `portalKey` и задаёт
+  Новое расписание маршрутизирует весь batch в сохранённый топик и задаёт
   `deliveryCondition`: `success`, `failure` или `always`. Manifest, созданный до ненулевого
   exit, сохраняется и может быть отправлен в режимах `failure`/`always`; без явного
   `portal-messages.json` отправки нет. Это отдельный declarative runner-механизм; произвольная
-  owner-requested отправка в постоянный portal выполняется через `project_portal.send` и не
-  зависит от типа run или exit code. Portal routes создаются в Admin → Telegram выбором роли
-  `Portal` и уникального в пределах Project/Workspace `portalKey`.
+  owner-requested отправка выполняется через `external_message.send` и не зависит от типа
+  run или exit code. Для любого manual или scheduled action можно отдельно задать точные
+  lifecycle-сообщения `started`, `succeeded`, `failed` и `finished`; поэтому уведомление при
+  exit 1 либо тишина при ошибке задаются явно, а не выводятся из exit code. Exact routes
+  создаются в Admin → Telegram выбором роли `Внешний` либо в owner-turn через
+  `external_message.bind`.
 
 ## Требования
 
@@ -591,6 +596,12 @@ result-context: текст отчёта, bounded-артефакт и связа�
 к репозиторию или Project memory. По явной команде owner агент также может выбрать точный
 `resultId` и идемпотентно отправить в его discussion текст или безопасный workspace-файл;
 destination и reply target проверяются host-ом, а не задаются моделью.
+Независимо от manifest, `runner.start` и расписание принимают до 12 точных lifecycle-правил
+с парой `(chatId, topicId)`, событием `started|succeeded|failed|finished` и текстом. Эти
+правила работают для Build, Validate, Dry run, Live run и Provision, проходят тот же exact
+Project allowlist и durable outbox. В тексте доступны `{{jobId}}`, `{{action}}`, `{{status}}`,
+`{{error}}` и `{{revision}}`. Успех и ошибка не смешиваются: `finished` означает любой
+terminal result, а `failed` включает ненулевой exit, cancel и interruption.
 Project-specific cron/systemd timers намеренно не импортируются по
 догадке: перед включением эквивалентного agent-managed расписания оператор должен
 отдельно отключить legacy timer, чтобы не получить двойной запуск.

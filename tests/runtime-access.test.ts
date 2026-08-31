@@ -327,7 +327,7 @@ test("owners control projects while group participants get read-only Q&A", async
     const observerChatMessagesBefore = replyChats.filter((chatId) => chatId === -300).length;
     await send(1, "/bind_observer_topic -300 46 alpha repo", 1, "private");
     assert.equal(runtime.state.byTopic(-300, 46), null);
-    assert.match(replies.at(-1) ?? "", /Admin → Telegram.*Portal.*portalKey/);
+    assert.match(replies.at(-1) ?? "", /Admin → Telegram.*Внешний.*chatId\/topicId/);
     assert.equal(
       replyChats.filter((chatId) => chatId === -300).length,
       observerChatMessagesBefore,
@@ -337,7 +337,7 @@ test("owners control projects while group participants get read-only Q&A", async
     });
     assert.equal(runtime.state.topicConversation(-300, 46)?.role, "observer");
     await send(42, "/publish Исправление авторизации принято и опубликовано.", -100, "supergroup", 5);
-    assert.match(replies.at(-1) ?? "", /project_portal portalKey/);
+    assert.match(replies.at(-1) ?? "", /external_message \(chatId, topicId\)/);
     assert.equal(
       replyChats.filter((chatId) => chatId === -300).length,
       observerChatMessagesBefore,
@@ -782,7 +782,7 @@ test("owners control projects while group participants get read-only Q&A", async
         "service",
         "repository",
         "project_context",
-        "project_portal",
+        "external_message",
         "project_history",
         "project_memory",
       ],
@@ -790,7 +790,7 @@ test("owners control projects while group participants get read-only Q&A", async
     assert.equal(typeof writeOptions.dynamicToolHandler, "function");
     assert.equal(
       runtime.state.get(bound.id).codexThreadCapability,
-      "runner-repository-result-context-portal-history-memory-v9",
+      "runner-repository-result-context-external-message-memory-v10",
     );
     assert.equal(runtime.state.get(bound.id).previousCodexThreadId, "thr-legacy");
 

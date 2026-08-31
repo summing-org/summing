@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  executeProjectPortalTool,
-  PROJECT_PORTAL_DYNAMIC_TOOLS,
-  type ProjectPortalToolContext,
+  executeExternalMessageTool,
+  EXTERNAL_MESSAGE_DYNAMIC_TOOLS,
+  type ExternalMessageToolContext,
 } from "../src/project-portal-tools.js";
 
-const context: ProjectPortalToolContext = {
+const context: Omit<ExternalMessageToolContext, "callId"> = {
   projectId: "demo",
   workspaceId: "repo",
   conversationId: "tg-00000000000000000000",
@@ -14,12 +14,13 @@ const context: ProjectPortalToolContext = {
   turnId: "turn-current",
 };
 
-test("project portal send requires one explicit logical destination", async () => {
+test("external message send requires one exact destination and hides idempotency", async () => {
   const calls: unknown[] = [];
   const host = {
-    projectPortalTool: async (
-      receivedContext: ProjectPortalToolContext,
-      operation: "sources" | "history" | "send" | "materialize_attachment",
+    externalMessageTool: async (
+      receivedContext: ExternalMessageToolContext,
+      operation: "destinations" | "bind" | "unbind" | "history" | "send" |
+        "materialize_attachment",
       input: unknown,
     ) => {
       calls.push({ receivedContext, operation, input });
@@ -27,41 +28,72 @@ test("project portal send requires one explicit logical destination", async () =
     },
   };
   assert.deepEqual(
-    PROJECT_PORTAL_DYNAMIC_TOOLS[0]?.tools
+    EXTERNAL_MESSAGE_DYNAMIC_TOOLS[0]?.tools
       .find((tool) => tool.name === "send")?.inputSchema.required,
-    ["portalKey"],
+    ["chatId", "topicId"],
+  );
+  assert.equal(
+    Object.hasOwn(
+      EXTERNAL_MESSAGE_DYNAMIC_TOOLS[0]?.tools
+        .find((tool) => tool.name === "send")?.inputSchema.properties ?? {},
+      "idempotencyKey",
+    ),
+    false,
   );
   await assert.rejects(
-    executeProjectPortalTool(host, context, {
+    executeExternalMessageTool(host, context, {
       threadId: "thread",
       turnId: context.turnId,
       callId: "call-missing-route",
-      namespace: "project_portal",
+      namespace: "external_message",
       tool: "send",
       arguments: { text: "Release completed" },
     }),
-    /requires portalKey/,
+    /chatId/,
   );
-  const result = await executeProjectPortalTool(host, context, {
+  const result = await executeExternalMessageTool(host, context, {
     threadId: "thread",
     turnId: context.turnId,
     callId: "call-release",
-    namespace: "project_portal",
+    namespace: "external_message",
     tool: "send",
     arguments: {
-      portalKey: "releases",
+      chatId: -100500,
+      topicId: 17,
       text: "Release completed",
-      idempotencyKey: "release-42",
     },
   });
   assert.equal(result.success, true);
   assert.deepEqual(calls, [{
-    receivedContext: context,
+    receivedContext: { ...context, callId: "call-release" },
     operation: "send",
     input: {
-      portalKey: "releases",
+      chatId: -100500,
+      topicId: 17,
       text: "Release completed",
-      idempotencyKey: "release-42",
     },
   }]);
+});
+
+test("external message history accepts either all routes or one complete exact route", async () => {
+  const host = { externalMessageTool: async () => ({ ok: true }) };
+  await executeExternalMessageTool(host, context, {
+    threadId: "thread",
+    turnId: context.turnId,
+    callId: "history-all",
+    namespace: "external_message",
+    tool: "history",
+    arguments: {},
+  });
+  await assert.rejects(
+    executeExternalMessageTool(host, context, {
+      threadId: "thread",
+      turnId: context.turnId,
+      callId: "history-half",
+      namespace: "external_message",
+      tool: "history",
+      arguments: { chatId: -100500 },
+    }),
+    /chatId and topicId together/,
+  );
 });

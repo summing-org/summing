@@ -12,11 +12,12 @@ test("administrator Mini App separates projects, topic bindings and global setti
   assert.match(ADMIN_HTML, /<button id="bindingsTab"[^>]*>Telegram<\/button>/);
   assert.match(ADMIN_HTML, /<h1>Telegram<\/h1>/);
   assert.doesNotMatch(ADMIN_HTML, /Привязки топиков/);
-  assert.match(ADMIN_HTML, /один внутренний рабочий топик/);
-  assert.match(ADMIN_HTML, /любое число внешних portal-топиков/);
+  assert.match(ADMIN_HTML, /один рабочий топик/);
+  assert.match(ADMIN_HTML, /любое число внешних направлений/);
+  assert.match(ADMIN_HTML, /точная пара chatId\/topicId/);
   assert.doesNotMatch(ADMIN_HTML, /read-only топиков-наблюдателей/);
   assert.match(ADMIN_HTML, /Доставка результатов/);
-  assert.match(ADMIN_JS, /value='portal'/);
+  assert.match(ADMIN_JS, /value='external'/);
   assert.match(ADMIN_HTML, /Настройки SUMMING/);
   assert.match(ADMIN_HTML, /data-admin-section="projects"/);
   assert.match(ADMIN_HTML, /data-admin-section="bindings"/);
@@ -60,7 +61,7 @@ test("administrator Mini App separates projects, topic bindings and global setti
   assert.match(ADMIN_JS, /Добавить owner/);
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/bindings/);
   assert.match(ADMIN_JS, /data-role/);
-  assert.match(ADMIN_JS, /data-portal-key/);
+  assert.doesNotMatch(ADMIN_JS, /data-portal-key/);
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/users/);
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/deployment/);
   assert.match(ADMIN_JS, /\/api\/viewer\/admin\/deployment\/refresh/);
@@ -94,9 +95,9 @@ test("administrator Mini App separates projects, topic bindings and global setti
   assert.match(ADMIN_JS, /deployment-attempt-details/);
   assert.match(ADMIN_JS, /Telegram ID:/);
   assert.match(ADMIN_JS, /Наблюдаемые пользователи топика/);
-  assert.match(ADMIN_JS, /portalKey/);
+  assert.doesNotMatch(ADMIN_JS, /portalKey/);
   assert.match(ADMIN_JS, /method:"DELETE"/);
-  assert.match(ADMIN_JS, /Сам Telegram-топик останется в списке/);
+  assert.match(ADMIN_JS, /История Team Space сохранится/);
   assert.match(ADMIN_CSS, /@media\(max-width:520px\)/);
   assert.match(ADMIN_CSS, /--accent:#ff2e6b/);
   assert.match(ADMIN_CSS, /\.deployment-card/);

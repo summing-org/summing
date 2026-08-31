@@ -1169,38 +1169,39 @@ Project/Workspace, customer channel и reply target, сам разрешает `
 destination или сделать fan-out. `/publish`, неявный fan-out и постоянный внешний Q&A
 не используются.
 
-### 9.3. Постоянные многотопиковые Project portals
+### 9.3. Постоянные точные внешние Telegram destinations
 
-Когда внешний topic нужен не только для discussion одного результата, администратор
-привязывает его в Admin → Telegram с ролью `Portal` и стабильным логическим ключом,
-например `releases`, `support` или `content`. Один Project/Workspace имеет один primary
-topic и любое число portal-топиков; `portalKey` уникален в этом scope. Raw
-`chat_id/topic_id` модели не передаются.
+Когда внешний topic нужен не только для discussion одного результата, owner или
+администратор привязывает к Project точную пару `(chatId, topicId)`. Один
+Project/Workspace имеет один primary topic и любое число внешних destinations в одной
+или нескольких группах; одна и та же пара при необходимости может быть разрешена
+нескольким Project. Логических alias/ключей поверх Telegram-адреса нет.
 
 ```text
 Owner turn в primary Project topic
-  ├── project_portal.sources → allowlist portalKey
-  ├── project_portal.history(portalKey?) → consent-visible untrusted evidence
-  └── project_portal.send(exact portalKey, text/files, idempotencyKey?)
+  ├── external_message.destinations → exact allowlist
+  ├── external_message.bind/unbind(chatId, topicId) → только по явной просьбе owner
+  ├── external_message.history(chatId?, topicId?) → consent-visible untrusted evidence
+  └── external_message.send(chatId, topicId, text/files)
         └── durable outbox → exact bound Telegram chat/topic
 ```
 
 `send` доступен только во время активного write-turn авторизованного owner и требует
-явный `portalKey`; route повторно проверяется против Project/Workspace. Reply target
+явные `chatId` и `topicId`; их пара повторно проверяется против Project/Workspace. Reply target
 не нужен: без `replyToEventId` сообщение отправляется непосредственно в topic. До десяти
 safe workspace-файлов или ранее принятых portal-вложений проходят тот же bounded
-transport. Повтор с тем же idempotency key и тем же payload не создаёт дубль; изменение
-payload при сохранённом ключе отклоняется.
+transport. Idempotency автоматически выводится host-ом из turn/tool-call и payload: модель
+и пользователь не создают и не обслуживают ключи.
 
 Все доступные боту сообщения в portal-топике фиксируются как Team Source evidence без
 `reply` и `@mention`. Consent-visible text и attachment metadata читаются через
-`project_portal.history`; входящие файлы сохраняются зашифрованно и материализуются в
-workspace только в активном owner-turn. Portal evidence считается недоверенным: оно не
+`external_message.history`; входящие файлы сохраняются зашифрованно один раз на Team Source
+и материализуются в workspace только в активном owner-turn. External evidence считается недоверенным: оно не
 становится intent, approval или Project instruction. Сам portal-topic не запускает
 editor/read-only Codex processor и не отвечает автоматически даже на mention/reply.
 
 Это позволяет owner, например, попросить «после успешного deploy отправь changelog в
-`releases`»: агент проверяет deploy, формирует текст и вызывает portal send в том же turn.
+chat -100… / topic 17»: агент проверяет deploy, формирует текст и вызывает exact send в том же turn.
 Отдельный post-deploy hook и новый release приложения для каждого такого кейса не нужны.
 Для строгого обсуждения одного опубликованного результата по-прежнему используется
 `project_context.send(resultId)`, а для scheduled runner batch — описанный ниже
@@ -1208,9 +1209,9 @@ editor/read-only Codex processor и не отвечает автоматичес
 
 Runner принимает одинаковый декларативный bounded `portal-messages.json` для dry-run и
 live-run, независимо от итогового exit-кода. В новом расписании весь batch идёт в
-сохранённый exact destination, когда terminal status совпадает с `deliveryCondition`,
-поэтому `portalKey` игнорируется. Он читается только для расписаний без destination,
-мигрированных со старой версии:
+сохранённый exact destination, когда terminal status совпадает с `deliveryCondition`.
+`portalKey` внутри manifest читается только старым compatibility-маршрутом расписаний,
+созданных без exact destination:
 
 ```json
 {
@@ -1235,9 +1236,18 @@ job-scoped артефакты `photo-NN.jpg|jpeg|png`, `audio-NN.mp3|m4a`, `vide
 regular-file и размер до фиксации batch, а runtime передаёт бинарные байты через
 durable outbox в соответствующий нативный метод Telegram.
 
+Для любых manual и scheduled actions — `build`, `validate`, `dry-run`, `run`,
+`provision` — существует отдельный безопасный lifecycle-слой. Каждое правило содержит
+точные `chatId/topicId`, событие `started`, `succeeded`, `failed` или `finished` и bounded
+text с шаблонами `{{jobId}}`, `{{action}}`, `{{status}}`, `{{error}}`, `{{revision}}`.
+Пара обязана уже находиться в exact allowlist Project. Поэтому ненулевой exit можно явно
+репортить через `failed`/`finished` либо полностью оставить без внешнего сообщения; outbox
+и idempotency применяются автоматически. Этот слой не извлекает произвольные артефакты
+из Build/Validate/Provision.
+
 Runtime копирует payload в filesystem outbox до Bot API call. Новое расписание использует
-прямой Telegram `chat_id/topic_id`; portal binding остаётся доступен manual batch и
-мигрированным расписаниям. Запись содержит
+прямой Telegram `chat_id/topic_id`; старые portal bindings остаются только compatibility
+маршрутом для manual batch и мигрированных расписаний. Запись содержит
 idempotency key, SHA-256, route, actor, attempts, origin Conversation и ограниченный
 context отчёта для распознавания прямого reply. Временная
 ошибка повторяется экспоненциально не более пяти раз; постоянная или исчерпавшая
@@ -1336,8 +1346,8 @@ SQLite хранит:
   primary на Project/Workspace;
 - customer channels без Project binding, result publications, discussion-message
   correlation и Project feedback;
-- scoped portal-маршруты `project/workspace/portalKey → exact destination` для произвольных
-  owner-requested сообщений; default route также сохраняет совместимость старых расписаний;
+- many-to-many exact routes `project/workspace ↔ Telegram chatId/topicId` для произвольных
+  owner-requested и lifecycle-сообщений; legacy portal routes сохраняются только для миграции;
 - editor и read-only Codex thread id;
 - активный turn и Telegram stream message id;
 - pending steer/follow-up с `access_mode`, `response_mode`, Telegram user id и
@@ -1356,12 +1366,13 @@ SQLite хранит:
 
 | Таблица | Содержимое |
 |---|---|
-| `conversations` | Active primary binding и внешние read-only portal bindings; только primary имеет editor/read-only threads, active turn, stream message и worktree path. |
+| `conversations` | Active primary binding и legacy external-readonly bindings; только primary имеет editor/read-only threads, active turn, stream message и worktree path. |
 | `customer_channels` | Внешние Telegram destinations, зарегистрированные доставкой result или portal route. |
 | `result_publications` | Связь одного доставленного result с Project/Workspace/job/schedule/outbox и Telegram message. |
 | `result_discussion_messages` | Telegram reply-chain одного result: publication, customer и agent messages. |
 | `project_feedback` | Customer comments, привязанные к resultId, со статусом promotion lifecycle. |
 | `project_portal_bindings` | Scoped route `Project/Workspace/portalKey → exact Telegram chat/topic`, включая default для совместимости runner. |
+| `project_topic_destinations` | Many-to-many exact allowlist `Project/Workspace ↔ Telegram chatId/topicId`; никаких логических aliases. |
 | `pending_inputs` | Очередь, access/response mode, Telegram user id, attachment JSON и состояние обработки. |
 | `runs` | Access/response mode, prompt, response, status, error и время выполнения. |
 | `runtime_state` | Сейчас только Telegram update offset. |

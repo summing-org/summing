@@ -243,6 +243,61 @@ test("Project portals resolve stable logical keys and exactly one default", () =
   }
 });
 
+test("exact Telegram destinations support multiple groups and many-to-many Project scopes", () => {
+  const { root, store } = tempStore();
+  try {
+    const customer = store.bindProjectTopicDestination({
+      projectId: "seo-dashboard",
+      workspaceId: "repo",
+      chatId: -100500,
+      topicId: 9,
+      title: "Customer releases",
+      createdBy: 1,
+    });
+    store.bindProjectTopicDestination({
+      projectId: "seo-dashboard",
+      workspaceId: "repo",
+      chatId: -100900,
+      topicId: 0,
+      title: "Owner statistics",
+      createdBy: 1,
+    });
+    store.bindProjectTopicDestination({
+      projectId: "other-project",
+      workspaceId: "repo",
+      chatId: -100500,
+      topicId: 9,
+      title: "Shared customer topic",
+      createdBy: 2,
+    });
+    assert.deepEqual(
+      store.projectTopicDestinations("seo-dashboard", "repo")
+        .map((destination) => [destination.chatId, destination.topicId]),
+      [[-100900, 0], [-100500, 9]],
+    );
+    assert.deepEqual(
+      store.projectTopicDestinationsForTopic(-100500, 9)
+        .map((destination) => destination.projectId).sort(),
+      ["other-project", "seo-dashboard"],
+    );
+    assert.equal(
+      store.projectTopicDestination("seo-dashboard", "repo", -100500, 9)?.id,
+      customer.id,
+    );
+    assert.equal(
+      store.unbindProjectTopicDestination("seo-dashboard", "repo", -100500, 9)?.id,
+      customer.id,
+    );
+    assert.equal(
+      store.projectTopicDestination("other-project", "repo", -100500, 9)?.projectId,
+      "other-project",
+    );
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("one Project workspace has one primary topic and any number of portals", () => {
   const { root, store } = tempStore();
   try {

@@ -7,12 +7,34 @@ import type {
 import {
   RunnerControlError,
   type RunnerControlContext,
+  type RunnerLifecycleNotification,
   type RunnerControlPlane,
   type SchedulePlanInput,
 } from "./runner-control.js";
 import type { RunnerAction, RunnerServiceAction } from "./project-runner-client.js";
 
 const OBJECT_SCHEMA = { type: "object", additionalProperties: false };
+const NOTIFICATIONS_SCHEMA = {
+  type: "array",
+  maxItems: 12,
+  items: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      chatId: { type: "integer" },
+      topicId: { type: "integer", minimum: 0 },
+      when: { type: "string", enum: ["started", "succeeded", "failed", "finished"] },
+      text: {
+        type: "string",
+        minLength: 1,
+        maxLength: 3500,
+        description:
+          "Message text. Supports {{jobId}}, {{action}}, {{status}}, {{error}}, and {{revision}}.",
+      },
+    },
+    required: ["chatId", "topicId", "when", "text"],
+  },
+};
 
 export const RUNNER_DYNAMIC_TOOLS: DynamicToolNamespaceSpec[] = [{
   type: "namespace",
@@ -39,7 +61,9 @@ export const RUNNER_DYNAMIC_TOOLS: DynamicToolNamespaceSpec[] = [{
         "clean committed worktree. Provision also requires a clean commit and an exact profile " +
         "declared in .summing/provisioning.json; it may rotate encrypted credentials and must " +
         "never be inferred from a normal build, validation, or dry-run request. Repeated delivery " +
-        "of the same tool call returns the already accepted job.",
+        "of the same tool call returns the already accepted job. Optional exact lifecycle " +
+        "notifications can report start, success, failure, or every finish independently of " +
+        "the job type and exit code.",
       inputSchema: {
         ...OBJECT_SCHEMA,
         properties: {
@@ -52,6 +76,12 @@ export const RUNNER_DYNAMIC_TOOLS: DynamicToolNamespaceSpec[] = [{
             type: "string",
             pattern: "^[a-z0-9][a-z0-9._-]{0,63}$",
             description: "Exact provisioning profile; required only for provision action.",
+          },
+          notifications: {
+            ...NOTIFICATIONS_SCHEMA,
+            description:
+              "Optional exact external messages for this job lifecycle. Each (chatId, topicId) " +
+              "must already be bound to the active Project.",
           },
         },
         required: ["action"],
@@ -107,7 +137,8 @@ export const RUNNER_DYNAMIC_TOOLS: DynamicToolNamespaceSpec[] = [{
         "topic name in deliveryTopic; the host resolves and freezes its Telegram IDs. Use " +
         "deliveryCondition to choose success-only, failure-only, or every terminal result. If " +
         "resolution asks the owner to mark a topic, retry with deliveryTopic '@marked' after the " +
-        "owner confirms the mark.",
+        "owner confirms the mark. Separately, notifications can send bounded text to already " +
+        "bound exact destinations on started, succeeded, failed, or finished.",
       inputSchema: {
         ...OBJECT_SCHEMA,
         properties: {
@@ -144,6 +175,15 @@ export const RUNNER_DYNAMIC_TOOLS: DynamicToolNamespaceSpec[] = [{
           clearDeliveryTopic: {
             type: "boolean",
             description: "Remove automatic report delivery from this schedule.",
+          },
+          notifications: {
+            ...NOTIFICATIONS_SCHEMA,
+            description:
+              "Exact external messages queued at selected lifecycle events for every scheduled run.",
+          },
+          clearNotifications: {
+            type: "boolean",
+            description: "Remove all lifecycle messages from this schedule.",
           },
         },
         required: ["operation"],
@@ -266,7 +306,9 @@ export const RUNNER_DYNAMIC_TOOLS: DynamicToolNamespaceSpec[] = [{
         "Activate one exact completed non-build Release as a named long-running service. Use " +
         "only on the user's explicit deployment request. The Release must declare the service " +
         "in .summing/services.json. Deployment has a bounded startup/health check, but the " +
-        "resulting service has no job execution timeout.",
+        "resulting service has no job execution timeout. If the owner also requested a changelog " +
+        "or other external message after success, call external_message.send only after this " +
+        "tool returns the healthy deployed service.",
       inputSchema: {
         ...OBJECT_SCHEMA,
         properties: {
@@ -376,6 +418,9 @@ export async function executeRunnerTool(
         typeof args.provisionId === "string" && args.provisionId.trim()
           ? args.provisionId.trim()
           : undefined,
+        Array.isArray(args.notifications)
+          ? args.notifications as unknown as RunnerLifecycleNotification[]
+          : [],
       ));
     case "cancel":
       return result(await control.cancelJob(context, requiredString(args, "jobId")));

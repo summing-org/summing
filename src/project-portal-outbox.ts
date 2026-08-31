@@ -64,6 +64,8 @@ export type ProjectPortalOutboxContext = {
 } | {
   kind: "result-reply";
   resultId: string;
+} | {
+  kind: "external-message";
 };
 
 export interface ProjectPortalOutboxRecord {

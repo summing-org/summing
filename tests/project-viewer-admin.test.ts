@@ -368,7 +368,7 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
     assert.deepEqual(projects.owners("client"), [77]);
     assert.equal(projects.canAccess(42, "client"), false);
 
-    const portalBinding = await fetch(`${endpoint}/api/viewer/admin/bindings`, {
+    const externalBinding = await fetch(`${endpoint}/api/viewer/admin/bindings`, {
       method: "POST",
       headers: { ...auth(1), "content-type": "application/json" },
       body: JSON.stringify({
@@ -376,17 +376,15 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
         topicId: 44,
         projectId: "client",
         workspaceId: "backend",
-        role: "portal",
-        portalKey: "releases",
+        role: "external",
       }),
     });
-    assert.equal(portalBinding.status, 200, await portalBinding.text());
+    assert.equal(externalBinding.status, 200, await externalBinding.text());
     assert.equal(state.byTopic(-300, 44), null);
-    const portalConversation = state.topicConversation(-300, 44)!;
-    assert.equal(portalConversation.role, "observer");
+    assert.equal(state.topicConversation(-300, 44), null);
     assert.equal(
-      state.projectPortal("client", "backend", portalConversation.id)?.portalKey,
-      "releases",
+      state.projectTopicDestination("client", "backend", -300, 44)?.topicId,
+      44,
     );
     assert.deepEqual(bindingNotifications, []);
 
@@ -468,17 +466,16 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
           binding: {
             projectId: string;
             workspaceId: string;
-            role: "primary" | "portal";
-            portalKey: string | null;
-            default: boolean;
+            role: "primary";
             busy: boolean;
           } | null;
+          destinations: Array<{ projectId: string; workspaceId: string }>;
         }>;
       }>;
     };
     assert.deepEqual(
       finalPayload.counts,
-      { projects: 2, topics: 1, bindings: 1, users: 2 },
+      { projects: 2, topics: 1, bindings: 2, users: 2 },
     );
     assert.deepEqual(
       finalPayload.projects.find((project) => project.id === "client"),
@@ -491,7 +488,7 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
         selfChange: false,
         defaultWorkspaceId: "backend",
         workspaces: [{ id: "backend" }],
-        bindingCount: 0,
+        bindingCount: 1,
       },
     );
     assert.deepEqual(finalPayload.chats[0]?.topics[0]?.binding, {
@@ -499,10 +496,15 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
       projectId: "summing",
       workspaceId: "repo",
       role: "primary",
-      portalKey: null,
-      default: false,
       busy: false,
     });
+    assert.deepEqual(finalPayload.chats[0]?.topics[0]?.destinations, [{
+      projectId: "client",
+      workspaceId: "backend",
+      chatId: -300,
+      topicId: 44,
+      title: "Backend",
+    }]);
 
     const deniedUnbind = await fetch(`${endpoint}/api/viewer/admin/bindings`, {
       method: "DELETE",
@@ -539,6 +541,20 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
     });
     assert.equal(repeatedUnbind.status, 200);
     assert.deepEqual(await repeatedUnbind.json(), { conversation: null });
+
+    const externalUnbind = await fetch(`${endpoint}/api/viewer/admin/bindings`, {
+      method: "DELETE",
+      headers: { ...auth(1), "content-type": "application/json" },
+      body: JSON.stringify({
+        chatId: -300,
+        topicId: 44,
+        projectId: "client",
+        workspaceId: "backend",
+        role: "external",
+      }),
+    });
+    assert.equal(externalUnbind.status, 200);
+    assert.equal(state.projectTopicDestination("client", "backend", -300, 44), null);
 
     const afterUnbind = await fetch(`${endpoint}/api/viewer/admin`, { headers: auth(1) });
     const afterUnbindPayload = await afterUnbind.json() as {

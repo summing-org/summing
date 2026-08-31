@@ -45,6 +45,13 @@ test("live runner messages deliver every native media kind through the durable P
     portalKey: "main",
     isDefault: true,
   });
+  runtime.state.bindProjectTopicDestination({
+    projectId: "demo",
+    workspaceId: "repo",
+    chatId: -100500,
+    topicId: 9,
+    createdBy: 1,
+  });
   runtime.state.bind(-100501, 10, "demo", "repo", "observer", {
     portalKey: "reports",
     isDefault: false,
@@ -216,6 +223,7 @@ test("scheduled reports deliver to an observed topic without an observer binding
       label: "«Customer» / «Reports»",
     },
     deliveryCondition: "success",
+    notifications: [],
     originConversationId: runtime.state.byTopic(1, 0)!.id,
     createdBy: 1,
     updatedBy: 1,
@@ -305,6 +313,16 @@ test("portal history reports hidden comments without exposing their author or co
     portalKey: "main",
     isDefault: true,
   });
+  (runtime as unknown as { activeByThread: Map<string, unknown> }).activeByThread.set(
+    "thread-history",
+    {
+      conversation: internal,
+      prepared: { path: root, readableRoot: root, gitMetadataRoots: [], projectMemorySnapshot: "" },
+      access: "write",
+      actorUserId: 1,
+      turnId: "turn-history",
+    },
+  );
   runtime.state.recordTeamEvent({
     provider: "telegram",
     externalSpaceId: "-100500",
@@ -348,16 +366,17 @@ test("portal history reports hidden comments without exposing their author or co
     administratorUserId: 1,
   });
   try {
-    const history = await runtime.projectPortalTool(
+    const history = await runtime.externalMessageTool(
       {
         projectId: "demo",
         workspaceId: "repo",
         conversationId: internal.id,
         actorUserId: 1,
         turnId: "turn-history",
+        callId: "history-main",
       },
       "history",
-      { portalKey: "main" },
+      { chatId: -100500, topicId: 9 },
     ) as {
       events: Array<{ text: string }>;
       hiddenByConsent: { commentCount: number; latestOccurredAt: string | null };
@@ -609,11 +628,25 @@ test("an authorized owner can idempotently send only into one exact result discu
 test("an authorized Project agent can forward an incoming workspace attachment", async () => {
   const { root, repository, runtime } = fixture();
   const internal = runtime.state.bind(1, 0, "demo", "repo");
-  const portal = runtime.state.bind(-100500, 9, "demo", "repo", "observer", {
+  runtime.state.bind(-100500, 9, "demo", "repo", "observer", {
     portalKey: "main",
   });
   runtime.state.bind(-100501, 10, "demo", "repo", "observer", {
     portalKey: "releases",
+  });
+  runtime.state.bindProjectTopicDestination({
+    projectId: "demo",
+    workspaceId: "repo",
+    chatId: -100500,
+    topicId: 9,
+    createdBy: 1,
+  });
+  runtime.state.bindProjectTopicDestination({
+    projectId: "demo",
+    workspaceId: "repo",
+    chatId: -100501,
+    topicId: 10,
+    createdBy: 1,
   });
   const attachmentDirectory = join(repository, ".summing-runtime", "attachments");
   mkdirSync(attachmentDirectory, { recursive: true });
@@ -667,23 +700,26 @@ test("an authorized Project agent can forward an incoming workspace attachment",
     return 247;
   };
   try {
-    const result = await runtime.projectPortalTool(
+    const result = await runtime.externalMessageTool(
       {
         projectId: "demo",
         workspaceId: "repo",
         conversationId: internal.id,
         actorUserId: 1,
         turnId: "turn-forward",
+        callId: "send-brief",
       },
       "send",
       {
-        portalKey: "main",
+        chatId: -100500,
+        topicId: 9,
         text: "Бриф от исполнителя",
-        filePath: ".summing-runtime/attachments/42-7-customer-brief.pdf",
+        filePaths: [".summing-runtime/attachments/42-7-customer-brief.pdf"],
       },
     ) as Record<string, unknown>;
     assert.match(String(result.outboxId), /^[a-f0-9]{64}$/);
-    assert.equal(result.portalId, portal.id);
+    assert.equal(result.chatId, -100500);
+    assert.equal(result.topicId, 9);
     assert.equal(result.status, "sent");
     assert.equal(result.telegramMessageId, 246);
     assert.deepEqual(result.attachment, {
@@ -726,10 +762,9 @@ test("an authorized Project agent can forward an incoming workspace attachment",
       proof: "group-level test fixture consent",
     });
     const storedArtifact = runtime.projectPortalArtifacts.store({
-      projectId: "demo",
-      workspaceId: "repo",
-      portalId: portal.id,
-      portalKey: "main",
+      sourceId: customerEvent.sourceId,
+      chatId: -100500,
+      topicId: 9,
       eventId: customerEvent.id,
       telegramMessageId: 78061,
       providerFileId: "telegram-notes",
@@ -743,30 +778,33 @@ test("an authorized Project agent can forward an incoming workspace attachment",
       artifactId: storedArtifact.id,
       sha256: storedArtifact.sha256,
     });
-    const history = await runtime.projectPortalTool(
+    const history = await runtime.externalMessageTool(
       {
         projectId: "demo",
         workspaceId: "repo",
         conversationId: internal.id,
         actorUserId: 1,
         turnId: "turn-forward",
+        callId: "history-attachments",
       },
       "history",
-      { portalKey: "main", attachmentsOnly: true },
+      { chatId: -100500, topicId: 9, attachmentsOnly: true },
     ) as {
-      events: Array<{ portalKey: string; attachments: Array<{ artifactId: string }> }>;
+      events: Array<{ chatId: number; topicId: number; attachments: Array<{ artifactId: string }> }>;
       hiddenByConsent: { commentCount: number; latestOccurredAt: string | null };
     };
-    assert.equal(history.events[0]?.portalKey, "main");
+    assert.equal(history.events[0]?.chatId, -100500);
+    assert.equal(history.events[0]?.topicId, 9);
     assert.equal(history.events[0]?.attachments[0]?.artifactId, storedArtifact.id);
     assert.deepEqual(history.hiddenByConsent, { commentCount: 0, latestOccurredAt: null });
-    const materialized = await runtime.projectPortalTool(
+    const materialized = await runtime.externalMessageTool(
       {
         projectId: "demo",
         workspaceId: "repo",
         conversationId: internal.id,
         actorUserId: 1,
         turnId: "turn-forward",
+        callId: "materialize-notes",
       },
       "materialize_attachment",
       { attachmentId: storedArtifact.id },
@@ -774,17 +812,19 @@ test("an authorized Project agent can forward an incoming workspace attachment",
     const materializedPath = join(repository, materialized.relativePath);
     assert.equal(existsSync(materializedPath), true);
     assert.equal(readFileSync(materializedPath, "utf8"), "customer notes");
-    const textResult = await runtime.projectPortalTool(
+    const textResult = await runtime.externalMessageTool(
       {
         projectId: "demo",
         workspaceId: "repo",
         conversationId: internal.id,
         actorUserId: 1,
         turnId: "turn-forward",
+        callId: "reply-customer",
       },
       "send",
       {
-        portalKey: "main",
+        chatId: -100500,
+        topicId: 9,
         text: "Принято, итоговый вариант приложим сегодня.",
         replyToEventId: customerEvent.id,
       },
@@ -797,42 +837,50 @@ test("an authorized Project agent can forward an incoming workspace attachment",
       topicId: 9,
       replyTo: 78061,
     }]);
-    const forwardedArtifact = await runtime.projectPortalTool(
+    const forwardedArtifact = await runtime.externalMessageTool(
       {
         projectId: "demo",
         workspaceId: "repo",
         conversationId: internal.id,
         actorUserId: 1,
         turnId: "turn-forward",
+        callId: "forward-notes",
       },
       "send",
-      { portalKey: "main", attachmentIds: [storedArtifact.id], text: "Файл заказчика" },
+      {
+        chatId: -100500,
+        topicId: 9,
+        attachmentIds: [storedArtifact.id],
+        text: "Файл заказчика",
+      },
     ) as Record<string, unknown>;
     assert.equal(forwardedArtifact.status, "sent");
     assert.equal(deliveries[1]?.data, "customer notes");
     const releaseInput = {
-      portalKey: "releases",
+      chatId: -100501,
+      topicId: 10,
       text: "Версия 2.4 успешно опубликована.",
-      idempotencyKey: "release-2.4",
     };
-    const release = await runtime.projectPortalTool(
+    const release = await runtime.externalMessageTool(
       {
         projectId: "demo",
         workspaceId: "repo",
         conversationId: internal.id,
         actorUserId: 1,
         turnId: "turn-forward",
+        callId: "release-2.4",
       },
       "send",
       releaseInput,
     ) as Record<string, unknown>;
-    const repeated = await runtime.projectPortalTool(
+    const repeated = await runtime.externalMessageTool(
       {
         projectId: "demo",
         workspaceId: "repo",
         conversationId: internal.id,
         actorUserId: 1,
         turnId: "turn-forward",
+        callId: "release-2.4",
       },
       "send",
       releaseInput,

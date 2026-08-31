@@ -49,6 +49,7 @@ function schedule(overrides: Partial<RunnerSchedule> = {}): RunnerSchedule {
     misfireGraceMinutes: 30,
     delivery: null,
     deliveryCondition: "success",
+    notifications: [],
     originConversationId: "conversation-1",
     createdBy: 42,
     updatedBy: 42,
@@ -742,6 +743,65 @@ test("a completed manual live-run routes portal messages to the originating acto
       authorizedUserId: 42,
     }]);
     assert.deepEqual(genericNotifications, []);
+  } finally {
+    control.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("manual lifecycle notifications can report failures, successes, or every finish independently", async () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-runner-lifecycle-watch-"));
+  const job: RunnerJob = {
+    id: "c4a0bb44-d858-40ba-93b9-5e8f0c105c85",
+    projectId: "demo",
+    workspaceId: "repo",
+    action: "run",
+    revision: "c".repeat(40),
+    status: "failed",
+    exitCode: 1,
+    error: "one publication was rejected",
+    createdAt: "2026-08-20T04:00:00.000Z",
+    completedAt: "2026-08-20T04:01:00.000Z",
+  };
+  const delivered: Array<{ when: string; text: string }> = [];
+  const runner = {
+    available: async () => true,
+    jobs: async () => [job],
+  } as unknown as ProjectRunnerClient;
+  const control = new RunnerControlPlane(
+    join(root, "control.sqlite3"),
+    {} as ProjectCatalog,
+    runner,
+    async () => {},
+    () => Date.parse("2026-08-20T04:01:15.000Z"),
+    15_000,
+    async () => false,
+    async () => false,
+    () => ({ chatId: -100500, topicId: 9, label: "unused" }),
+    () => {},
+    async (_job, notification) => {
+      delivered.push({ when: notification.when, text: notification.text });
+      return true;
+    },
+  );
+  try {
+    const { error: _error, exitCode: _exitCode, ...queuedJob } = job;
+    control.store.watchJob(
+      context("turn-lifecycle"),
+      { ...queuedJob, status: "queued" },
+      Date.parse("2026-08-20T04:00:00.000Z"),
+      [
+        { chatId: -100500, topicId: 9, when: "succeeded", text: "success" },
+        { chatId: -100500, topicId: 9, when: "failed", text: "failed {{error}}" },
+        { chatId: -100501, topicId: 0, when: "finished", text: "finished {{status}}" },
+      ],
+    );
+    await control.tick();
+    await control.tick();
+    assert.deepEqual(delivered, [
+      { when: "failed", text: "failed {{error}}" },
+      { when: "finished", text: "finished {{status}}" },
+    ]);
   } finally {
     control.close();
     rmSync(root, { recursive: true, force: true });
