@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -128,6 +128,93 @@ test("voice is transcribed through the configured provider while documents remai
     assert.match(pending[2]?.text ?? "", /Изучи приложенный файл «source\.zip»/);
     assert.equal(pending[3]?.text, "Добавь к фото смартфон");
     assert.deepEqual(pending[3]?.attachments.map((item) => item.kind), ["image"]);
+  } finally {
+    runtime.state.close();
+    await runtime.telegram.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a Project portal captures an inbound attachment without reply, mention, or agent turn", async () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-runtime-portal-attachment-"));
+  const repository = join(root, "repository");
+  mkdirSync(repository);
+  const workspace: WorkspaceConfig = { id: "repo", path: repository };
+  const project = new ProjectConfig("demo", "Demo", "repo", new Map([["repo", workspace]]));
+  const runtime = new SummingRuntime(new RuntimeConfig(
+    join(root, "data"),
+    join(root, "codex"),
+    join(root, "worktrees"),
+    "telegram-token",
+    1,
+    "codex",
+    8765,
+    2,
+    1,
+    "",
+    "medium",
+    true,
+    new Map([["demo", project]]),
+  ));
+  runtime.state.bind(-100, 5, "demo", "repo", "observer", {
+    portalKey: "releases",
+  });
+  let processorStarts = 0;
+  let replies = 0;
+  Object.assign(runtime, {
+    telegramBotId: 500,
+    telegramUsername: "summing_bot",
+    startProcessor: (): void => {
+      processorStarts += 1;
+    },
+  });
+  runtime.telegram.sendMessage = async () => {
+    replies += 1;
+    return 1;
+  };
+  const inboundPath = join(root, "release-notes.txt");
+  writeFileSync(inboundPath, "customer release notes");
+  runtime.attachments.download = async () => ({
+    kind: "document",
+    fileName: "release-notes.txt",
+    mimeType: "text/plain",
+    filePath: inboundPath,
+    size: 22,
+  });
+  const handleMessage = (
+    runtime as unknown as { handleMessage(message: TelegramObject): Promise<void> }
+  ).handleMessage.bind(runtime);
+
+  try {
+    await handleMessage({
+      message_id: 70,
+      message_thread_id: 5,
+      from: { id: 42, first_name: "Customer" },
+      chat: { id: -100, type: "supergroup", title: "Customer portal", is_forum: true },
+      document: {
+        file_id: "release-notes-file",
+        file_name: "release-notes.txt",
+        mime_type: "text/plain",
+        file_size: 22,
+      },
+    });
+    await handleMessage({
+      message_id: 71,
+      message_thread_id: 5,
+      text: "@summing_bot use these notes",
+      from: { id: 42, first_name: "Customer" },
+      chat: { id: -100, type: "supergroup", title: "Customer portal", is_forum: true },
+    });
+    assert.equal(processorStarts, 0);
+    assert.equal(replies, 0);
+    const source = runtime.state.teamSourceForProvider("telegram", "-100", "5");
+    assert.ok(source);
+    const attachment = runtime.state.recentTeamEvents(source.spaceId, source.id)
+      .flatMap((event) => event.attachments)
+      .find((item) => item.providerFileId === "release-notes-file");
+    assert.match(attachment?.artifactId ?? "", /^[0-9a-f-]{36}$/);
+    const artifact = runtime.projectPortalArtifacts.read(attachment!.artifactId!);
+    assert.equal(new TextDecoder().decode(artifact.data), "customer release notes");
   } finally {
     runtime.state.close();
     await runtime.telegram.close();

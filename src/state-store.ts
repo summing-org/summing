@@ -3436,6 +3436,7 @@ export class StateStore {
 
   observerProjectEvents(input: {
     projectId: string;
+    workspaceId?: string;
     sourceId?: string;
     query?: string;
     beforeEventId?: number;
@@ -3448,6 +3449,7 @@ export class StateStore {
   }): TeamEvent[] {
     const limit = Math.max(1, Math.min(50, Math.trunc(input.limit ?? 20)));
     const query = String(input.query ?? "").trim().toLowerCase();
+    const workspaceId = String(input.workspaceId ?? "").trim();
     const sourceId = String(input.sourceId ?? "").trim();
     const beforeEventId = Number.isSafeInteger(input.beforeEventId) && Number(input.beforeEventId) > 0
       ? Number(input.beforeEventId)
@@ -3469,6 +3471,7 @@ export class StateStore {
        AND source.external_thread_id = CAST(conversation.topic_id AS TEXT)
       JOIN team_events event ON event.source_id = source.id
       WHERE conversation.project_id = ?
+        AND (? = '' OR conversation.workspace_id = ?)
         AND conversation.binding_mode = 'external-readonly'
         AND event.synthesis_state <> 'redacted'
         AND event.id < ?
@@ -3483,6 +3486,8 @@ export class StateStore {
       LIMIT ?
     `).all(
       input.projectId,
+      workspaceId,
+      workspaceId,
       beforeEventId,
       afterEventId,
       sourceId,
@@ -4187,6 +4192,13 @@ export class StateStore {
         SELECT * FROM conversations
         WHERE chat_id = ? AND topic_id = ? AND binding_mode = 'project'
       `)
+      .get(chatId, topicId);
+    return row ? this.toConversation(row as Row) : null;
+  }
+
+  topicConversation(chatId: number, topicId: number): Conversation | null {
+    const row = this.db
+      .prepare("SELECT * FROM conversations WHERE chat_id = ? AND topic_id = ?")
       .get(chatId, topicId);
     return row ? this.toConversation(row as Row) : null;
   }

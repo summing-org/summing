@@ -741,7 +741,7 @@ export class ProjectViewerServer {
       if (!Number.isSafeInteger(topicId) || topicId < 0) {
         throw new ViewerHttpError(400, "некорректный topicId");
       }
-      const current = this.state.byTopic(chatId, topicId);
+      const current = this.state.topicConversation(chatId, topicId);
       if (!current) {
         json(response, 200, { conversation: null });
         return;
@@ -789,20 +789,23 @@ export class ProjectViewerServer {
           legacyBindingMode !== "project") {
         throw new ViewerHttpError(400, "некорректная legacy-роль топика");
       }
-      const role = body?.role === undefined
-        ? "primary"
-        : String(body.role);
-      if (role !== "primary") {
-        throw new ViewerHttpError(
-          409,
-          "observer topics упразднены; публикуйте result в customer channel без Project binding",
-        );
+      const role = body?.role === undefined ? "primary" : String(body.role);
+      if (role !== "primary" && role !== "portal") {
+        throw new ViewerHttpError(400, "роль топика должна быть primary или portal");
       }
-      const current = this.state.byTopic(chatId, topicId);
+      const portalKey = String(body?.portalKey ?? "").trim();
+      if (role === "portal" && !portalKey) {
+        throw new ViewerHttpError(400, "для portal-топика требуется portalKey");
+      }
+      const current = this.state.topicConversation(chatId, topicId);
+      const currentPortal = current?.role === "observer"
+        ? this.state.projectPortal(current.projectId, current.workspaceId, current.id)
+        : null;
       if (
         current?.projectId === project.id &&
         current.workspaceId === workspace.id &&
-        current.role === role
+        (role === "portal" ? current.role === "observer" : current.role === "primary") &&
+        (role !== "portal" || currentPortal?.portalKey === portalKey)
       ) {
         json(response, 200, { conversation: current });
         return;
@@ -825,12 +828,20 @@ export class ProjectViewerServer {
           topicId,
           project.id,
           workspace.id,
-          "primary",
+          role === "portal" ? "observer" : "primary",
+          role === "portal"
+            ? {
+                portalKey,
+                ...(typeof body?.isDefault === "boolean"
+                  ? { isDefault: body.isDefault }
+                  : {}),
+              }
+            : {},
         );
       } catch (error) {
         throw new ViewerHttpError(409, error instanceof Error ? error.message : String(error));
       }
-      this.afterTopicBound(chatId, topicId);
+      if (role === "primary") this.afterTopicBound(chatId, topicId);
       json(response, 200, { conversation });
       return;
     }
@@ -1207,8 +1218,7 @@ export class ProjectViewerServer {
   }
 
   private adminOverview(): Record<string, unknown> {
-    const conversations = this.state.listConversations()
-      .filter((conversation) => conversation.role === "primary");
+    const conversations = this.state.listConversations();
     const bindingsByTopic = new Map(
       conversations.map((conversation) => [
         `${conversation.chatId}:${conversation.topicId}`,
@@ -1247,6 +1257,13 @@ export class ProjectViewerServer {
       topics: this.state.listTelegramTopics(chat.chatId).map((topic) => {
         topics += 1;
         const conversation = bindingsByTopic.get(`${topic.chatId}:${topic.topicId}`);
+        const portal = conversation?.role === "observer"
+          ? this.state.projectPortal(
+              conversation.projectId,
+              conversation.workspaceId,
+              conversation.id,
+            )
+          : null;
         if (conversation) bindings += 1;
         return {
           topicId: topic.topicId,
@@ -1258,7 +1275,9 @@ export class ProjectViewerServer {
                 conversationId: conversation.id,
                 projectId: conversation.projectId,
                 workspaceId: conversation.workspaceId,
-                role: conversation.role,
+                role: conversation.role === "observer" ? "portal" : "primary",
+                portalKey: portal?.portalKey ?? null,
+                default: portal?.isDefault ?? false,
                 busy:
                   conversation.activeTurnId !== null ||
                   this.state.pendingAll(conversation.id).length > 0 ||

@@ -368,7 +368,7 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
     assert.deepEqual(projects.owners("client"), [77]);
     assert.equal(projects.canAccess(42, "client"), false);
 
-    const retiredObserver = await fetch(`${endpoint}/api/viewer/admin/bindings`, {
+    const portalBinding = await fetch(`${endpoint}/api/viewer/admin/bindings`, {
       method: "POST",
       headers: { ...auth(1), "content-type": "application/json" },
       body: JSON.stringify({
@@ -376,12 +376,18 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
         topicId: 44,
         projectId: "client",
         workspaceId: "backend",
-        role: "observer",
+        role: "portal",
+        portalKey: "releases",
       }),
     });
-    assert.equal(retiredObserver.status, 409);
-    assert.match(await retiredObserver.text(), /observer topics упразднены/);
+    assert.equal(portalBinding.status, 200, await portalBinding.text());
     assert.equal(state.byTopic(-300, 44), null);
+    const portalConversation = state.topicConversation(-300, 44)!;
+    assert.equal(portalConversation.role, "observer");
+    assert.equal(
+      state.projectPortal("client", "backend", portalConversation.id)?.portalKey,
+      "releases",
+    );
     assert.deepEqual(bindingNotifications, []);
 
     const bound = await fetch(`${endpoint}/api/viewer/admin/bindings`, {
@@ -462,7 +468,9 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
           binding: {
             projectId: string;
             workspaceId: string;
-            role: "primary" | "observer";
+            role: "primary" | "portal";
+            portalKey: string | null;
+            default: boolean;
             busy: boolean;
           } | null;
         }>;
@@ -491,6 +499,8 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
       projectId: "summing",
       workspaceId: "repo",
       role: "primary",
+      portalKey: null,
+      default: false,
       busy: false,
     });
 

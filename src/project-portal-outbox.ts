@@ -290,7 +290,7 @@ export class ProjectPortalOutboxStore {
       idempotencyKey: input.idempotencyKey,
       createdBy: input.createdBy,
     };
-    const payloadDigest = digest(immutablePayload);
+    const payloadDigest = digest({ ...immutablePayload, sourceId: null });
     const id = digest([
       input.projectId,
       input.workspaceId,
@@ -299,7 +299,19 @@ export class ProjectPortalOutboxStore {
     ]);
     const existing = this.get(id);
     if (existing) {
-      if (existing.payloadDigest !== payloadDigest) {
+      const samePayload = existing.projectId === immutablePayload.projectId &&
+        existing.workspaceId === immutablePayload.workspaceId &&
+        existing.portalId === immutablePayload.portalId &&
+        existing.chatId === immutablePayload.chatId &&
+        existing.topicId === immutablePayload.topicId &&
+        existing.kind === immutablePayload.kind &&
+        existing.text === immutablePayload.text &&
+        existing.replyToEventId === immutablePayload.replyToEventId &&
+        existing.replyToMessageId === immutablePayload.replyToMessageId &&
+        JSON.stringify(existing.attachment) === JSON.stringify(immutablePayload.attachment) &&
+        existing.idempotencyKey === immutablePayload.idempotencyKey &&
+        existing.createdBy === immutablePayload.createdBy;
+      if (!samePayload) {
         throw new ProjectPortalOutboxError("idempotency key was reused for another portal message");
       }
       return existing;

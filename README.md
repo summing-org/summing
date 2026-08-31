@@ -1,4 +1,4 @@
-# SUMMING 9.29
+# SUMMING 9.30
 
 SUMMING — один постоянно живущий агент с одним администратором и назначаемыми
 владельцами проектов. Он работает на Linux VPS, принимает команды из Telegram
@@ -17,10 +17,13 @@ Team Space: создаётся при подключении командног�
   └── Linked Projects
         ├── Owner: Telegram user ID
         ├── Workspace: local Git repository
-        └── Conversation: source topic
+        ├── Conversation: один внутренний рабочий topic
               ├── Editor Codex thread: administrator / Project owner
               ├── Read-only Codex thread: other group participants
               └── Active run: 0..1
+        └── Project portals: любое число внешних topics
+              ├── стабильный portalKey → exact chat/topic
+              └── consent-visible history + owner-scoped send
 ```
 
 - разные Telegram topics выполняются параллельно;
@@ -110,10 +113,15 @@ Team Space: создаётся при подключении командног�
   сообщении. Автоматические commit/merge/push, force push, Claudexor, swarm,
   произвольные MCP/marketplaces, local models и автономная Evolution отсутствуют.
 - основной топик — единственное место Project/Workspace, где owners и Codex запускают
-  изменения. Внешние Telegram-топики являются customer channels и к Project не
-  привязываются. Связь появляется только у конкретной публикации результата (`resultId`),
-  поэтому один внешний топик может принимать результаты разных проектов без смешивания
-  их Project context;
+  изменения. Внешний topic можно оставить общим customer channel для discussion одного
+  опубликованного результата (`resultId`) либо явно привязать как постоянный Project portal
+  со стабильным `portalKey`, например `releases`, `support` или `content`;
+- portal binding не создаёт внешний Project Q&A: сообщения и вложения попадают в
+  недоверенную consent-aware историю без `reply`, `@mention` и автоматического ответа.
+  В активном owner-turn агент сначала получает allowlist `project_portal.sources`, а затем
+  может отправить произвольный текст или до десяти safe-файлов только в один обязательный
+  `portalKey`. Host повторно проверяет owner, Project/Workspace и точный route, а доставка
+  проходит через durable idempotent outbox без передачи модели raw `chat_id/topic_id`;
 - Для scheduled dry-run или live-run агент разрешает указанное owner название обнаруженного топика
   и сохраняет его numeric IDs в расписании. Если название неизвестно или неоднозначно,
   owner упоминает бота в нужном топике сообщением «отчёты сюда». Доставка регистрирует
@@ -126,7 +134,7 @@ Team Space: создаётся при подключении командног�
 - комментарий в result-ветке сохраняется как недоверенный Project feedback и кратко
   уведомляет основной рабочий топик. Consent-visible feedback bounded-пакетом доступен
   следующему owner-run, но не становится intent, требованием или задачей без явного
-  решения owner. `/publish` и observer fan-out упразднены;
+  решения owner. `/publish` и неявный fan-out упразднены;
 - надёжный transport использует ограниченную постоянную outbox-очередь с idempotency key,
   SHA-256, retry/dead-letter и
   администраторскими Retry/Cancel. Рестарт во время отправки создаёт `uncertain`,
@@ -139,10 +147,10 @@ Team Space: создаётся при подключении командног�
   Новое расписание маршрутизирует весь batch в сохранённый топик без `portalKey` и задаёт
   `deliveryCondition`: `success`, `failure` или `always`. Manifest, созданный до ненулевого
   exit, сохраняется и может быть отправлен в режимах `failure`/`always`; без явного
-  `portal-messages.json` отправки нет. Старые observer bindings
-  и legacy routes сохраняются только для
-  чтения истории и совместимой доставки уже созданных записей, но не участвуют в новом
-  bind UI, Project Q&A или host tools.
+  `portal-messages.json` отправки нет. Это отдельный declarative runner-механизм; произвольная
+  owner-requested отправка в постоянный portal выполняется через `project_portal.send` и не
+  зависит от типа run или exit code. Portal routes создаются в Admin → Telegram выбором роли
+  `Portal` и уникального в пределах Project/Workspace `portalKey`.
 
 ## Требования
 

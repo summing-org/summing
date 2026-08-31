@@ -90,7 +90,7 @@ test("binding, input queues, and Telegram offset", () => {
   }
 });
 
-test("legacy observer bindings are retained as inactive customer channels", () => {
+test("portal bindings stay outside primary Q&A while retaining scoped history", () => {
   const { root, store } = tempStore();
   try {
     const conversation = store.bind(
@@ -102,6 +102,7 @@ test("legacy observer bindings are retained as inactive customer channels", () =
     );
     assert.equal(conversation.role, "observer");
     assert.equal(store.byTopic(-100500, 9), null);
+    assert.equal(store.topicConversation(-100500, 9)?.id, conversation.id);
     assert.deepEqual(store.customerChannel(-100500, 9), {
       id: StateStore.customerChannelId(-100500, 9),
       chatId: -100500,
@@ -242,7 +243,7 @@ test("Project portals resolve stable logical keys and exactly one default", () =
   }
 });
 
-test("one Project workspace has one primary topic and any number of observers", () => {
+test("one Project workspace has one primary topic and any number of portals", () => {
   const { root, store } = tempStore();
   try {
     const primary = store.bind(-100500, 9, "demo", "repo", "primary");

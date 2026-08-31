@@ -609,7 +609,12 @@ test("an authorized owner can idempotently send only into one exact result discu
 test("an authorized Project agent can forward an incoming workspace attachment", async () => {
   const { root, repository, runtime } = fixture();
   const internal = runtime.state.bind(1, 0, "demo", "repo");
-  const portal = runtime.state.bind(-100500, 9, "demo", "repo", "observer");
+  const portal = runtime.state.bind(-100500, 9, "demo", "repo", "observer", {
+    portalKey: "main",
+  });
+  runtime.state.bind(-100501, 10, "demo", "repo", "observer", {
+    portalKey: "releases",
+  });
   const attachmentDirectory = join(repository, ".summing-runtime", "attachments");
   mkdirSync(attachmentDirectory, { recursive: true });
   const attachmentPath = join(attachmentDirectory, "42-7-customer-brief.pdf");
@@ -672,7 +677,7 @@ test("an authorized Project agent can forward an incoming workspace attachment",
       },
       "send",
       {
-        portalId: portal.id,
+        portalKey: "main",
         text: "Бриф от исполнителя",
         filePath: ".summing-runtime/attachments/42-7-customer-brief.pdf",
       },
@@ -779,7 +784,7 @@ test("an authorized Project agent can forward an incoming workspace attachment",
       },
       "send",
       {
-        portalId: portal.id,
+        portalKey: "main",
         text: "Принято, итоговый вариант приложим сегодня.",
         replyToEventId: customerEvent.id,
       },
@@ -805,6 +810,40 @@ test("an authorized Project agent can forward an incoming workspace attachment",
     ) as Record<string, unknown>;
     assert.equal(forwardedArtifact.status, "sent");
     assert.equal(deliveries[1]?.data, "customer notes");
+    const releaseInput = {
+      portalKey: "releases",
+      text: "Версия 2.4 успешно опубликована.",
+      idempotencyKey: "release-2.4",
+    };
+    const release = await runtime.projectPortalTool(
+      {
+        projectId: "demo",
+        workspaceId: "repo",
+        conversationId: internal.id,
+        actorUserId: 1,
+        turnId: "turn-forward",
+      },
+      "send",
+      releaseInput,
+    ) as Record<string, unknown>;
+    const repeated = await runtime.projectPortalTool(
+      {
+        projectId: "demo",
+        workspaceId: "repo",
+        conversationId: internal.id,
+        actorUserId: 1,
+        turnId: "turn-forward",
+      },
+      "send",
+      releaseInput,
+    ) as Record<string, unknown>;
+    assert.equal(release.outboxId, repeated.outboxId);
+    assert.deepEqual(textDeliveries[1], {
+      chatId: -100501,
+      text: "Версия 2.4 успешно опубликована.",
+      topicId: 10,
+    });
+    assert.equal(textDeliveries.length, 2);
   } finally {
     runtime.state.close();
     await runtime.telegram.close();
