@@ -749,6 +749,105 @@ test("a completed manual live-run routes portal messages to the originating acto
   }
 });
 
+for (const action of ["dry-run", "run"] as const) {
+  test(`a failed manual ${action} delivers its captured batch once and still reports the failure`, async () => {
+    const root = mkdtempSync(join(tmpdir(), "summing-runner-failed-report-"));
+    const now = Date.parse("2026-09-04T09:21:00.000Z");
+    const job: RunnerJob = {
+      id: "f4edc136-bfe4-47ab-a889-62bbcfc82a53",
+      projectId: "demo",
+      workspaceId: "repo",
+      action,
+      revision: "a".repeat(40),
+      status: "failed",
+      exitCode: 1,
+      error: "invalid_grant",
+      portalMessageCount: 1,
+      createdAt: "2026-09-04T09:16:26.000Z",
+      completedAt: "2026-09-04T09:20:11.000Z",
+    };
+    const reports: Array<{ job: RunnerJob; conversationId: string; actorUserId: number }> = [];
+    const notices: Array<{ message: string; conversationId: string | undefined }> = [];
+    const control = new RunnerControlPlane(
+      join(root, "control.sqlite3"),
+      {} as ProjectCatalog,
+      { available: async () => true, jobs: async () => [job] } as unknown as ProjectRunnerClient,
+      async (_projectId, message, conversationId) => { notices.push({ message, conversationId }); },
+      () => now,
+      15_000,
+      async (reportJob, conversationId, actorUserId) => {
+        reports.push({ job: reportJob, conversationId, actorUserId });
+        return true;
+      },
+    );
+    try {
+      control.store.watchJob(context("turn-failed-report"), { ...job, status: "queued" }, now);
+      await control.tick();
+      await control.tick();
+      assert.deepEqual(reports, [{ job, conversationId: "conversation-1", actorUserId: 42 }]);
+      assert.equal(notices.length, 1);
+      assert.equal(notices[0]?.conversationId, "conversation-1");
+      assert.match(notices[0]!.message, /invalid_grant/);
+      assert.match(notices[0]!.message, /ошибк/);
+      assert.equal(control.store.jobWatch(job.id)?.lastStatus, "failed");
+      assert.ok(control.store.jobWatch(job.id)?.notifiedAt);
+      assert.equal(job.status, "failed");
+      assert.equal(job.exitCode, 1);
+    } finally {
+      control.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("manual report recovery excludes active, cancelled, interrupted, non-report, empty, legacy, and already-notified jobs", async () => {
+  const cases: Array<{
+    status: RunnerJob["status"];
+    action: RunnerJob["action"];
+    count: number;
+    actor: number;
+    notified?: boolean;
+  }> = [
+    { status: "queued", action: "run", count: 1, actor: 42 },
+    { status: "running", action: "run", count: 1, actor: 42 },
+    { status: "cancelling", action: "run", count: 1, actor: 42 },
+    { status: "cancelled", action: "run", count: 1, actor: 42 },
+    { status: "interrupted", action: "run", count: 1, actor: 42 },
+    { status: "failed", action: "build", count: 1, actor: 42 },
+    { status: "failed", action: "validate", count: 1, actor: 42 },
+    { status: "failed", action: "provision", count: 1, actor: 42 },
+    { status: "failed", action: "run", count: 0, actor: 42 },
+    { status: "failed", action: "run", count: 1, actor: 0 },
+    { status: "failed", action: "run", count: 1, actor: 42, notified: true },
+  ];
+  for (const entry of cases) {
+    const root = mkdtempSync(join(tmpdir(), "summing-runner-report-boundary-"));
+    const job: RunnerJob = {
+      id: "f4edc136-bfe4-47ab-a889-62bbcfc82a53",
+      projectId: "demo", workspaceId: "repo", revision: "a".repeat(40),
+      status: entry.status, action: entry.action, portalMessageCount: entry.count,
+      createdAt: "2026-09-04T09:16:26.000Z",
+    };
+    let reports = 0;
+    const control = new RunnerControlPlane(
+      join(root, "control.sqlite3"),
+      {} as ProjectCatalog,
+      { available: async () => true, jobs: async () => [job] } as unknown as ProjectRunnerClient,
+      async () => {}, Date.now, 15_000,
+      async () => { reports++; return true; },
+    );
+    try {
+      control.store.watchJob({ ...context("turn-boundary"), actorUserId: entry.actor }, job, Date.now());
+      if (entry.notified) control.store.markJobWatchNotified(job.id, Date.now());
+      await control.tick();
+      assert.equal(reports, 0, JSON.stringify(entry));
+    } finally {
+      control.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("manual lifecycle notifications can report failures, successes, or every finish independently", async () => {
   const root = mkdtempSync(join(tmpdir(), "summing-runner-lifecycle-watch-"));
   const job: RunnerJob = {

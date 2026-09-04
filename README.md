@@ -149,7 +149,11 @@ Team Space: создаётся при подключении командног�
   Новое расписание маршрутизирует весь batch в сохранённый топик и задаёт
   `deliveryCondition`: `success`, `failure` или `always`. Manifest, созданный до ненулевого
   exit, сохраняется и может быть отправлен в режимах `failure`/`always`; без явного
-  `portal-messages.json` отправки нет. Это отдельный declarative runner-механизм; произвольная
+  `portal-messages.json` отправки нет. Ручной `dry-run`/`run` доставляет сохранённый batch
+  при `completed` и `failed`: ошибка публикации не блокирует уже созданное видео,
+  статус job остаётся `failed`, а owner отдельно получает уведомление об ошибке.
+  Ручные `cancelled`/`interrupted` jobs автоматически не рассылают batch.
+  Это отдельный declarative runner-механизм; произвольная
   owner-requested отправка выполняется через `external_message.send` и не зависит от типа
   run или exit code. Для любого manual или scheduled action можно отдельно задать точные
   lifecycle-сообщения `started`, `succeeded`, `failed` и `finished`; поэтому уведомление при

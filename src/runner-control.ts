@@ -1914,17 +1914,18 @@ export class RunnerControlPlane {
             `manual:${job.id}:${job.status}`,
             watch.actorUserId,
           );
-          if (
-            job.status === "completed" &&
+          // A failed publication can still leave a valid, captured report/video batch.
+          const reportDelivered = (
+            (job.status === "completed" || job.status === "failed") &&
             (job.action === "dry-run" || job.action === "run") &&
             (job.portalMessageCount ?? 0) > 0 &&
             watch.actorUserId > 0 &&
             await this.notifyPortalMessages(job, watch.conversationId, watch.actorUserId)
-          ) {
-            this.store.markJobWatchNotified(job.id, this.now());
-            continue;
+          );
+          // Delivering an artifact must not hide the failed job from its owner.
+          if (!reportDelivered || job.status === "failed") {
+            await this.notify(projectId, manualJobNotification(job), watch.conversationId);
           }
-          await this.notify(projectId, manualJobNotification(job), watch.conversationId);
           this.store.markJobWatchNotified(job.id, this.now());
         } catch (error) {
           console.warn(`could not notify conversation about runner job ${job.id}`, error);

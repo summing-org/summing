@@ -166,6 +166,87 @@ test("live runner messages deliver every native media kind through the durable P
   }
 });
 
+test("failed live-run recovery retries artifact handoff and owner notification without duplicating the native video", async () => {
+  const { root, repository, runtime } = fixture();
+  const internal = runtime.state.bind(1, 0, "demo", "repo");
+  runtime.state.bind(-100500, 9, "demo", "repo", "observer", {
+    portalKey: "main", isDefault: true,
+  });
+  const job: RunnerJob = {
+    id: "f4edc136-bfe4-47ab-a889-62bbcfc82a53",
+    projectId: "demo", workspaceId: "repo", action: "run", revision: "a".repeat(40),
+    status: "failed", exitCode: 1, error: "invalid_grant", portalMessageCount: 1,
+    createdAt: "2026-09-04T09:16:26.000Z", completedAt: "2026-09-04T09:20:11.000Z",
+  };
+  runtime.viewer.runner.available = async () => true;
+  runtime.viewer.runner.jobs = async () => [job];
+  runtime.viewer.runner.portalMessages = async () => ({
+    projectId: job.projectId, workspaceId: job.workspaceId, jobId: job.id,
+    createdAt: job.completedAt!,
+    messages: [{ id: "video-1", type: "video", text: "Video saved; YouTube failed.", artifact: "video-01.mp4" }],
+  });
+  let artifactReads = 0;
+  runtime.viewer.runner.artifactData = async () => {
+    if (++artifactReads === 1) throw new Error("temporary runner artifact read failure");
+    return { name: "video-01.mp4", bytes: 3, contentType: "video/mp4", data: Uint8Array.from([1, 2, 3]) };
+  };
+  let videoSends = 0;
+  let ownerAttempts = 0;
+  runtime.telegram.sendChatAction = async () => {};
+  runtime.telegram.sendAttachment = async (kind, chatId, data, fileName, mimeType, options) => {
+    assert.equal(kind, "video");
+    assert.equal(chatId, -100500);
+    assert.equal(options?.topicId, 9);
+    assert.equal(fileName, "video-01.mp4");
+    assert.equal(mimeType, "video/mp4");
+    assert.deepEqual([...data], [1, 2, 3]);
+    videoSends++;
+    return 80567;
+  };
+  runtime.telegram.sendMessage = async (chatId, text) => {
+    assert.equal(chatId, 1);
+    assert.match(text, /invalid_grant/);
+    if (++ownerAttempts === 1) throw new Error("temporary owner notification failure");
+    return 80568;
+  };
+  try {
+    runtime.runnerControl.store.watchJob({
+      projectId: "demo", workspaceId: "repo", repositoryPath: repository,
+      conversationId: internal.id, actorUserId: 1, turnId: "failed-run-turn",
+    }, { ...job, status: "queued" }, Date.now());
+
+    await runtime.runnerControl.tick();
+    assert.equal(videoSends, 0);
+    assert.equal(runtime.runnerControl.store.jobWatch(job.id)?.notifiedAt, null);
+
+    await runtime.runnerControl.tick();
+    assert.equal(videoSends, 1);
+    assert.equal(ownerAttempts, 1);
+    assert.equal(runtime.runnerControl.store.jobWatch(job.id)?.notifiedAt, null);
+
+    await runtime.runnerControl.tick();
+    await runtime.runnerControl.tick();
+    assert.equal(artifactReads, 3);
+    assert.equal(videoSends, 1);
+    assert.equal(ownerAttempts, 2);
+    assert.equal(runtime.runnerControl.store.jobWatch(job.id)?.lastStatus, "failed");
+    assert.ok(runtime.runnerControl.store.jobWatch(job.id)?.notifiedAt);
+    const records = runtime.projectPortalOutbox.list({ projectId: "demo" });
+    assert.equal(records.length, 1);
+    assert.equal(records[0]?.status, "sent");
+    assert.equal(records[0]?.kind, "video");
+    assert.equal(records[0]?.idempotencyKey, `runner:${job.id}:video-1`);
+    assert.equal(runtime.state.resultPublicationForMessage(-100500, 9, 80567)?.jobId, job.id);
+    assert.equal(job.status, "failed");
+    assert.equal(job.exitCode, 1);
+  } finally {
+    runtime.runnerControl.close();
+    runtime.state.close();
+    await runtime.telegram.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("scheduled reports deliver to an observed topic without an observer binding or portalKey", async () => {
   const { root, runtime } = fixture();
   runtime.state.bind(1, 0, "demo", "repo");
