@@ -22,6 +22,32 @@ function gitOutput(cwd: string, ...args: string[]): string {
   return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim();
 }
 
+test("tracked working and commit diffs omit private paths, including deletions", async () => {
+  const root = repository();
+  try {
+    for (const name of [".env", "private.pem", ".env.production"]) writeFileSync(join(root, name), "PRIVATE_OLD_VALUE\n");
+    gitOutput(root, "add", "-f", ".env", "private.pem", ".env.production");
+    gitOutput(root, "commit", "-m", "private fixtures");
+    const before = gitOutput(root, "rev-parse", "HEAD");
+    writeFileSync(join(root, ".env"), "PRIVATE_NEW_VALUE\n");
+    rmSync(join(root, "private.pem"));
+    writeFileSync(join(root, ".env.example"), "PUBLIC_EXAMPLE\n");
+    writeFileSync(join(root, "src", "main.ts"), "PUBLIC_CHANGE\n");
+    const inspector = new GitInspector(root);
+    const working = await inspector.workingDiff();
+    assert.doesNotMatch(working, /PRIVATE_|private.pem|\.env.production/);
+    assert.match(working, /PUBLIC_CHANGE/);
+    gitOutput(root, "add", "-A");
+    gitOutput(root, "commit", "-m", "changed fixtures");
+    const committed = await inspector.commitDiff(before, "HEAD");
+    assert.doesNotMatch(committed, /PRIVATE_|private.pem|\.env.production/);
+    assert.match(committed, /PUBLIC_CHANGE/);
+    assert.match(committed, /PUBLIC_EXAMPLE/);
+    writeFileSync(join(root, ".env"), "PRIVATE_ONLY\n");
+    assert.equal(await inspector.workingDiff(), "");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("shows tracked and untracked files without exposing secrets", async () => {
   const root = repository();
   try {

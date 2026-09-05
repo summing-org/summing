@@ -987,7 +987,8 @@ export class ProjectViewerServer {
     }
     if (request.method === "GET" && url.pathname === "/api/viewer/runs") {
       const scope = await this.scope(conversationId, telegramUser);
-      const runs = await this.artifacts.list(scope.conversation.id);
+      const runs = (await this.artifacts.list(scope.conversation.id))
+        .filter((run) => this.state.conversationRun(scope.conversation, run.runId));
       json(response, 200, {
         runs: runs.map((run) => {
           const deliveries = this.state.runDeliveries(run.runId);
@@ -1023,7 +1024,10 @@ export class ProjectViewerServer {
       const scope = await this.scope(conversationId, telegramUser);
       const runId = Number(queryValue(url, "run"));
       if (!Number.isSafeInteger(runId) || runId <= 0) throw new ViewerHttpError(400, "invalid run id");
-      json(response, 200, { diff: await this.artifacts.patch(scope.conversation.id, runId) });
+      if (!this.state.conversationRun(scope.conversation, runId)) throw new ViewerHttpError(404, "run not found in this Project and Workspace");
+      const diff = await this.artifacts.patch(scope.conversation.id, runId);
+      if (!this.state.conversationRun(scope.conversation, runId)) throw new ViewerHttpError(404, "run scope changed");
+      json(response, 200, { diff });
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/viewer/jobs") {

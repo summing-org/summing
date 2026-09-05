@@ -12,6 +12,50 @@ function tempStore(): { root: string; path: string; store: StateStore } {
   return { root, path, store: new StateStore(path) };
 }
 
+test("historical runs and retry payloads cannot follow a rebound topic", () => {
+  const { root, store } = tempStore();
+  try {
+    const old = store.bind(-100, 5, "alpha", "repo");
+    const id = store.startRun(old.id, "ALPHA_PRIVATE", []);
+    store.finishRun(id, "interrupted", "", "restart");
+    assert.equal(store.conversationRun(old, id)?.requestText, "ALPHA_PRIVATE");
+    const current = store.bind(-100, 5, "beta", "repo");
+    assert.equal(store.conversationRun(old, id), null, "reject a stale authorization snapshot");
+    assert.equal(store.conversationRun(current, id), null);
+    assert.throws(() => store.retryInterruptedRun(current.id, id, 90, 2), /not found/);
+    assert.deepEqual(store.pendingAll(current.id), []);
+    const workspace = store.bind(-100, 5, "alpha", "different");
+    assert.equal(store.conversationRun(workspace, id), null);
+  } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("durable Telegram intake survives reopen and is atomically consumed with its agent input", () => {
+  const { root, path, store } = tempStore();
+  const topic = store.bind(-100, 1, "alpha", "repo");
+  store.enqueueTelegramIntake(10, -100, 1, "scope", JSON.stringify({ voice: { file_id: "file" } }));
+  assert.equal(store.telegramOffset(), 11, "intake admission and provider offset must share one commit");
+  store.enqueueTelegramIntake(10, -100, 1, "scope", "duplicate");
+  store.checkpointTelegramIntake(10, { kind: "audio", fileName: "voice.ogg", mimeType: "audio/ogg", filePath: "/synthetic/voice.ogg", size: 10 });
+  store.close();
+  const reopened = new StateStore(path);
+  try {
+    assert.equal(reopened.telegramIntakes().length, 1);
+    assert.equal(reopened.telegramIntake(10)?.attachment?.fileName, "voice.ogg");
+    assert.equal(reopened.telegramOffset(), 11);
+    reopened.enqueueInput(topic.id, 10, "transcript", "followup", "write", 1, "direct", [], null, null, 10);
+    assert.equal(reopened.telegramIntakes().length, 0);
+    assert.equal(reopened.pendingAll(topic.id).length, 1);
+    assert.throws(() => reopened.enqueueInput(topic.id, 10, "duplicate", "followup", "write", 1, "direct", [], null, null, 10), /consumed/);
+    reopened.enqueueTelegramIntake(12, -100, 1, "scope", "{}");
+    reopened.bind(-100, 1, "beta", "repo");
+    reopened.bind(-100, 1, "alpha", "repo");
+    assert.equal(reopened.telegramIntake(12)?.cancelled, true, "ABA rebind must invalidate intake too");
+    assert.throws(() => reopened.enqueueInput(topic.id, 12, "old", "followup", "write", 1, "direct", [], null, null, 12), /cancelled/);
+    for (let id = 13; id < 44; id++) reopened.enqueueTelegramIntake(id, -100, 1, "scope", "{}");
+    assert.throws(() => reopened.enqueueTelegramIntake(44, -100, 1, "scope", "{}"), /заполнена/);
+  } finally { reopened.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test("binding, input queues, and Telegram offset", () => {
   const { root, store } = tempStore();
   try {

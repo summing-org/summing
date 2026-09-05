@@ -1,6 +1,37 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { splitMessage, TelegramAPI } from "../src/telegram-api.js";
+import { splitMessage, TelegramAPI, TelegramError, TelegramUncertainError } from "../src/telegram-api.js";
+
+test("non-idempotent sends are never retried after an ambiguous response", async () => {
+  const original = globalThis.fetch;
+  const api = new TelegramAPI("synthetic-token");
+  try {
+    for (const response of [
+      () => { throw new Error("connection lost after accepting request"); },
+      () => new Response("truncated", { status: 200 }),
+      () => new Response(JSON.stringify({ ok: true, result: {} }), { status: 200 }),
+      () => new Response(JSON.stringify({ ok: false }), { status: 500 }),
+    ]) {
+      for (const send of [() => api.sendMessage(1, "test"), () => api.sendDocument(1, Uint8Array.of(1), "test.txt", "text/plain")]) {
+        let calls = 0;
+        globalThis.fetch = async () => { calls++; return response(); };
+        await assert.rejects(send(), TelegramUncertainError);
+        assert.equal(calls, 1);
+      }
+    }
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls++;
+      return new Response(JSON.stringify(calls === 1
+        ? { ok: false, error_code: 429, parameters: { retry_after: 0 } }
+        : { ok: true, result: { message_id: 19 } }), { status: calls === 1 ? 429 : 200 });
+    };
+    assert.equal(await api.sendMessage(1, "test"), 19);
+    assert.equal(calls, 2, "a confirmed rejection can be retried");
+    globalThis.fetch = async () => new Response(JSON.stringify({ ok: false, description: "bad request" }), { status: 400 });
+    await assert.rejects(api.sendMessage(1, "test"), (error: unknown) => error instanceof TelegramError && !(error instanceof TelegramUncertainError));
+  } finally { globalThis.fetch = original; await api.close(); }
+});
 
 test("splitMessage preserves content", () => {
   const text = "alpha ".repeat(1_000);

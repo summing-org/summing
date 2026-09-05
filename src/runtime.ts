@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
-import { Deferred, KeyedMutex, Semaphore } from "./async-primitives.js";
+import { Deferred, KeyedMutex, Semaphore, waitForCompletion } from "./async-primitives.js";
 import {
   CodexAppServer,
   CodexProtocolError,
@@ -100,6 +100,7 @@ import {
 } from "./team-memory.js";
 import {
   StateStore,
+  TelegramIntakeCapacityError,
   type AudioTranscript,
   type Conversation,
   type PendingInput,
@@ -659,6 +660,9 @@ export class SummingRuntime {
   private codexLimitsProfileDescription = "";
   private lastTelegramPoll: number | null = null;
   private readonly processors = new Map<string, Promise<void>>();
+  private readonly processorControllers = new Map<string, AbortController>();
+  private readonly intakeWorkers = new Map<string, { promise: Promise<void>; controller: AbortController }>();
+  private readonly startingReviews = new Set<{ events: CodexEvent[]; bytes: number; overflow: boolean }>();
   private readonly provisioning = new Map<string, ProvisioningTask>();
   private readonly activeByThread = new Map<string, ActiveRun>();
   private readonly activeByTurn = new Map<string, ActiveRun>();
@@ -989,6 +993,7 @@ export class SummingRuntime {
           this.startProcessor(conversation);
         }
       }
+      this.startIntakeWorkers();
       pollTask = this.pollTelegram();
       await this.shutdown.promise;
     } finally {
@@ -1030,6 +1035,7 @@ export class SummingRuntime {
       await Promise.allSettled([...this.provisioning.values()].map((task) => task.promise));
       await Promise.allSettled([...this.processors.values()]);
       await Promise.allSettled([...this.modelCommands.values()]);
+      await Promise.allSettled([...this.intakeWorkers.values()].map((worker) => worker.promise));
       await Promise.allSettled([...this.unboundProcessors]);
       await Promise.allSettled([...this.teamUnderstandingProcessors.values()]);
       await this.health.close();
@@ -1693,6 +1699,10 @@ export class SummingRuntime {
     if (!Number.isSafeInteger(numericUpdateId) || numericUpdateId < 0) {
       throw new Error(`invalid Telegram update_id: ${String(update.update_id ?? "")}`);
     }
+    const acknowledged = this.state.telegramOffset();
+    if (acknowledged !== null && numericUpdateId < acknowledged) {
+      return Math.max(currentOffset ?? 0, acknowledged);
+    }
     const updateId = String(numericUpdateId);
     const membership = record(update.my_chat_member);
     if (membership) await this.handleChatMemberUpdate(membership, updateId);
@@ -1701,7 +1711,7 @@ export class SummingRuntime {
     if (member) this.handleTeamMemberUpdate(member, updateId);
 
     const message = record(update.message) ?? record(update.channel_post);
-    if (message) await this.handleMessage(message);
+    if (message && !await this.queueTelegramIntake(numericUpdateId, message)) await this.handleMessage(message);
 
     const edited = record(update.edited_message) ?? record(update.edited_channel_post);
     if (edited) await this.handleTeamEditedMessage(edited, updateId);
@@ -1711,7 +1721,88 @@ export class SummingRuntime {
 
     const nextOffset = Math.max(currentOffset ?? 0, numericUpdateId + 1);
     this.state.setTelegramOffset(nextOffset);
+    this.startIntakeWorkers();
     return nextOffset;
+  }
+
+  private intakeScope(chatId: number, topicId: number): string {
+    const conversation = this.state.topicConversation(chatId, topicId);
+    return JSON.stringify([
+      conversation ? [conversation.id, conversation.projectId, conversation.workspaceId, conversation.role] : null,
+      this.state.projectTopicDestinationsForTopic(chatId, topicId).map((item) => item.id).sort(),
+    ]);
+  }
+
+  private async queueTelegramIntake(updateId: number, message: TelegramObject): Promise<boolean> {
+    const [chatId, topicId, senderId] = this.messageLocation(message);
+    const text = String(message.text ?? message.caption ?? "").trim();
+    // Control commands remain responsive while a topic is waiting on transcription.
+    // Secret text must go through interception before any durable intake is written.
+    if (!chatId || !senderId || record(message.from)?.is_bot === true || text.startsWith("/") || detectSecretText(text).length) return false;
+    const conversation = this.state.topicConversation(chatId, topicId);
+    const external = this.state.projectTopicDestinationsForTopic(chatId, topicId).length > 0;
+    if (!conversation && !external) return false;
+    if (!this.projects.isKnownOwner(senderId) && record(message.chat)?.type !== "supergroup" && !external) return false;
+    const queued = this.state.telegramIntakes().some((item) => item.chatId === chatId && item.topicId === topicId);
+    if (!telegramAttachment(message) && !queued) return false;
+    try {
+      this.state.enqueueTelegramIntake(updateId, chatId, topicId, this.intakeScope(chatId, topicId), JSON.stringify(message));
+    } catch (error) {
+      if (!(error instanceof TelegramIntakeCapacityError)) throw error;
+      await this.reply(chatId, topicId, Number(message.message_id), errorText(error));
+    }
+    return true;
+  }
+
+  private startIntakeWorkers(): void {
+    if (this.stopping) return;
+    for (const intake of this.state.telegramIntakes()) {
+      if (this.intakeWorkers.size >= 2) break;
+      const key = `${intake.chatId}:${intake.topicId}`;
+      if (this.intakeWorkers.has(key)) continue;
+      const controller = new AbortController();
+      const signal = AbortSignal.any([controller.signal, this.shutdownController.signal]);
+      // Defer work until the worker has been registered and the offset persisted.
+      const promise = Promise.resolve().then(async () => {
+        const valid = () => {
+          signal.throwIfAborted();
+          const current = this.state.telegramIntake(intake.updateId);
+          if (!current || current.cancelled ||
+              this.intakeScope(intake.chatId, intake.topicId) !== intake.scope) {
+            throw new Error("Telegram intake scope changed or was cancelled");
+          }
+        };
+        try {
+          valid();
+          await this.handleMessage(JSON.parse(intake.messageJson) as TelegramObject, { updateId: intake.updateId, signal, valid });
+        } catch (error) {
+          if (!signal.aborted && !intake.cancelled) {
+            console.warn(`Telegram intake ${intake.updateId} failed`, errorText(error));
+            const current = this.state.telegramIntake(intake.updateId);
+            if (current && !current.cancelled && this.intakeScope(intake.chatId, intake.topicId) === intake.scope) {
+              try {
+                const message = JSON.parse(intake.messageJson) as TelegramObject;
+                await this.reply(intake.chatId, intake.topicId, Number(message.message_id),
+                  "Не удалось обработать сообщение из очереди. Отправьте его ещё раз.");
+              } catch (replyError) { console.warn("could not report intake failure", errorText(replyError)); }
+            }
+          }
+        } finally {
+          if (!this.stopping) {
+            const remaining = this.state.telegramIntake(intake.updateId);
+            if (remaining?.attachment) this.attachments.remove([remaining.attachment]);
+            this.state.finishTelegramIntake(intake.updateId);
+          }
+        }
+      }).finally(() => {
+        this.intakeWorkers.delete(key);
+        this.startIntakeWorkers();
+      }).catch((error) => {
+        console.error("durable Telegram intake failed", error);
+        this.requestStop(1);
+      });
+      this.intakeWorkers.set(key, { promise, controller });
+    }
   }
 
   private async sendRunnerPortalMessages(
@@ -2140,7 +2231,10 @@ export class SummingRuntime {
     return username ? `@${username}` : "";
   }
 
-  private async handleMessage(message: TelegramObject): Promise<void> {
+  private async handleMessage(message: TelegramObject, intake?: {
+    updateId: number; signal: AbortSignal; valid(): void;
+  }): Promise<void> {
+    intake?.valid();
     const [chatId, topicId, senderId] = this.messageLocation(message);
     const chat = record(message.chat) ?? {};
     const sender = record(message.from) ?? {};
@@ -2316,6 +2410,7 @@ export class SummingRuntime {
             message,
             StateStore.conversationId(chatId, topicId),
           );
+          intake?.valid();
           if (!stored) throw new AttachmentError("Telegram-вложение не удалось распознать.");
           const detections = detectSecretFile(
             stored.filePath,
@@ -2461,7 +2556,7 @@ export class SummingRuntime {
       );
       return;
     }
-    const access: RunAccess =
+    let access: RunAccess =
       conversation?.role === "observer" || (
         conversation &&
         senderId !== this.config.telegramOwnerId &&
@@ -2549,7 +2644,10 @@ export class SummingRuntime {
     let portalArtifactId: string | null = null;
     if (attachmentCandidate) {
       try {
-        attachment = await this.attachments.download(message, conversation.id);
+        const checkpoint = intake ? this.state.telegramIntake(intake.updateId)?.attachment : null;
+        attachment = checkpoint && existsSync(checkpoint.filePath)
+          ? checkpoint : await this.attachments.download(message, conversation.id);
+        intake?.valid();
         if (!attachment) throw new AttachmentError("Telegram-вложение не удалось распознать.");
         const fileDetections = detectSecretFile(
           attachment.filePath,
@@ -2571,6 +2669,7 @@ export class SummingRuntime {
           );
           return;
         }
+        if (intake) this.state.checkpointTelegramIntake(intake.updateId, attachment);
         if (externalDestinations.length > 0 && teamEvent) {
           const artifact = this.projectPortalArtifacts.store({
             sourceId: teamEvent.sourceId,
@@ -2592,7 +2691,8 @@ export class SummingRuntime {
           });
         }
         if (attachment.kind === "audio") {
-          const transcript = await this.transcriber.transcribe(attachment);
+          const transcript = await this.transcriber.transcribe(attachment, intake?.signal);
+          intake?.valid();
           const transcriptDetections = detectSecretText(transcript);
           if (transcriptDetections.length > 0) {
             this.attachments.remove([attachment]);
@@ -2627,7 +2727,12 @@ export class SummingRuntime {
           text = `Изучи приложенный файл «${attachment.fileName}» и ответь по его содержимому.`;
         }
       } catch (error) {
-        if (attachment) this.attachments.remove([attachment]);
+        if (attachment) {
+          const pending = intake ? this.state.telegramIntake(intake.updateId) : null;
+          if (this.stopping && intake && pending && !pending.cancelled) this.state.checkpointTelegramIntake(intake.updateId, attachment);
+          else this.attachments.remove([attachment]);
+        }
+        intake?.valid();
         const detail =
           error instanceof AttachmentError || error instanceof TelegramError
             ? error.message
@@ -2640,6 +2745,9 @@ export class SummingRuntime {
         return;
       }
     }
+    intake?.valid();
+    // An owner's access may have been revoked during a slow download/transcription.
+    if (access === "write" && senderId !== this.config.telegramOwnerId && !this.projects.canAccess(senderId, conversation.projectId)) access = "read-only";
     if (!text) return;
     const inputAttachments = attachment ? [attachment] : [];
     const promptText = this.promptWithTelegramReplyContext(message, text, teamEvent);
@@ -2658,6 +2766,8 @@ export class SummingRuntime {
         "direct",
         inputAttachments,
         audioTranscript,
+        null,
+        intake?.updateId ?? null,
       );
       this.startProcessor(conversation);
       console.info(`queued direct participant input ${inputId} for ${conversation.id}`);
@@ -2668,7 +2778,7 @@ export class SummingRuntime {
       const replyId = Number(reply?.message_id ?? 0);
       const active = this.activeForConversation(conversation.id);
       const mode =
-        !attachment &&
+        !intake && !attachment &&
         access === "write" &&
         active?.access === "write" &&
         replyId &&
@@ -2685,6 +2795,8 @@ export class SummingRuntime {
         "direct",
         inputAttachments,
         audioTranscript,
+        null,
+        intake?.updateId ?? null,
       );
       if (mode === "steer" && active?.turnId) {
         const pending = this.state.pending(conversation.id, "steer");
@@ -2704,6 +2816,8 @@ export class SummingRuntime {
       "direct",
       inputAttachments,
       audioTranscript,
+      null,
+      intake?.updateId ?? null,
     );
     this.startProcessor(conversation);
   }
@@ -4143,6 +4257,8 @@ export class SummingRuntime {
       if (!conversation) return;
       const active = this.activeForConversation(conversation.id);
       const review = this.activeReviewForConversation(conversation.id);
+      const cancelledIntakes = this.state.cancelTelegramIntakes(chatId, topicId);
+      this.intakeWorkers.get(`${chatId}:${topicId}`)?.controller.abort(new Error("intake cancelled by owner"));
       if (active) {
         if (active.turnId) await this.codex.interrupt(active.threadId, active.turnId);
         else active.cancelRequested = true;
@@ -4151,9 +4267,10 @@ export class SummingRuntime {
         if (review.turnId) await this.codex.interrupt(review.threadId, review.turnId);
         await this.reply(chatId, topicId, messageId, "Останавливаю detached review.");
       } else if (
-        this.processors.has(conversation.id) ||
+        cancelledIntakes > 0 || this.processors.has(conversation.id) ||
         this.state.pendingAll(conversation.id).length > 0
       ) {
+        this.processorControllers.get(conversation.id)?.abort(new Error("run cancelled by owner"));
         const queued = this.state.pendingAll(conversation.id);
         this.attachments.remove(queued.flatMap((item) => item.attachments));
         this.state.consume(queued.map((item) => item.id));
@@ -4492,10 +4609,14 @@ export class SummingRuntime {
 
   private startProcessor(conversation: Conversation): void {
     if (this.processors.has(conversation.id)) return;
+    const controller = new AbortController();
+    this.processorControllers.set(conversation.id, controller);
+    const signal = AbortSignal.any([controller.signal, this.shutdownController.signal]);
     const processor = this.semaphore
-      .run(() => this.conversationLoop(conversation.id))
-      .catch((error) => console.error(`conversation processor failed: ${conversation.id}`, error))
+      .run(() => this.conversationLoop(conversation.id, signal), signal)
+      .catch((error) => { if (!signal.aborted) console.error(`conversation processor failed: ${conversation.id}`, error); })
       .finally(() => {
+        this.processorControllers.delete(conversation.id);
         this.processors.delete(conversation.id);
         if (this.stopping) return;
         const queued = this.state.pendingAll(conversation.id);
@@ -4511,10 +4632,19 @@ export class SummingRuntime {
     actorUserId: number,
   ): void {
     if (this.processors.has(conversation.id)) return;
+    const controller = new AbortController();
+    this.processorControllers.set(conversation.id, controller);
+    const signal = AbortSignal.any([controller.signal, this.shutdownController.signal]);
     const processor = this.semaphore
-      .run(() => this.executeReview(conversation.id, replyTo, actorUserId))
-      .catch((error) => console.error(`review processor failed: ${conversation.id}`, error))
-      .finally(() => this.processors.delete(conversation.id));
+      .run(() => this.executeReview(conversation.id, replyTo, actorUserId, signal), signal)
+      .catch((error) => { if (!signal.aborted) console.error(`review processor failed: ${conversation.id}`, error); })
+      .finally(() => {
+        this.processorControllers.delete(conversation.id);
+        this.processors.delete(conversation.id);
+        if (!this.stopping && this.state.pendingAll(conversation.id).some((item) => item.responseMode === "direct")) {
+          this.startProcessor(this.state.get(conversation.id));
+        }
+      });
     this.processors.set(conversation.id, processor);
   }
 
@@ -4522,6 +4652,7 @@ export class SummingRuntime {
     conversationId: string,
     replyTo: number,
     actorUserId: number,
+    signal = this.shutdownController.signal,
   ): Promise<void> {
     let conversation = this.state.get(conversationId);
     const project = this.projects.project(conversation.projectId);
@@ -4538,7 +4669,9 @@ export class SummingRuntime {
     let active: ActiveReview | null = null;
     let sourceThreadId: string | null = null;
     let runFinished = false;
+    const early = { events: [] as CodexEvent[], bytes: 0, overflow: false };
     try {
+      signal.throwIfAborted();
       runId = this.state.startRun(
         conversation.id,
         "/review uncommittedChanges",
@@ -4567,21 +4700,22 @@ export class SummingRuntime {
       const runLockKey = await this.workspaces.runLockKey(
         conversation,
         workspace,
-        this.shutdownController.signal,
+        signal,
       );
-      releaseWorkspace = await this.workspaceRuns.acquire(runLockKey);
-      if (this.shutdownController.signal.aborted) throw new WorkspaceError("review cancelled");
+      releaseWorkspace = await this.workspaceRuns.acquire(runLockKey, signal);
+      signal.throwIfAborted();
       const prepared = await this.workspaces.prepare(
         conversation,
         project,
         workspace,
-        this.shutdownController.signal,
+        signal,
       );
       const readOnlyDeniedPaths = await this.workspaces.readOnlyDeniedPaths(prepared.readableRoot);
       this.state.setWorktree(conversation.id, prepared.path);
       await this.modelCommands.get(conversationId);
       conversation = this.state.get(conversation.id);
       const modelSelection = await this.effectiveConversationModel(conversation);
+      signal.throwIfAborted();
       this.state.setRunModel(runId, {
         requestedModel: modelSelection.model, requestedEffort: modelSelection.effort,
         model: null, effort: null, confirmation: null, reroutes: [],
@@ -4591,12 +4725,15 @@ export class SummingRuntime {
         readableRoots: [prepared.readableRoot], gitMetadataRoots: prepared.gitMetadataRoots,
         effort: modelSelection.effort, reviewModel: modelSelection.model,
       });
+      signal.throwIfAborted();
       this.recordThreadModel(runId, sourceThreadId, true);
       const root = await GitInspector.worktreeRoot(prepared.readableRoot);
       inspector = new GitInspector(root);
       const beforeRevision = await inspector.snapshot(`run ${runId} detached review before`);
       stream.start(replyTo);
       this.state.setActive(conversation.id, "review-starting", null);
+      signal.throwIfAborted();
+      this.startingReviews.add(early);
       const started = await this.codex.startReview(
         sourceThreadId,
         { type: "uncommittedChanges" },
@@ -4630,8 +4767,13 @@ export class SummingRuntime {
       this.state.setActive(conversation.id, started.turnId, null);
       this.activeReviewsByThread.set(started.reviewThreadId, active);
       this.activeReviewsByTurn.set(started.turnId, active);
+      this.startingReviews.delete(early);
       this.recordTurnModel(active);
-      await active.done.promise;
+      if (early.overflow) throw new Error("review startup event buffer exceeded its limit");
+      for (const event of early.events) {
+        if (this.activeReviewForEvent(event) === active) await this.routeCodexEvent(event);
+      }
+      await waitForCompletion(active.done.promise, signal, 30 * 60_000);
       showCodexWorkLog(active);
       await stream.settle();
       const afterRevision = await inspector.snapshot(`run ${runId} detached review after`);
@@ -4678,6 +4820,10 @@ export class SummingRuntime {
       await this.drainRunDeliveries(runId);
     } catch (error) {
       console.error(`detached review failed: ${conversationId}`, error);
+      if (active?.status === "running" && active.turnId) {
+        try { await this.codex.interrupt(active.threadId, active.turnId); }
+        catch (interruptError) { console.warn("could not interrupt failed review", interruptError); }
+      }
       if (runId !== null && !runFinished) {
         try {
           await stream.settle();
@@ -4693,19 +4839,19 @@ export class SummingRuntime {
             }
             this.state.finishRunReview(
               runId,
-              this.stopping ? "interrupted" : "failed",
+              signal.aborted || this.stopping ? "interrupted" : "failed",
               active?.response ?? "",
               afterRevision,
               workspaceChanged,
               errorText(error),
             );
           }
-          const fallback = `Review не выполнен: ${errorText(error)}`;
+          const fallback = signal.aborted ? "Review отменён." : `Review не выполнен: ${errorText(error)}`;
           stream.text = active?.response.trim() || fallback;
           const payload = stream.payload(fallback);
           this.state.finishRunWithDeliveries(
             runId,
-            this.stopping ? "interrupted" : "failed",
+            signal.aborted || this.stopping ? "interrupted" : "failed",
             active?.response ?? "",
             errorText(error),
             payload.chunks.map((text, ordinal) => ({
@@ -4726,7 +4872,7 @@ export class SummingRuntime {
           if (!runFinished) {
             this.state.finishRun(
               runId,
-              this.stopping ? "interrupted" : "failed",
+              signal.aborted || this.stopping ? "interrupted" : "failed",
               active?.response ?? "",
               `${errorText(error)}; review finalization failed: ${errorText(finalizeError)}`,
             );
@@ -4735,6 +4881,7 @@ export class SummingRuntime {
         }
       }
     } finally {
+      this.startingReviews.delete(early);
       stream.stopTyping();
       if (active) {
         this.activeReviewsByThread.delete(active.threadId);
@@ -4754,8 +4901,8 @@ export class SummingRuntime {
     }
   }
 
-  private async conversationLoop(conversationId: string): Promise<void> {
-    while (!this.stopping) {
+  private async conversationLoop(conversationId: string, signal = this.shutdownController.signal): Promise<void> {
+    while (!this.stopping && !signal.aborted) {
       const queued = this.state.pendingAll(conversationId);
       if (queued.length === 0) return;
       const legacyAmbient = queued.filter((item) => item.responseMode === "ambient");
@@ -4780,6 +4927,7 @@ export class SummingRuntime {
         batch.map((item) => item.id),
         access,
         batch,
+        signal,
       );
     }
   }
@@ -4796,6 +4944,7 @@ export class SummingRuntime {
     inputIds: number[],
     access: RunAccess,
     inputs: PendingInput[] = [],
+    signal = this.shutdownController.signal,
   ): Promise<void> {
     let conversation = this.state.get(conversationId);
     const project = this.projects.project(conversation.projectId);
@@ -4826,6 +4975,7 @@ export class SummingRuntime {
     let active: ActiveRun | null = null;
     let runFinished = false;
     try {
+      signal.throwIfAborted();
       runId = this.state.startRun(
         conversation.id,
         prompt,
@@ -4871,18 +5021,19 @@ export class SummingRuntime {
       const runLockKey = await this.workspaces.runLockKey(
         conversation,
         workspace,
-        this.shutdownController.signal,
+        signal,
       );
-      releaseWorkspace = await this.workspaceRuns.acquire(runLockKey);
-      if (this.shutdownController.signal.aborted) {
+      releaseWorkspace = await this.workspaceRuns.acquire(runLockKey, signal);
+      if (signal.aborted) {
         throw new WorkspaceError("workspace run cancelled");
       }
       const prepared = await this.workspaces.prepare(
         conversation,
         project,
         workspace,
-        this.shutdownController.signal,
+        signal,
       );
+      signal.throwIfAborted();
       if (access === "write") {
         try {
           const root = await GitInspector.worktreeRoot(prepared.readableRoot);
@@ -4941,6 +5092,7 @@ export class SummingRuntime {
         requestedModel: modelSelection.model, requestedEffort: modelSelection.effort,
         model: null, effort: null, confirmation: null, reroutes: [],
       });
+      signal.throwIfAborted();
       const threadId = await this.thread(
         conversation,
         prepared.path,
@@ -4950,6 +5102,7 @@ export class SummingRuntime {
         access,
         modelSelection.model,
       );
+      signal.throwIfAborted();
       stream.start(replyTo);
       this.state.setActive(conversation.id, "starting", null);
       active = {
@@ -5120,11 +5273,11 @@ export class SummingRuntime {
         try {
           if (active) showCodexWorkLog(active);
           await stream.settle();
-          const fallback = `Ошибка: ${errorText(error)}`;
+          const fallback = signal.aborted ? "Run отменён." : `Ошибка: ${errorText(error)}`;
           const payload = stream.payload(fallback);
           this.state.finishRunWithDeliveries(
             runId,
-            this.stopping ? "interrupted" : "failed",
+            signal.aborted || this.stopping ? "interrupted" : "failed",
             stream.text,
             errorText(error),
             payload.chunks.map((text, ordinal) => ({
@@ -5145,7 +5298,7 @@ export class SummingRuntime {
           if (!runFinished) {
             this.state.finishRun(
               runId,
-              this.stopping ? "interrupted" : "failed",
+              signal.aborted || this.stopping ? "interrupted" : "failed",
               stream.text,
               `${errorText(error)}; delivery finalization failed: ${errorText(finalizeError)}`,
             );
@@ -6462,7 +6615,21 @@ export class SummingRuntime {
       return;
     }
     const team = this.activeTeamForEvent(event);
-    if (team) this.applyCodexResponseEvent(event, team, false);
+    if (team) { this.applyCodexResponseEvent(event, team, false); return; }
+    // Detached thread ids are only known when review/start returns. Notifications
+    // can precede that response; retain only a bounded startup window and replay
+    // against the exact returned thread/turn, never against another conversation.
+    if (this.startingReviews.size && (event.params.threadId || event.params.turnId)) {
+      const bytes = Buffer.byteLength(JSON.stringify(event));
+      for (const pending of this.startingReviews) {
+        if (pending.events.length >= 512 || pending.bytes + bytes > 2_000_000) {
+          pending.overflow = true;
+        } else {
+          pending.events.push(event);
+          pending.bytes += bytes;
+        }
+      }
+    }
   }
 
   private captureRunEvidence(event: CodexEvent, active: ActiveRun): void {

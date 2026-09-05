@@ -20,6 +20,13 @@ test("detects known credentials and high-confidence assignments without retainin
   assert.deepEqual(detectSecretText("Use process.env.API_KEY in this example"), []);
 });
 
+test("text attachments cannot bypass scanning using size or a NUL byte", () => {
+  const secret = "sk-proj-" + "a".repeat(40);
+  const large = Buffer.from(" ".repeat(2_000_001) + secret);
+  assert.deepEqual(detectSecretData(large, "large.txt", "text/plain", 20_000_000), [{ kind: "unscanned-large-text" }]);
+  assert.deepEqual(detectSecretData(Buffer.from("\0" + secret), "notes.txt", "text/plain", 20_000_000), [{ kind: "unscanned-binary-text" }]);
+});
+
 test("scans bounded text attachments but ignores binary files", () => {
   const root = mkdtempSync(join(tmpdir(), "summing-secret-scan-"));
   try {

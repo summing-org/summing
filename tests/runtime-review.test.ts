@@ -12,7 +12,7 @@ function git(cwd: string, ...args: string[]): void {
   assert.equal(result.status, 0, result.stderr);
 }
 
-async function reviewFixture(mutatesWorkspace: boolean): Promise<{
+async function reviewFixture(mutatesWorkspace: boolean, early = false): Promise<{
   review: ReturnType<SummingRuntime["state"]["runReview"]>;
   messages: string[];
 }> {
@@ -83,8 +83,7 @@ async function reviewFixture(mutatesWorkspace: boolean): Promise<{
     assert.equal(threadId, "thread-review-source");
     assert.deepEqual(target, { type: "uncommittedChanges" });
     assert.equal(delivery, "detached");
-    setImmediate(() => {
-      void (async () => {
+    const emit = async () => {
         if (mutatesWorkspace) writeFileSync(join(reviewCwd, "README.md"), "reviewer mutation\n");
         await routeCodexEvent({
           method: "item/completed",
@@ -106,8 +105,9 @@ async function reviewFixture(mutatesWorkspace: boolean): Promise<{
             turn: { id: "turn-review", status: "completed" },
           },
         });
-      })();
-    });
+    };
+    if (early) await emit();
+    else setImmediate(() => { void emit(); });
     return { reviewThreadId: "thread-review-detached", turnId: "turn-review" };
   };
   const executeReview = (
@@ -144,4 +144,10 @@ test("a detached review that changes the workspace is invalidated", async () => 
   assert.equal(result.review?.workspaceChanged, true);
   assert.match(result.review?.error ?? "", /changed the workspace/);
   assert.ok(result.messages.some((message) => message.includes("Reviewer изменил workspace")));
+});
+
+test("review completion before review/start response is replayed without hanging", { timeout: 10_000 }, async () => {
+  const result = await reviewFixture(false, true);
+  assert.equal(result.review?.status, "completed");
+  assert.match(result.review?.findings ?? "", /обратную совместимость/);
 });

@@ -150,8 +150,9 @@ async function docxBlocks(filePath: string): Promise<ExtractedBlock[]> {
   return blocks;
 }
 
-async function workbookBlocks(filePath: string): Promise<ExtractedBlock[]> {
-  if (extname(filePath).toLowerCase() === ".ods") return odsBlocks(filePath);
+async function workbookBlocks(filePath: string, format: string): Promise<ExtractedBlock[]> {
+  if (format === ".ods") return odsBlocks(filePath);
+  if (format === ".xls") throw new Error("Legacy XLS is not supported; convert the document to XLSX or ODS");
   await safeOfficeArchive(filePath);
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.readFile(filePath);
@@ -190,6 +191,7 @@ async function workbookBlocks(filePath: string): Promise<ExtractedBlock[]> {
       },
     });
   });
+  if (!blocks.length) throw new Error("Spreadsheet contains no readable sheets");
   return blocks;
 }
 
@@ -197,6 +199,8 @@ async function odsBlocks(filePath: string): Promise<ExtractedBlock[]> {
   const archive = await safeOfficeArchive(filePath);
   const xml = await archive.file("content.xml")?.async("string") ?? "";
   const tables = [...xml.matchAll(/<table:table\b([^>]*)>([\s\S]*?)<\/table:table>/g)];
+  if (!tables.length) throw new Error("ODS contains no readable sheets");
+  let cellCount = 0;
   return tables.map((table, tableIndex) => {
     const name = table[1]?.match(/table:name="([^"]+)"/)?.[1] ?? `Sheet ${tableIndex + 1}`;
     const cells: Array<Record<string, unknown>> = [];
@@ -211,6 +215,10 @@ async function odsBlocks(filePath: string): Promise<ExtractedBlock[]> {
       )) {
         const attributes = cellMatch[1] ?? "";
         const repeat = Math.max(1, Number(attributes.match(/table:number-columns-repeated="(\d+)"/)?.[1] ?? 1));
+        if (!Number.isSafeInteger(repeat) || cellCount + repeat > 200_000) {
+          throw new Error("ODS exceeds the 200000-cell extraction limit");
+        }
+        cellCount += repeat;
         const text = xmlText(cellMatch[2] ?? "");
         const formula = attributes.match(/table:formula="([^"]+)"/)?.[1] ?? null;
         const rawValue = attributes.match(/office:value="([^"]+)"/)?.[1]
@@ -271,7 +279,7 @@ export async function extractDocument(
   if (mimeType === "application/pdf" || extension === ".pdf") return pdfBlocks(filePath);
   if (extension === ".docx" || mimeType.includes("wordprocessingml")) return docxBlocks(filePath);
   if ([".xlsx", ".xls", ".ods"].includes(extension) || mimeType.includes("spreadsheet")) {
-    return workbookBlocks(filePath);
+    return workbookBlocks(filePath, extension === ".ods" || mimeType.includes("opendocument.spreadsheet") ? ".ods" : extension);
   }
   if (extension === ".pptx" || mimeType.includes("presentationml")) return pptxBlocks(filePath);
   if (mimeType.startsWith("image/") || [".png", ".jpg", ".jpeg", ".webp", ".heic"].includes(extension)) {
@@ -300,6 +308,9 @@ export function buildSearchChunks(
   blocks: ExtractedBlock[],
   maximumCharacters = 6_000,
 ): SearchChunkDraft[] {
+  if (!Number.isSafeInteger(maximumCharacters) || maximumCharacters < 2) {
+    throw new Error("maximumCharacters must be an integer of at least 2");
+  }
   const chunks: SearchChunkDraft[] = [];
   let text = "";
   let ordinals: number[] = [];
@@ -316,11 +327,17 @@ export function buildSearchChunks(
     ordinals = [];
   };
   for (const block of blocks) {
-    if (!block.text.trim()) continue;
-    const separator = text ? "\n\n" : "";
-    if (text.length + separator.length + block.text.length > maximumCharacters && text) flush();
-    text += `${text ? "\n\n" : ""}${block.text}`;
-    ordinals.push(block.ordinal);
+    let remaining = block.text.trim();
+    while (remaining) {
+      if (text && text.length + 2 + remaining.length > maximumCharacters) flush();
+      let end = Math.min(remaining.length, maximumCharacters);
+      // Preserve astral Unicode characters at chunk boundaries.
+      if (end < remaining.length && /[\uD800-\uDBFF]/u.test(remaining[end - 1]!)) end--;
+      text += `${text ? "\n\n" : ""}${remaining.slice(0, end)}`;
+      ordinals.push(block.ordinal);
+      remaining = remaining.slice(end);
+      if (remaining) flush();
+    }
   }
   flush();
   return chunks;

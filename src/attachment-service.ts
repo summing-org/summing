@@ -33,7 +33,7 @@ interface TelegramFileCandidate {
 export class AttachmentError extends Error {}
 
 export interface AudioTranscriber {
-  transcribe(attachment: StoredAttachment): Promise<string>;
+  transcribe(attachment: StoredAttachment, signal?: AbortSignal): Promise<string>;
 }
 
 const AUDIO_EXTENSIONS = new Set([
@@ -283,7 +283,8 @@ abstract class MultipartAudioTranscriber implements AudioTranscriber {
     readonly apiKeyName: string,
   ) {}
 
-  async transcribe(attachment: StoredAttachment): Promise<string> {
+  async transcribe(attachment: StoredAttachment, signal?: AbortSignal): Promise<string> {
+    signal?.throwIfAborted();
     if (!this.apiKey) {
       throw new AttachmentError(
         `Транскрипция аудио через ${this.providerName} не настроена: ` +
@@ -305,7 +306,7 @@ abstract class MultipartAudioTranscriber implements AudioTranscriber {
         method: "POST",
         headers: { authorization: `Bearer ${this.apiKey}` },
         body: form,
-        signal: AbortSignal.timeout(180_000),
+        signal: AbortSignal.any([AbortSignal.timeout(180_000), ...(signal ? [signal] : [])]),
       });
     } catch {
       throw new AttachmentError(`Не удалось связаться с ${this.providerName} API.`);

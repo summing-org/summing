@@ -32,7 +32,8 @@ function textLikeFile(fileName: string, mimeType: string): boolean {
 }
 
 export function detectSecretText(text: string): SecretDetection[] {
-  if (!text || text.length > 2_000_000) return [];
+  if (!text) return [];
+  if (text.length > 2_000_000) return [{ kind: "unscanned-large-text" }];
   const kinds = new Set<string>();
   for (const [kind, pattern] of KNOWN_PATTERNS) {
     if (pattern.test(text)) kinds.add(kind);
@@ -79,6 +80,6 @@ export function detectSecretData(
   if (!textLikeFile(fileName, mimeType)) return [];
   if (data.byteLength > maximumBytes) return [{ kind: "unscanned-large-text" }];
   const sample = Buffer.from(data.buffer, data.byteOffset, data.byteLength);
-  if (sample.includes(0)) return [];
+  if (sample.includes(0)) return [{ kind: "unscanned-binary-text" }];
   return detectSecretText(sample.toString("utf8"));
 }

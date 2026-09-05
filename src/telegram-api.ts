@@ -32,6 +32,12 @@ const TELEGRAM_ATTACHMENT_UPLOADS: Record<ProjectPortalAttachmentKind, {
 };
 
 export class TelegramError extends Error {}
+export class TelegramUncertainError extends TelegramError {}
+
+const RETRY_SAFE_METHODS = new Set([
+  "getUpdates", "getMe", "getFile", "getChat", "getChatMember", "getChatAdministrators",
+  "editMessageText", "deleteMessage", "sendChatAction", "setMyShortDescription", "setChatMenuButton",
+]);
 
 function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -72,6 +78,9 @@ export class TelegramAPI {
         data = record(await response.json());
       } catch {
         if (this.closed) throw new TelegramError("Telegram client is closed");
+        if (!RETRY_SAFE_METHODS.has(method)) {
+          throw new TelegramUncertainError(`Telegram ${method} transport failed; delivery is uncertain`);
+        }
         if (attempt === 3) {
           throw new TelegramError(`Telegram ${method} transport failed`);
         }
@@ -85,6 +94,9 @@ export class TelegramAPI {
         continue;
       }
       if (!response.ok || !data || data.ok !== true) {
+        if (!RETRY_SAFE_METHODS.has(method) && (response.status >= 500 || !data || data.ok !== false)) {
+          throw new TelegramUncertainError(`Telegram ${method} transport failed; delivery is uncertain`);
+        }
         const description = typeof data?.description === "string" ? data.description : response.statusText;
         throw new TelegramError(`Telegram ${method}: ${description}`);
       }
@@ -204,7 +216,7 @@ export class TelegramAPI {
     const result = record(await this.call("sendMessage", payload));
     const messageId = Number(result?.message_id);
     if (!Number.isInteger(messageId) || messageId <= 0) {
-      throw new TelegramError("sendMessage did not return message_id");
+      throw new TelegramUncertainError("Telegram sendMessage transport failed: missing message_id; delivery is uncertain");
     }
     return messageId;
   }
@@ -238,7 +250,7 @@ export class TelegramAPI {
     }));
     const messageId = Number(result?.message_id);
     if (!Number.isInteger(messageId) || messageId <= 0) {
-      throw new TelegramError(`${upload.method} did not return message_id`);
+      throw new TelegramUncertainError(`Telegram ${upload.method} transport failed: missing message_id; delivery is uncertain`);
     }
     return messageId;
   }

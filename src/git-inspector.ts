@@ -1114,9 +1114,9 @@ export class GitInspector {
   }
 
   async workingDiff(): Promise<string> {
-    const tracked = await this.git(["diff", "--no-ext-diff", "--no-color", "HEAD", "--"]);
+    const tracked = await this.publicDiff(["HEAD"]);
     const untracked = await this.git(["ls-files", "--others", "--exclude-standard", "-z"]);
-    const sections = [text(tracked).trimEnd()];
+    const sections = [tracked.trimEnd()];
     for (const path of text(untracked).split("\0").filter(Boolean)) {
       if (deniedPath(path)) continue;
       try {
@@ -1153,8 +1153,20 @@ export class GitInspector {
   async commitDiff(base: string, head: string): Promise<string> {
     const left = await this.resolveRevision(base);
     const right = await this.resolveRevision(head);
-    const result = await this.git(["diff", "--no-ext-diff", "--no-color", left, right, "--"]);
-    return text(result).slice(0, MAX_GIT_OUTPUT);
+    return this.publicDiff([left, right]);
+  }
+
+  private async publicDiff(revisions: string[]): Promise<string> {
+    // Disabling renames prevents an allowed destination from exposing a denied source.
+    const options = ["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-color"];
+    const paths = text(await this.git([...options, "--name-only", "-z", ...revisions, "--"]))
+      .split("\0").filter((path) => path && !deniedPath(path));
+    let result = "";
+    for (let offset = 0; offset < paths.length && result.length < MAX_GIT_OUTPUT; offset += 100) {
+      result += text(await this.git([...options, ...revisions, "--",
+        ...paths.slice(offset, offset + 100).map((path) => `:(literal)${path}`)]));
+    }
+    return result.slice(0, MAX_GIT_OUTPUT);
   }
 
   async resolveRevision(revision: string): Promise<string> {

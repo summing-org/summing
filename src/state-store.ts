@@ -23,6 +23,16 @@ export interface Conversation {
 }
 
 export type ConversationRole = "primary" | "observer";
+export class TelegramIntakeCapacityError extends Error {}
+export interface TelegramIntake {
+  updateId: number;
+  chatId: number;
+  topicId: number;
+  scope: string;
+  messageJson: string;
+  cancelled: boolean;
+  attachment: StoredAttachment | null;
+}
 export interface RunModelSettings {
   requestedModel: string;
   requestedEffort: string;
@@ -1131,6 +1141,17 @@ export class StateStore {
         );
         CREATE INDEX IF NOT EXISTS pending_inputs_lookup
           ON pending_inputs(conversation_id, mode, state, id);
+        CREATE TABLE IF NOT EXISTS telegram_intakes (
+          update_id INTEGER PRIMARY KEY,
+          chat_id INTEGER NOT NULL,
+          topic_id INTEGER NOT NULL,
+          scope TEXT NOT NULL,
+          message_json TEXT NOT NULL,
+          attachment_json TEXT NOT NULL DEFAULT '',
+          cancelled INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS telegram_intakes_topic
+          ON telegram_intakes(chat_id, topic_id, update_id);
         CREATE TABLE IF NOT EXISTS project_portal_bindings (
           id TEXT PRIMARY KEY,
           project_id TEXT NOT NULL,
@@ -4419,6 +4440,8 @@ export class StateStore {
         changed ? 1 : 0,
       );
       if (changed) {
+        this.db.prepare("UPDATE telegram_intakes SET cancelled = 1 WHERE chat_id = ? AND topic_id = ?")
+          .run(chatId, topicId);
         this.db.prepare(
           "UPDATE pending_inputs SET state = 'consumed' WHERE conversation_id = ? AND state = 'pending'",
         ).run(conversationId);
@@ -4514,6 +4537,8 @@ export class StateStore {
 
   unbind(chatId: number, topicId: number): Conversation | null {
     return this.transaction(() => {
+      this.db.prepare("UPDATE telegram_intakes SET cancelled = 1 WHERE chat_id = ? AND topic_id = ?")
+        .run(chatId, topicId);
       const row = this.db
         .prepare("SELECT * FROM conversations WHERE chat_id = ? AND topic_id = ?")
         .get(chatId, topicId) as Row | undefined;
@@ -4740,8 +4765,16 @@ export class StateStore {
     attachments: StoredAttachment[] = [],
     audioTranscript: AudioTranscript | null = null,
     retryOfRunId: number | null = null,
+    intakeUpdateId: number | null = null,
   ): number {
     return this.transaction(() => {
+      if (intakeUpdateId !== null) {
+        const intake = this.telegramIntake(intakeUpdateId);
+        const conversation = this.get(conversationId);
+        if (!intake || intake.cancelled || intake.chatId !== conversation.chatId || intake.topicId !== conversation.topicId) {
+          throw new Error("Telegram intake was cancelled or already consumed");
+        }
+      }
       const result = this.db.prepare(`
         INSERT INTO pending_inputs
           (conversation_id, telegram_message_id, text, mode, access_mode, telegram_user_id,
@@ -4760,6 +4793,8 @@ export class StateStore {
         retryOfRunId,
         Date.now() / 1000,
       );
+      // The durable intake and the agent input change state in the same commit.
+      if (intakeUpdateId !== null) this.db.prepare("DELETE FROM telegram_intakes WHERE update_id = ?").run(intakeUpdateId);
       return Number(result.lastInsertRowid);
     });
   }
@@ -4781,11 +4816,8 @@ export class StateStore {
       throw new Error("retry request is invalid");
     }
     return this.transaction(() => {
-      const run = this.db.prepare(`
-        SELECT conversation_id, request_text, access_mode, response_mode, status
-        FROM runs WHERE id = ?
-      `).get(runId) as Row | undefined;
-      if (!run || String(run.conversation_id) !== conversationId) {
+      const run = this.conversationRun(this.get(conversationId), runId);
+      if (!run) {
         throw new Error("interrupted run was not found in this Conversation");
       }
       if (run.status !== "interrupted") {
@@ -4822,10 +4854,10 @@ export class StateStore {
       `).run(
         conversationId,
         telegramMessageId,
-        run.request_text as SQLInputValue,
-        run.access_mode as SQLInputValue,
+        run.requestText,
+        run.access,
         actorUserId,
-        run.response_mode as SQLInputValue,
+        run.responseMode,
         JSON.stringify(attachments),
         audioTranscript,
         runId,
@@ -5348,6 +5380,15 @@ export class StateStore {
     return row ? projectRunHistory(row) : null;
   }
 
+  /** Historical data belongs to the run's immutable scope, not a reused topic id. */
+  conversationRun(scope: Pick<Conversation, "id" | "projectId" | "workspaceId">, runId: number): ProjectRunHistory | null {
+    const current = this.db.prepare("SELECT project_id, workspace_id FROM conversations WHERE id = ?")
+      .get(scope.id) as Row | undefined;
+    if (!current || current.project_id !== scope.projectId || current.workspace_id !== scope.workspaceId) return null;
+    const run = this.projectRun(scope.projectId, scope.workspaceId, runId);
+    return run?.conversationId === scope.id ? run : null;
+  }
+
   recentProjectRuns(
     projectId: string,
     workspaceId: string,
@@ -5684,6 +5725,57 @@ export class StateStore {
     return this.runDelivery(id)!;
   }
 
+  telegramIntakes(): TelegramIntake[] {
+    return (this.db.prepare("SELECT * FROM telegram_intakes ORDER BY update_id").all() as Row[])
+      .map((row) => this.toTelegramIntake(row));
+  }
+
+  private toTelegramIntake(row: Row): TelegramIntake {
+    return {
+      updateId: Number(row.update_id), chatId: Number(row.chat_id), topicId: Number(row.topic_id),
+      scope: String(row.scope), messageJson: String(row.message_json), cancelled: Boolean(row.cancelled),
+      attachment: row.attachment_json ? storedAttachments([JSON.parse(String(row.attachment_json))])[0] ?? null : null,
+    };
+  }
+
+  telegramIntake(updateId: number): TelegramIntake | null {
+    const row = this.db.prepare("SELECT * FROM telegram_intakes WHERE update_id = ?").get(updateId) as Row | undefined;
+    return row ? this.toTelegramIntake(row) : null;
+  }
+
+  enqueueTelegramIntake(updateId: number, chatId: number, topicId: number, scope: string, messageJson: string): void {
+    this.transaction(() => {
+      if (this.telegramIntake(updateId)) {
+        this.persistTelegramOffset(Math.max(this.telegramOffset() ?? 0, updateId + 1));
+        return;
+      }
+      const pending = this.telegramIntakes();
+      if (Buffer.byteLength(messageJson) > 65_536 || pending.length >= 256 ||
+          pending.filter((item) => item.chatId === chatId && item.topicId === topicId).length >= 32) {
+        throw new TelegramIntakeCapacityError("Очередь вложений заполнена; повторите отправку позднее.");
+      }
+      this.db.prepare(`INSERT INTO telegram_intakes (update_id, chat_id, topic_id, scope, message_json)
+        VALUES (?, ?, ?, ?, ?)`).run(updateId, chatId, topicId, scope, messageJson);
+      // A worker may finish before the next poll. Never allow a restart between
+      // accepting the durable message and advancing its provider offset.
+      this.persistTelegramOffset(Math.max(this.telegramOffset() ?? 0, updateId + 1));
+    });
+  }
+
+  checkpointTelegramIntake(updateId: number, attachment: StoredAttachment): void {
+    this.db.prepare("UPDATE telegram_intakes SET attachment_json = ? WHERE update_id = ? AND cancelled = 0")
+      .run(JSON.stringify(attachment), updateId);
+  }
+
+  finishTelegramIntake(updateId: number): void {
+    this.db.prepare("DELETE FROM telegram_intakes WHERE update_id = ?").run(updateId);
+  }
+
+  cancelTelegramIntakes(chatId: number, topicId: number): number {
+    return Number(this.db.prepare("UPDATE telegram_intakes SET cancelled = 1 WHERE chat_id = ? AND topic_id = ? AND cancelled = 0")
+      .run(chatId, topicId).changes);
+  }
+
   telegramOffset(): number | null {
     const row = this.db.prepare(
       "SELECT value FROM runtime_state WHERE key = 'telegram_offset'",
@@ -5692,12 +5784,14 @@ export class StateStore {
   }
 
   setTelegramOffset(offset: number): void {
-    this.transaction(() => {
-      this.db.prepare(`
-        INSERT INTO runtime_state (key, value) VALUES ('telegram_offset', ?)
-        ON CONFLICT(key) DO UPDATE SET value = excluded.value
-      `).run(String(offset));
-    });
+    this.transaction(() => this.persistTelegramOffset(offset));
+  }
+
+  private persistTelegramOffset(offset: number): void {
+    this.db.prepare(`
+      INSERT INTO runtime_state (key, value) VALUES ('telegram_offset', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(String(offset));
   }
 
   teamModelEgressEnabledOverride(): boolean | null {
