@@ -347,17 +347,25 @@ test("exact Telegram destinations support multiple groups and many-to-many Proje
   }
 });
 
-test("one Project workspace has one primary topic and any number of portals", () => {
+test("one Project workspace has multiple workers and one stable main topic", () => {
   const { root, store } = tempStore();
   try {
     const primary = store.bind(-100500, 9, "demo", "repo", "primary");
     const observer = store.bind(-100501, 10, "demo", "repo", "observer");
     assert.equal(primary.role, "primary");
     assert.equal(observer.role, "observer");
-    assert.throws(
-      () => store.bind(-100502, 11, "demo", "repo", "primary"),
-      /у Project\/Workspace уже есть основной рабочий топик/,
-    );
+    const parallel = store.bind(-100502, 11, "demo", "repo");
+    assert.equal(primary.isPrimary, true);
+    assert.equal(observer.isPrimary, false);
+    assert.equal(parallel.isPrimary, false);
+    assert.equal(store.primaryConversation("demo", "repo")?.id, primary.id);
+    assert.equal(store.bind(-100502, 11, "demo", "repo").isPrimary, false);
+    assert.equal(store.byTopic(-100502, 11)?.id, parallel.id);
+    store.unbind(primary.chatId, primary.topicId);
+    assert.equal(store.primaryConversation("demo", "repo")?.id, parallel.id);
+    store.bind(parallel.chatId, parallel.topicId, "other", "repo");
+    assert.equal(store.primaryConversation("demo", "repo"), null);
+    assert.equal(store.primaryConversation("other", "repo")?.id, parallel.id);
   } finally {
     store.close();
     rmSync(root, { recursive: true, force: true });
@@ -1471,4 +1479,27 @@ test("a user can briefly mark an observed Telegram topic as a report destination
     store.close();
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+
+test("main topic migration preserves existing sessions and persists selection across restart", () => {
+  const { root, path, store } = tempStore();
+  const first = store.bind(-100, 1, "demo", "repo");
+  store.close();
+  const db = new DatabaseSync(path);
+  db.exec("DROP INDEX conversations_one_primary; ALTER TABLE conversations DROP COLUMN is_primary;");
+  db.prepare("UPDATE conversations SET codex_thread_id = ? WHERE id = ?").run("existing-thread", first.id);
+  db.close();
+  let reopened = new StateStore(path);
+  try {
+    assert.equal(reopened.primaryConversation("demo", "repo")?.id, first.id);
+    assert.equal(reopened.get(first.id).codexThreadId, "existing-thread");
+    const second = reopened.bind(-100, 2, "demo", "repo");
+    reopened.bind(-100, 1, "other", "repo");
+    assert.equal(reopened.primaryConversation("demo", "repo")?.id, second.id);
+    reopened.close();
+    reopened = new StateStore(path);
+    assert.equal(reopened.primaryConversation("demo", "repo")?.id, second.id);
+    assert.equal(reopened.primaryConversation("other", "repo")?.id, first.id);
+  } finally { reopened.close(); rmSync(root, { recursive: true, force: true }); }
 });

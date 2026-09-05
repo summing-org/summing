@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHmac } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -13,6 +14,7 @@ import type { GitInspector } from "../src/git-inspector.js";
 
 test("viewer list and diff enforce immutable run scope before and after async artifact reads", async () => {
   const root = mkdtempSync(join(tmpdir(), "summing-run-scope-"));
+  execFileSync("git", ["init", "--quiet", root]);
   const projects = new Map(["alpha", "beta"].map((id) => [id, new ProjectConfig(id, id, "repo", new Map([["repo", { id: "repo", path: root }]]))]));
   const config = new RuntimeConfig(root, join(root, "codex"), join(root, "worktrees"), "token", 1, "codex", 8765, 1, 1, "", "medium", false, projects);
   const state = new StateStore(join(root, "state.sqlite3"));

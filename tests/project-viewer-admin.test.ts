@@ -496,6 +496,7 @@ test("administrator Mini App creates projects and safely rebinds discovered topi
       projectId: "summing",
       workspaceId: "repo",
       role: "primary",
+      isPrimary: true,
       busy: false,
     });
     assert.deepEqual(finalPayload.chats[0]?.topics[0]?.destinations, [{

@@ -3927,7 +3927,7 @@ export class SummingRuntime {
           topicId,
           messageId,
           [
-            "Основной рабочий топик привязан:",
+            bound.isPrimary ? "Основной рабочий топик привязан:" : "Дополнительный рабочий топик привязан:",
             `${targetTitle} / ${topicTitle}`,
             `chat_id: ${targetChatId}, topic_id: ${targetTopicId}`,
             `Project: ${project.id}/${workspace.id}`,
@@ -3995,7 +3995,7 @@ export class SummingRuntime {
           chatId,
           topicId,
           messageId,
-          `Привязано: ${project.name} / ${workspace.id}\nconversation: ${bound.id}`,
+          `Привязано: ${project.name} / ${workspace.id}\nТопик: ${bound.isPrimary ? "основной" : "дополнительный"}\nconversation: ${bound.id}`,
         );
       } catch (error) {
         if (!(error instanceof Error)) throw error;
@@ -4009,6 +4009,45 @@ export class SummingRuntime {
       !this.projects.canAccess(senderId, conversation.projectId)
     ) {
       await this.reply(chatId, topicId, messageId, "Нет доступа к проекту этого topic.");
+      return;
+    }
+    if (command === "/parallel") {
+      if (!conversation || conversation.role === "observer") {
+        await this.reply(chatId, topicId, messageId, "Сначала привяжите рабочий топик командой /bind.");
+        return;
+      }
+      if (chatType !== "supergroup" || !this.state.telegramChat(chatId)?.isForum) {
+        await this.reply(chatId, topicId, messageId, "Команда /parallel доступна в Telegram-группе с топиками.");
+        return;
+      }
+      const name = argument.trim();
+      if (!name || [...name].length > 128) {
+        await this.reply(chatId, topicId, messageId, "Использование: /parallel <название топика> (1–128 символов).");
+        return;
+      }
+      let createdTopicId: number | undefined;
+      try {
+        const created = record(await this.telegram.call("createForumTopic", { chat_id: chatId, name }));
+        const id = Number(created?.message_thread_id);
+        if (!Number.isSafeInteger(id) || id <= 0) throw new Error("Telegram не вернул идентификатор топика.");
+        createdTopicId = id;
+        const current = this.state.byTopic(chatId, topicId);
+        if (!current || current.projectId !== conversation.projectId ||
+          current.workspaceId !== conversation.workspaceId ||
+          (!isAdministrator && !this.projects.canAccess(senderId, conversation.projectId))) {
+          throw new Error("Привязка исходного топика или доступ к проекту изменились во время создания.");
+        }
+        this.state.recordTelegramTopic(chatId, id, name);
+        const bound = this.state.bind(chatId, id, conversation.projectId, conversation.workspaceId);
+        const link = `https://t.me/c/${String(chatId).replace(/^-100/, "")}/${id}`;
+        await this.reply(chatId, topicId, messageId,
+          `Создан рабочий топик «${name}»: ${link}\nПроект: ${bound.projectId}/${bound.workspaceId}\nОтправьте задачу в новом топике. История и настройки модели у него отдельные.`);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        await this.reply(chatId, topicId, messageId, createdTopicId
+          ? `Топик создан (topic_id: ${createdTopicId}). Проверьте его привязку через /status; при необходимости выполните /bind ${conversation.projectId} ${conversation.workspaceId}. Ошибка: ${detail}`
+          : `Не удалось подтвердить создание топика: ${detail}. Проверьте список топиков перед повтором. Боту нужны права управления топиками; существующий топик можно привязать через /bind.`);
+      }
       return;
     }
     if (command === "/model") {

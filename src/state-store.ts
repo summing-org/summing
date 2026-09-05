@@ -11,6 +11,8 @@ export interface Conversation {
   projectId: string;
   workspaceId: string;
   role: ConversationRole;
+  /** Main notification destination; role primary means an editable binding. */
+  isPrimary?: boolean;
   codexThreadId: string | null;
   codexThreadCapability: string;
   previousCodexThreadId: string | null;
@@ -1671,6 +1673,19 @@ export class StateStore {
           "ALTER TABLE conversations ADD COLUMN binding_mode TEXT NOT NULL DEFAULT 'project' " +
             "CHECK(binding_mode IN ('project', 'external-readonly'))",
         );
+      }
+      if (!conversationColumns.some((column) => column.name === "is_primary")) {
+        this.db.exec(`
+          ALTER TABLE conversations ADD COLUMN is_primary INTEGER NOT NULL DEFAULT 0;
+          UPDATE conversations SET is_primary = 1 WHERE binding_mode = 'project'
+            AND id = (SELECT candidate.id FROM conversations candidate
+              WHERE candidate.project_id = conversations.project_id
+                AND candidate.workspace_id = conversations.workspace_id
+                AND candidate.binding_mode = 'project'
+              ORDER BY candidate.created_at, candidate.id LIMIT 1);
+          CREATE UNIQUE INDEX conversations_one_primary
+            ON conversations(project_id, workspace_id) WHERE is_primary = 1;
+        `);
       }
       if (!conversationColumns.some((column) => column.name === "model_override")) {
         this.db.exec(
@@ -4395,19 +4410,6 @@ export class StateStore {
           String(old.binding_mode ?? "project") !== bindingMode
         ),
       );
-      if (role === "primary") {
-        const existingPrimary = this.db.prepare(`
-          SELECT id FROM conversations
-          WHERE project_id = ? AND workspace_id = ? AND binding_mode = 'project' AND id <> ?
-          ORDER BY created_at, id LIMIT 1
-        `).get(projectId, workspaceId, conversationId) as Row | undefined;
-        if (existingPrimary) {
-          throw new Error(
-            "у Project/Workspace уже есть основной рабочий топик; " +
-              "сначала отвяжите или перепривяжите его",
-          );
-        }
-      }
       this.db.prepare(`
         INSERT INTO conversations
           (id, chat_id, topic_id, project_id, workspace_id, binding_mode, created_at, updated_at)
@@ -4416,6 +4418,7 @@ export class StateStore {
           project_id = excluded.project_id,
           workspace_id = excluded.workspace_id,
           binding_mode = excluded.binding_mode,
+          is_primary = CASE WHEN ? THEN 0 ELSE is_primary END,
           codex_thread_id = CASE WHEN ? THEN NULL ELSE codex_thread_id END,
           codex_thread_capability = CASE WHEN ? THEN '' ELSE codex_thread_capability END,
           previous_codex_thread_id = CASE WHEN ? THEN NULL ELSE previous_codex_thread_id END,
@@ -4438,7 +4441,12 @@ export class StateStore {
         changed ? 1 : 0,
         changed ? 1 : 0,
         changed ? 1 : 0,
+        changed ? 1 : 0,
       );
+      if (old && changed) {
+        this.ensurePrimaryConversation(String(old.project_id), String(old.workspace_id));
+      }
+      this.ensurePrimaryConversation(projectId, workspaceId);
       if (changed) {
         this.db.prepare("UPDATE telegram_intakes SET cancelled = 1 WHERE chat_id = ? AND topic_id = ?")
           .run(chatId, topicId);
@@ -4547,6 +4555,7 @@ export class StateStore {
         SELECT project_id, workspace_id FROM project_portal_bindings WHERE conversation_id = ?
       `).get(row.id as SQLInputValue) as Row | undefined;
       this.db.prepare("DELETE FROM conversations WHERE id = ?").run(row.id as SQLInputValue);
+      this.ensurePrimaryConversation(String(row.project_id), String(row.workspace_id));
       if (portal) {
         this.ensureProjectPortalDefault(String(portal.project_id), String(portal.workspace_id));
       }
@@ -4582,10 +4591,21 @@ export class StateStore {
       .map((row) => this.toConversation(row));
   }
 
+  private ensurePrimaryConversation(projectId: string, workspaceId: string): void {
+    this.db.prepare(`
+      UPDATE conversations SET is_primary = 1 WHERE id = (
+        SELECT id FROM conversations WHERE project_id = ? AND workspace_id = ?
+          AND binding_mode = 'project' ORDER BY created_at, id LIMIT 1
+      ) AND NOT EXISTS (
+        SELECT 1 FROM conversations WHERE project_id = ? AND workspace_id = ? AND is_primary = 1
+      )
+    `).run(projectId, workspaceId, projectId, workspaceId);
+  }
+
   primaryConversation(projectId: string, workspaceId: string): Conversation | null {
     const row = this.db.prepare(`
       SELECT * FROM conversations
-      WHERE project_id = ? AND workspace_id = ? AND binding_mode = 'project'
+      WHERE project_id = ? AND workspace_id = ? AND binding_mode = 'project' AND is_primary = 1
       ORDER BY created_at, id LIMIT 1
     `).get(projectId, workspaceId) as Row | undefined;
     return row ? this.toConversation(row) : null;
@@ -4598,6 +4618,7 @@ export class StateStore {
       topicId: Number(row.topic_id),
       projectId: String(row.project_id),
       workspaceId: String(row.workspace_id),
+      isPrimary: Number(row.is_primary) === 1,
       role: String(row.binding_mode ?? "project") === "external-readonly"
         ? "observer"
         : "primary",

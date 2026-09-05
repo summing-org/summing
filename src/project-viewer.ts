@@ -1333,6 +1333,7 @@ export class ProjectViewerServer {
                 projectId: conversation.projectId,
                 workspaceId: conversation.workspaceId,
                 role: "primary",
+                isPrimary: conversation.isPrimary,
                 busy:
                   conversation.activeTurnId !== null ||
                   this.state.pendingAll(conversation.id).length > 0 ||

@@ -111,6 +111,15 @@ test("upgrades the previous identity, worktree branch, and runtime directory to 
     writeFileSync(join(source, ".git", "info", "exclude"), `.${retiredPrefix}-runtime/\n`);
 
     await manager.prepare(conversation, project, workspace);
+    const parallel = { ...conversation, id: "tg-parallel", isPrimary: false };
+    const isolated = await manager.prepare(parallel, project, workspace);
+    assert.notEqual(isolated.path, worktree);
+    writeFileSync(join(isolated.path, "parallel-only.txt"), "independent");
+    assert.equal(existsSync(join(worktree, "parallel-only.txt")), false);
+    assert.equal(existsSync(join(source, "parallel-only.txt")), false);
+    assert.notEqual(await manager.runLockKey(conversation, workspace),
+      await manager.runLockKey(parallel, workspace));
+
 
     assert.equal(existsSync(retiredRuntime), false);
     assert.equal(

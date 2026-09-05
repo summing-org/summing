@@ -1200,7 +1200,7 @@ destination или сделать fan-out. `/publish`, неявный fan-out и
 
 Когда внешний topic нужен не только для discussion одного результата, owner или
 администратор привязывает к Project точную пару `(chatId, topicId)`. Один
-Project/Workspace имеет один primary topic и любое число внешних destinations в одной
+Project/Workspace имеет несколько рабочих conversations, один основной topic и любое число внешних destinations в одной
 или нескольких группах; одна и та же пара при необходимости может быть разрешена
 нескольким Project. Логических alias/ключей поверх Telegram-адреса нет.
 
@@ -1310,6 +1310,7 @@ thread без `runner-control-v1` атомарно переносится в `pr
 | `/bind_topic <chat_id> <topic_id> <project> [workspace]` | Удалённо назначить основной рабочий topic; только администратор в личном чате. |
 | `/projects` | Список доступных отправителю Project и Workspace. |
 | `/bind <project> [workspace]` | Привязать текущий topic. |
+| `/parallel <название>` | Создать дополнительный рабочий топик того же Project/Workspace. |
 | `/status` | Версия SUMMING, account, plan, binding, точная модель topic и active/pending. |
 | `/model [model [effort]]` | Получить live-каталог Codex или выбрать модель и reasoning effort только для текущего topic. |
 | `/model default` | После проверки удалить override topic: наследовать `agent.model`, а если он пуст — default Codex. |
@@ -1410,7 +1411,7 @@ $SUMMING_DATA_DIR/
 SQLite хранит:
 
 - active binding `chat_id/topic_id → project/workspace`; application invariant — один
-  primary на Project/Workspace;
+  основной адресат (`is_primary = 1`) на Project/Workspace, рабочих conversations может быть несколько;
 - customer channels без Project binding, result publications, discussion-message
   correlation и Project feedback;
 - many-to-many exact routes `project/workspace ↔ Telegram chatId/topicId` для произвольных
@@ -2265,3 +2266,24 @@ Telegram/OpenAI/Groq end-to-end теста в репозитории нет.
 Новая возможность должна добавляться только при конкретном пользовательском
 сценарии. Предпочтительный путь развития — улучшать надёжность существующего
 контура без накопления лишней платформенной сложности.
+
+
+### Дополнительные рабочие conversations
+
+`/parallel <название>` в привязанном forum-топике создаёт Telegram topic и рабочую
+conversation того же Project/Workspace. `/bind` во втором топике также разрешён.
+Каждый `(chat_id, topic_id)` сохраняет собственный conversation id, threads, model
+settings, pending queue и worktree. Название ограничено 128 символами. Создание требует
+доступа к проекту и Telegram-права бота управлять топиками. При неоднозначном ответе
+Telegram автоматического повтора нет: сначала проверить список топиков.
+
+`binding_mode = project` и историческое API-поле `role = primary` обозначают рабочую
+привязку; адресат общих уведомлений хранится отдельно в `is_primary`. Миграция сохраняет
+существующие conversations и threads, выбирая один основной топик по `(created_at, id)`.
+Частичный UNIQUE index запрещает двух основных адресатов для одного Project/Workspace.
+Повторный bind не меняет основной топик. Unbind/rebind основного атомарно назначает
+самый старый оставшийся рабочий топик. Observer/external destinations не участвуют.
+История нового топика пустая; model/effort наследуются от сервера. Для Git workspaces
+ветки и worktrees отдельные; без Git общий workspace lock сериализует работу с папкой.
+Закрытие Telegram-топика не делает unbind или Git merge. Интеграция кода остаётся
+отдельным действием с проверкой и подтверждением.
