@@ -47,6 +47,7 @@ test("a successful editor run uploads generated outbox files to its Telegram rep
   ));
   runtime.workspaces.initialize();
   const conversation = runtime.state.bind(42, 0, "demo", "repo");
+  runtime.state.setConversationModel(conversation.id, "gpt-astra", "high");
   const attachmentDirectory = join(runtime.attachments.spoolRoot, conversation.id);
   mkdirSync(attachmentDirectory, { recursive: true });
   const attachmentPath = join(attachmentDirectory, "owner-photo.jpg");
@@ -98,6 +99,8 @@ test("a successful editor run uploads generated outbox files to its Telegram rep
     }
   ).routeCodexEvent.bind(runtime);
   runtime.codex.startTurn = async (threadId, _prompt, cwd, options) => {
+    assert.equal(options?.model, "gpt-astra");
+    assert.equal(options?.effort, "high");
     receivedLocalImagePaths = options?.localImagePaths ?? [];
     assert.deepEqual(receivedLocalImagePaths, [
       join(cwd, ".summing-runtime", "attachments", `18-${imageInputId}-owner-photo.jpg`),

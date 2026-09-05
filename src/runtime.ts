@@ -6,6 +6,7 @@ import { Deferred, KeyedMutex, Semaphore } from "./async-primitives.js";
 import {
   CodexAppServer,
   CodexProtocolError,
+  type CodexModel,
   type DynamicToolCall,
   type DynamicToolCallResult,
   type CodexEvent,
@@ -569,12 +570,16 @@ interface ActiveRun extends CodexResponseRun {
   access: RunAccess;
   actorUserId: number;
   cancelRequested: boolean;
+  model: string;
+  effort: string;
 }
 
 interface ActiveReview extends CodexResponseRun {
   conversation: Conversation;
   runId: number;
   sourceThreadId: string;
+  model: string;
+  effort: string;
 }
 
 interface UnboundTopicMessage {
@@ -617,6 +622,12 @@ interface TeamUnderstandingTimer {
 interface ParticipantRateState {
   timestamps: number[];
   notifiedAt: number;
+}
+
+interface EffectiveConversationModel {
+  model: string;
+  effort: string;
+  source: "conversation" | "config" | "codex-default";
 }
 
 export class SummingRuntime {
@@ -665,6 +676,7 @@ export class SummingRuntime {
   private readonly teamUnderstandingTimers = new Map<string, TeamUnderstandingTimer>();
   private readonly teamUnderstandingFailureCounts = new Map<string, number>();
   private readonly loadedThreads = new Set<string>();
+  private modelCatalogCache: { expiresAt: number; models: CodexModel[] } | null = null;
   private readonly workspaceRuns = new KeyedMutex();
   private readonly participantRates = new Map<string, ParticipantRateState>();
   private telegramBotId = 0;
@@ -3402,6 +3414,76 @@ export class SummingRuntime {
     return true;
   }
 
+  private async codexModels(force = false): Promise<CodexModel[]> {
+    const now = Date.now();
+    if (!force && this.modelCatalogCache && this.modelCatalogCache.expiresAt > now) {
+      return this.modelCatalogCache.models;
+    }
+    const models = (await this.codex.models(false)).filter((model) => !model.hidden);
+    if (models.length === 0) throw new Error("Codex не вернул ни одной доступной модели");
+    this.modelCatalogCache = { expiresAt: now + 300_000, models };
+    return models;
+  }
+
+  private async effectiveConversationModel(
+    conversation: Conversation,
+    forceCatalog = false,
+  ): Promise<EffectiveConversationModel> {
+    if (conversation.modelOverride) {
+      return {
+        model: conversation.modelOverride,
+        effort: conversation.effortOverride || this.config.effort,
+        source: "conversation",
+      };
+    }
+    if (this.config.model) {
+      return { model: this.config.model, effort: this.config.effort, source: "config" };
+    }
+    const defaultModel = (await this.codexModels(forceCatalog)).find((model) => model.isDefault);
+    if (!defaultModel) {
+      throw new Error("Codex не обозначил модель по умолчанию; выберите её командой /model");
+    }
+    return {
+      model: defaultModel.model,
+      effort: this.config.effort || defaultModel.defaultReasoningEffort,
+      source: "codex-default",
+    };
+  }
+
+  private modelSelectionText(
+    selection: EffectiveConversationModel,
+    models: CodexModel[],
+    active: Pick<ActiveRun, "model" | "effort"> | null,
+  ): string {
+    const source = selection.source === "conversation"
+      ? "настройка этого topic"
+      : selection.source === "config"
+        ? "конфигурация сервера"
+        : "live default Codex";
+    const lines = [
+      `Модель этого topic: ${selection.model}`,
+      `Reasoning effort: ${selection.effort}`,
+      `Источник: ${source}`,
+    ];
+    if (active && (active.model !== selection.model || active.effort !== selection.effort)) {
+      lines.push(
+        `Активный run продолжает работать на ${active.model} (${active.effort}); выбор применяется со следующего run.`,
+      );
+    }
+    lines.push("", "Доступные модели:");
+    for (const model of models) {
+      const efforts = model.supportedReasoningEfforts
+        .map((item) => item.reasoningEffort)
+        .join(", ");
+      lines.push(
+        `- ${model.model}${model.isDefault ? " [default]" : ""}` +
+          `${efforts ? ` — effort: ${efforts}` : ""}`,
+      );
+    }
+    lines.push("", "Выбор: /model <model> [effort]", "Сброс: /model default");
+    return lines.join("\n");
+  }
+
   private async handleCommand(
     chatId: number,
     topicId: number,
@@ -3789,6 +3871,94 @@ export class SummingRuntime {
       await this.reply(chatId, topicId, messageId, "Нет доступа к проекту этого topic.");
       return;
     }
+    if (command === "/model") {
+      if (!conversation) {
+        await this.reply(chatId, topicId, messageId, "Сначала привяжите topic к проекту командой /bind.");
+        return;
+      }
+      try {
+        const models = await this.codexModels(true);
+        const parts = argument.split(/\s+/u).filter(Boolean);
+        if (parts.length === 0) {
+          const selection = await this.effectiveConversationModel(conversation);
+          await this.replyLong(
+            chatId,
+            topicId,
+            messageId,
+            this.modelSelectionText(
+              selection,
+              models,
+              this.activeForConversation(conversation.id) ??
+                this.activeReviewForConversation(conversation.id),
+            ),
+          );
+          return;
+        }
+        if (parts.length > 2) {
+          await this.reply(chatId, topicId, messageId, "Использование: /model <model> [effort]");
+          return;
+        }
+        if (parts[0]!.toLowerCase() === "default") {
+          if (parts.length !== 1) {
+            await this.reply(chatId, topicId, messageId, "Использование: /model default");
+            return;
+          }
+          this.state.setConversationModel(conversation.id, "", "");
+        } else {
+          const requested = parts[0]!.toLowerCase();
+          const model = models.find((candidate) =>
+            candidate.model.toLowerCase() === requested || candidate.id.toLowerCase() === requested
+          );
+          if (!model) {
+            await this.reply(
+              chatId,
+              topicId,
+              messageId,
+              `Модель ${parts[0]} отсутствует в live-каталоге Codex. Используйте /model для списка.`,
+            );
+            return;
+          }
+          const requestedEffort = parts[1]?.toLowerCase() ?? model.defaultReasoningEffort;
+          const efforts = model.supportedReasoningEfforts.map((item) => item.reasoningEffort);
+          if (efforts.length > 0 && !efforts.includes(requestedEffort)) {
+            await this.reply(
+              chatId,
+              topicId,
+              messageId,
+              `Для ${model.model} доступны effort: ${efforts.join(", ")}.`,
+            );
+            return;
+          }
+          this.state.setConversationModel(conversation.id, model.model, requestedEffort);
+        }
+        if (conversation.readOnlyCodexThreadId) {
+          this.loadedThreads.delete(conversation.readOnlyCodexThreadId);
+          this.codex.detachThreadHandler(conversation.readOnlyCodexThreadId);
+          this.state.setThread(conversation.id, null, "read-only");
+        }
+        const updated = this.state.get(conversation.id);
+        const selection = await this.effectiveConversationModel(updated);
+        const active = this.activeForConversation(conversation.id) ??
+          this.activeReviewForConversation(conversation.id);
+        const suffix = active
+          ? `\nАктивный run продолжает работать на ${active.model} (${active.effort}); выбор применяется со следующего run.`
+          : "\nВыбор применяется со следующего run.";
+        await this.reply(
+          chatId,
+          topicId,
+          messageId,
+          `Модель этого topic: ${selection.model}\nReasoning effort: ${selection.effort}${suffix}`,
+        );
+      } catch (error) {
+        await this.reply(
+          chatId,
+          topicId,
+          messageId,
+          `Не удалось прочитать каталог моделей: ${errorText(error)}`,
+        );
+      }
+      return;
+    }
     if (command === "/files") {
       if (!conversation) {
         await this.reply(chatId, topicId, messageId, "Сначала привяжите topic к проекту командой /bind.");
@@ -3902,6 +4072,25 @@ export class SummingRuntime {
         ? this.state.conversationRunDeliveries(conversation.id, 20)
           .filter((delivery) => !["sent", "cancelled"].includes(delivery.status))
         : [];
+      let modelStatus = "Model: topic не привязан";
+      if (conversation) {
+        try {
+          const selected = await this.effectiveConversationModel(conversation, true);
+          const activeRun = this.activeForConversation(conversation.id) ??
+            this.activeReviewForConversation(conversation.id);
+          modelStatus = `Model: ${selected.model} (${selected.effort}, ${
+            selected.source === "conversation" ? "topic" : selected.source
+          })`;
+          if (
+            activeRun &&
+            (activeRun.model !== selected.model || activeRun.effort !== selected.effort)
+          ) {
+            modelStatus += `; active: ${activeRun.model} (${activeRun.effort})`;
+          }
+        } catch (error) {
+          modelStatus = `Model: не определена (${errorText(error)})`;
+        }
+      }
       await this.reply(
         chatId,
         topicId,
@@ -3917,6 +4106,7 @@ export class SummingRuntime {
               : `${this.config.transcriptionProvider} — не настроена`
           }`,
           `Binding: ${binding}`,
+          modelStatus,
           `Active: ${String(active)}, pending inputs: ${String(pending)}`,
           `Delivery attention: ${deliveryAttention.length > 0
             ? deliveryAttention
@@ -4397,6 +4587,7 @@ export class SummingRuntime {
       const readOnlyDeniedPaths = await this.workspaces.readOnlyDeniedPaths(prepared.readableRoot);
       this.state.setWorktree(conversation.id, prepared.path);
       conversation = this.state.get(conversation.id);
+      const modelSelection = await this.effectiveConversationModel(conversation);
       const sourceThreadId = await this.thread(
         conversation,
         prepared.path,
@@ -4404,6 +4595,7 @@ export class SummingRuntime {
         prepared.gitMetadataRoots,
         readOnlyDeniedPaths,
         "read-only",
+        modelSelection.model,
       );
       const root = await GitInspector.worktreeRoot(prepared.readableRoot);
       inspector = new GitInspector(root);
@@ -4419,6 +4611,8 @@ export class SummingRuntime {
         conversation,
         runId,
         sourceThreadId,
+        model: modelSelection.model,
+        effort: modelSelection.effort,
         threadId: started.reviewThreadId,
         turnId: started.turnId,
         stream,
@@ -4741,6 +4935,7 @@ export class SummingRuntime {
           : [];
       this.state.setWorktree(conversation.id, prepared.path);
       conversation = this.state.get(conversation.id);
+      const modelSelection = await this.effectiveConversationModel(conversation);
       const threadId = await this.thread(
         conversation,
         prepared.path,
@@ -4748,6 +4943,7 @@ export class SummingRuntime {
         prepared.gitMetadataRoots,
         readOnlyDeniedPaths,
         access,
+        modelSelection.model,
       );
       stream.start(replyTo);
       this.state.setActive(conversation.id, "starting", null);
@@ -4759,6 +4955,8 @@ export class SummingRuntime {
         prepared,
         access,
         actorUserId: inputs.at(-1)?.senderId ?? this.config.telegramOwnerId,
+        model: modelSelection.model,
+        effort: modelSelection.effort,
         turnId: null,
         response: "",
         commentary: [],
@@ -4789,8 +4987,8 @@ export class SummingRuntime {
             runPrompt,
         prepared.path,
         {
-          model: this.config.model,
-          effort: this.config.effort,
+          model: modelSelection.model,
+          effort: modelSelection.effort,
           networkAccess: access === "write" && this.config.networkAccess,
           gitMetadataRoots: prepared.gitMetadataRoots,
           localImagePaths: materializedAttachments
@@ -5038,6 +5236,7 @@ export class SummingRuntime {
     gitMetadataRoots: string[],
     readOnlyDeniedPaths: string[],
     access: RunAccess,
+    model: string,
   ): Promise<string> {
     if (
       access === "write" &&
@@ -5079,7 +5278,7 @@ export class SummingRuntime {
         } catch (error) {
           if (!(error instanceof CodexProtocolError)) throw error;
           console.warn(`could not resume ${existingThreadId}; starting a new Codex thread`);
-          const threadId = await this.codex.startThread(cwd, this.config.model, permissions);
+          const threadId = await this.codex.startThread(cwd, model, permissions);
           this.state.setThread(
             conversation.id,
             threadId,
@@ -5093,7 +5292,7 @@ export class SummingRuntime {
       }
       return existingThreadId;
     }
-    const threadId = await this.codex.startThread(cwd, this.config.model, permissions);
+    const threadId = await this.codex.startThread(cwd, model, permissions);
     this.state.setThread(
       conversation.id,
       threadId,

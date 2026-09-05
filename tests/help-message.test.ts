@@ -38,6 +38,8 @@ test("help describes everyday commands with examples", () => {
 
   assert.match(help, /^\*Помощь по SUMMING\*/);
   assert.match(help, /`\/status` — показать версию SUMMING/);
+  assert.match(help, /`\/model \[model \[effort\]\]`/);
+  assert.match(help, /Пример: `\/model gpt\-5\.6\-luna high`/);
   assert.match(help, /`\/topic_id` — показать chat\\_id и topic\\_id/);
   assert.match(help, /`\/env` — открыть энвы репозитория/);
   assert.match(help, /Пример: `\/bind shop backend`/);

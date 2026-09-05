@@ -49,6 +49,7 @@ async function reviewFixture(mutatesWorkspace: boolean): Promise<{
   ));
   runtime.workspaces.initialize();
   const conversation = runtime.state.bind(42, 0, "demo", "repo");
+  runtime.state.setConversationModel(conversation.id, "gpt-astra", "high");
   const messages: string[] = [];
   runtime.telegram.sendChatAction = async () => undefined;
   runtime.telegram.sendMessage = async (_chatId, text) => {
@@ -59,8 +60,9 @@ async function reviewFixture(mutatesWorkspace: boolean): Promise<{
   runtime.telegram.deleteMessage = async () => undefined;
   runtime.codex.account = async () => ({ account: { type: "chatgpt" } });
   let reviewCwd = repository;
-  runtime.codex.startThread = async (cwd, _model, options) => {
+  runtime.codex.startThread = async (cwd, model, options) => {
     reviewCwd = cwd;
+    assert.equal(model, "gpt-astra");
     assert.equal(options?.readOnly, true);
     assert.equal(options?.networkAccess, false);
     return "thread-review-source";

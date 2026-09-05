@@ -21,6 +21,11 @@ test("binding, input queues, and Telegram offset", () => {
     store.setThread(conversation.id, "thr_readonly", "read-only");
     assert.equal(store.get(conversation.id).codexThreadId, "thr_1");
     assert.equal(store.get(conversation.id).readOnlyCodexThreadId, "thr_readonly");
+    assert.equal(store.get(conversation.id).modelOverride, "");
+    assert.equal(store.get(conversation.id).effortOverride, "");
+    store.setConversationModel(conversation.id, "gpt-5.6-luna", "high");
+    assert.equal(store.get(conversation.id).modelOverride, "gpt-5.6-luna");
+    assert.equal(store.get(conversation.id).effortOverride, "high");
     store.setActive(conversation.id, "turn_1", 99);
     const steerId = store.enqueueInput(conversation.id, 10, "stop editing", "steer");
     const followId = store.enqueueInput(conversation.id, 11, "also inspect logout", "followup");
@@ -1224,6 +1229,8 @@ test("migrates existing conversations to separate read-only state", () => {
   try {
     assert.equal(migrated.get("legacy").codexThreadId, "thr_write");
     assert.equal(migrated.get("legacy").readOnlyCodexThreadId, null);
+    assert.equal(migrated.get("legacy").modelOverride, "");
+    assert.equal(migrated.get("legacy").effortOverride, "");
     assert.equal(migrated.pendingAll("legacy")[0]?.access, "write");
     assert.equal(migrated.pendingAll("legacy")[0]?.senderId, 0);
     assert.equal(migrated.pendingAll("legacy")[0]?.responseMode, "direct");

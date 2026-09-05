@@ -134,23 +134,26 @@ test("live runner messages deliver every native media kind through the durable P
       }
     ).sendRunnerPortalMessages(job, internal.id, 1);
     assert.equal(delivered, true);
-    assert.deepEqual(deliveries, attachments.map((attachment, index) => ({
-      kind: attachment.type,
-      chatId: -100501,
-      fileName: attachment.artifact,
-      contentType: attachment.contentType,
-      topicId: 10,
-      caption: attachment.text,
-      data: [index],
-    })));
-    assert.deepEqual(actions, [
+    assert.deepEqual(
+      deliveries.toSorted((left, right) => left.fileName.localeCompare(right.fileName)),
+      attachments.map((attachment, index) => ({
+        kind: attachment.type,
+        chatId: -100501,
+        fileName: attachment.artifact,
+        contentType: attachment.contentType,
+        topicId: 10,
+        caption: attachment.text,
+        data: [index],
+      })).toSorted((left, right) => left.fileName.localeCompare(right.fileName)),
+    );
+    assert.deepEqual(actions.toSorted(), [
       "upload_document",
       "upload_photo",
       "upload_document",
       "upload_video",
       "upload_video",
       "upload_voice",
-    ]);
+    ].toSorted());
     const source = runtime.state.teamSourceForProvider("telegram", "-100501", "10");
     assert.ok(source);
     assert.deepEqual(

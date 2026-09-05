@@ -18,6 +18,8 @@ export interface Conversation {
   activeTurnId: string | null;
   streamMessageId: number | null;
   worktreePath: string | null;
+  modelOverride: string;
+  effortOverride: string;
 }
 
 export type ConversationRole = "primary" | "observer";
@@ -1096,6 +1098,8 @@ export class StateStore {
           active_turn_id TEXT,
           stream_message_id INTEGER,
           worktree_path TEXT,
+          model_override TEXT NOT NULL DEFAULT '',
+          effort_override TEXT NOT NULL DEFAULT '',
           created_at REAL NOT NULL,
           updated_at REAL NOT NULL,
           UNIQUE(chat_id, topic_id)
@@ -1637,6 +1641,16 @@ export class StateStore {
         this.db.exec(
           "ALTER TABLE conversations ADD COLUMN binding_mode TEXT NOT NULL DEFAULT 'project' " +
             "CHECK(binding_mode IN ('project', 'external-readonly'))",
+        );
+      }
+      if (!conversationColumns.some((column) => column.name === "model_override")) {
+        this.db.exec(
+          "ALTER TABLE conversations ADD COLUMN model_override TEXT NOT NULL DEFAULT ''",
+        );
+      }
+      if (!conversationColumns.some((column) => column.name === "effort_override")) {
+        this.db.exec(
+          "ALTER TABLE conversations ADD COLUMN effort_override TEXT NOT NULL DEFAULT ''",
         );
       }
       this.migrateProjectPortalBindings();
@@ -4560,6 +4574,8 @@ export class StateStore {
       activeTurnId: row.active_turn_id === null ? null : String(row.active_turn_id),
       streamMessageId: row.stream_message_id === null ? null : Number(row.stream_message_id),
       worktreePath: row.worktree_path === null ? null : String(row.worktree_path),
+      modelOverride: String(row.model_override ?? ""),
+      effortOverride: String(row.effort_override ?? ""),
     };
   }
 
@@ -4664,6 +4680,17 @@ export class StateStore {
 
   setWorktree(conversationId: string, path: string): void {
     this.updateConversation(conversationId, "worktree_path", path);
+  }
+
+  setConversationModel(conversationId: string, model: string, effort: string): void {
+    this.transaction(() => {
+      const result = this.db.prepare(`
+        UPDATE conversations
+        SET model_override = ?, effort_override = ?, updated_at = ?
+        WHERE id = ?
+      `).run(model, effort, Date.now() / 1000, conversationId);
+      if (result.changes !== 1) throw new Error(`unknown conversation: ${conversationId}`);
+    });
   }
 
   setActive(conversationId: string, turnId: string | null, streamMessageId: number | null): void {

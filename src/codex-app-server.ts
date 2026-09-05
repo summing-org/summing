@@ -145,6 +145,22 @@ export interface CodexReviewStart {
   turnId: string;
 }
 
+export interface CodexModelReasoningEffort {
+  reasoningEffort: string;
+  description: string;
+}
+
+export interface CodexModel {
+  id: string;
+  model: string;
+  displayName: string;
+  description: string;
+  hidden: boolean;
+  isDefault: boolean;
+  defaultReasoningEffort: string;
+  supportedReasoningEfforts: CodexModelReasoningEffort[];
+}
+
 export class CodexAppServer extends EventEmitter {
   private process: ChildProcessWithoutNullStreams | null = null;
   private readonly pending = new Map<number, PendingRequest>();
@@ -436,6 +452,49 @@ export class CodexAppServer extends EventEmitter {
       threadId ? { threadId } : {},
       30_000,
     ));
+  }
+
+  async models(includeHidden = false): Promise<CodexModel[]> {
+    const models: CodexModel[] = [];
+    let cursor = "";
+    for (let page = 0; page < 20; page += 1) {
+      const params: JsonRecord = { includeHidden, limit: 100 };
+      if (cursor) params.cursor = cursor;
+      const result = this.record(await this.request("model/list", params, 30_000));
+      const data = Array.isArray(result.data) ? result.data : [];
+      for (const value of data) {
+        const entry = this.record(value);
+        if (typeof entry.id !== "string" || typeof entry.model !== "string") continue;
+        const efforts = Array.isArray(entry.supportedReasoningEfforts)
+          ? entry.supportedReasoningEfforts.flatMap((effortValue) => {
+              const effort = this.record(effortValue);
+              return typeof effort.reasoningEffort === "string"
+                ? [{
+                    reasoningEffort: effort.reasoningEffort,
+                    description: typeof effort.description === "string" ? effort.description : "",
+                  }]
+                : [];
+            })
+          : [];
+        models.push({
+          id: entry.id,
+          model: entry.model,
+          displayName: typeof entry.displayName === "string" ? entry.displayName : entry.model,
+          description: typeof entry.description === "string" ? entry.description : "",
+          hidden: entry.hidden === true,
+          isDefault: entry.isDefault === true,
+          defaultReasoningEffort:
+            typeof entry.defaultReasoningEffort === "string"
+              ? entry.defaultReasoningEffort
+              : efforts[0]?.reasoningEffort ?? "medium",
+          supportedReasoningEfforts: efforts,
+        });
+      }
+      const nextCursor = typeof result.nextCursor === "string" ? result.nextCursor : "";
+      if (!nextCursor || nextCursor === cursor) return models;
+      cursor = nextCursor;
+    }
+    throw new CodexProtocolError("model/list returned too many pages");
   }
 
   async startThread(

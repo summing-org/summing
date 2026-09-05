@@ -1,6 +1,6 @@
-# SUMMING 9.31: архитектура, эксплуатация и разработка
+# SUMMING 9.32: архитектура, эксплуатация и разработка
 
-> Версия: **9.31.0**
+> Версия: **9.32.0**
 > Целевая среда: один Linux VPS, один администратор, владельцы проектов, один Telegram-бот.
 > Последняя сверка с кодом: **5 сентября 2026 года**.
 
@@ -1279,7 +1279,9 @@ thread без `runner-control-v1` атомарно переносится в `pr
 | `/bind_topic <chat_id> <topic_id> <project> [workspace]` | Удалённо назначить основной рабочий topic; только администратор в личном чате. |
 | `/projects` | Список доступных отправителю Project и Workspace. |
 | `/bind <project> [workspace]` | Привязать текущий topic. |
-| `/status` | Версия SUMMING, account, plan, binding, active/pending. |
+| `/status` | Версия SUMMING, account, plan, binding, точная модель topic и active/pending. |
+| `/model [model [effort]]` | Получить live-каталог Codex или выбрать модель и reasoning effort только для текущего topic. |
+| `/model default` | Удалить override текущего topic и снова использовать live default Codex. |
 | `/files` | Deep link в личный чат и Telegram Mini App Project Viewer. |
 | `/steer <текст>` | Направить текст в текущий Codex turn. |
 | `/cancel` | Прервать активный turn topic. |
@@ -1293,6 +1295,18 @@ thread без `runner-control-v1` атомарно переносится в `pr
 При `/bind` без Workspace используется `default_workspace` Project.
 Project owner не может перепривязать topic, уже принадлежащий другому Project;
 администратор может работать со всеми bindings.
+
+Выбор модели хранится в SQLite на уровне Conversation, чей идентификатор
+стабильно выводится из точной пары `(chatId, topicId)`. Поэтому два топика одного
+проекта не разделяют override. Runtime получает список через официальный
+Codex App Server `model/list`, принимает только присутствующие в live-каталоге
+model ID и поддерживаемый этой моделью reasoning effort, затем явно передаёт оба
+значения в `turn/start`. Если `agent.model` пуст и override не установлен,
+runtime разрешает модель, помеченную `isDefault` в live-каталоге, до запуска
+turn — `/status` поэтому сообщает конкретную модель, а не неопределённое
+«по умолчанию». Смена во время активного run сохраняется немедленно, но действует
+со следующего run; уже запущенный turn продолжает работу на прежней модели.
+
 Перепривязка topic к другому Project/Workspace сбрасывает Codex thread и путь
 worktree в SQLite, очищает active state и помечает ожидающие inputs как
 `consumed`, потому что старый контекст не должен пересекать границу проекта.
@@ -1865,7 +1879,7 @@ curl --fail --silent http://127.0.0.1:8765/state
 ```json
 {
   "ok": true,
-  "version": "9.31.0",
+  "version": "9.32.0",
   "codex_running": true,
   "auth": "chatgpt",
   "plan": "plus",

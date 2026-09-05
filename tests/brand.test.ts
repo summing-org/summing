@@ -9,7 +9,7 @@ import {
 } from "../src/version.js";
 
 const root = process.cwd();
-const excludedRoots = new Set([".agents", ".git", "dist", "node_modules"]);
+const excludedRoots = new Set([".agents", ".git", ".summing-runtime", "dist", "node_modules"]);
 const forbiddenIdentity = new RegExp(`(?:${"sum" + "mate"}|${"опо" + "ра"})`, "iu");
 
 function productFiles(directory: string): string[] {

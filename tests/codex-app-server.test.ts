@@ -479,6 +479,61 @@ test("thread and turn requests use official v2 shapes", async (context) => {
   );
 });
 
+test("model catalog follows model/list pagination and normalizes official fields", async () => {
+  class FakeCodex extends CodexAppServer {
+    readonly calls: Array<[string, JsonRecord]> = [];
+
+    override async request(method: string, params: JsonRecord = {}): Promise<unknown> {
+      this.calls.push([method, params]);
+      if (params.cursor === "page-2") {
+        return {
+          data: [{
+            id: "astra",
+            model: "gpt-astra",
+            displayName: "GPT Astra",
+            hidden: false,
+            isDefault: false,
+            defaultReasoningEffort: "high",
+            supportedReasoningEfforts: [{ reasoningEffort: "high", description: "Deep" }],
+          }],
+          nextCursor: null,
+        };
+      }
+      return {
+        data: [{
+          id: "luna",
+          model: "gpt-5.6-luna",
+          displayName: "GPT 5.6 Luna",
+          description: "Fast",
+          hidden: false,
+          isDefault: true,
+          defaultReasoningEffort: "medium",
+          supportedReasoningEfforts: [
+            { reasoningEffort: "low", description: "Fastest" },
+            { reasoningEffort: "medium", description: "Balanced" },
+          ],
+        }],
+        nextCursor: "page-2",
+      };
+    }
+  }
+
+  const client = new FakeCodex("codex", "/tmp/codex-test");
+  const models = await client.models();
+  assert.deepEqual(client.calls, [
+    ["model/list", { includeHidden: false, limit: 100 }],
+    ["model/list", { includeHidden: false, limit: 100, cursor: "page-2" }],
+  ]);
+  assert.deepEqual(models.map((model) => [model.model, model.isDefault]), [
+    ["gpt-5.6-luna", true],
+    ["gpt-astra", false],
+  ]);
+  assert.deepEqual(models[0]?.supportedReasoningEfforts.map((item) => item.reasoningEffort), [
+    "low",
+    "medium",
+  ]);
+});
+
 test("reads ChatGPT rate limits through the account RPC", async () => {
   class FakeCodex extends CodexAppServer {
     readonly calls: Array<[string, JsonRecord]> = [];

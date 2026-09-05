@@ -90,6 +90,8 @@ test("upgrades the previous identity, worktree branch, and runtime directory to 
       activeTurnId: null,
       streamMessageId: null,
       worktreePath: null,
+      modelOverride: "",
+      effortOverride: "",
     };
     const worktree = join(config.worktreeRoot, conversation.id);
     mkdirSync(config.worktreeRoot, { recursive: true });
@@ -210,6 +212,8 @@ test("conversation gets a persistent worktree and project memory", async () => {
       activeTurnId: null,
       streamMessageId: null,
       worktreePath: null,
+      modelOverride: "",
+      effortOverride: "",
     };
     const prepared = await manager.prepare(conversation, project, workspace);
     assert.equal(existsSync(hookMarker), false);
@@ -401,6 +405,8 @@ test("observer worktree follows the published repository HEAD by fast-forward", 
       activeTurnId: null,
       streamMessageId: null,
       worktreePath: null,
+      modelOverride: "",
+      effortOverride: "",
     };
     const first = await manager.prepare(conversation, project, workspace);
     assert.equal(readFileSync(join(first.path, "README.md"), "utf8"), "published v1\n");
