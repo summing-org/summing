@@ -36,8 +36,13 @@ if id -nG summing-builder | tr ' ' '\n' | grep -qx summing; then
   printf '%s\n' 'summing-builder must not belong to the secret-bearing summing group.' >&2
   exit 2
 fi
-if [ ! -x /usr/local/bin/node ] || [ ! -x /usr/local/bin/codex ]; then
-  printf '%s\n' 'Node.js or Codex CLI is missing; run cloud-init bootstrap first.' >&2
+if [ ! -x /usr/local/bin/node ]; then
+  printf '%s\n' 'Node.js is missing; run cloud-init bootstrap first.' >&2
+  exit 2
+fi
+"${repo_dir}/deploy/ensure-codex-version"
+if [ ! -x /usr/local/bin/codex ]; then
+  printf '%s\n' 'Codex CLI installation did not produce /usr/local/bin/codex.' >&2
   exit 2
 fi
 

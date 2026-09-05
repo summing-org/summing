@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+umask 0027
+
+usage() {
+  cat <<'EOF'
+Usage: ensure-codex-version [--check]
+
+Install the pinned minimum standalone Codex CLI for the SUMMING service account.
+Newer installed stable versions are preserved. --check performs no changes.
+EOF
+}
+
+check_only=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --check) check_only=1; shift ;;
+    --help|-h) usage; exit 0 ;;
+    *) printf 'Unknown option: %s\n' "$1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+if [ "${EUID}" -ne 0 ]; then
+  printf '%s\n' 'ensure-codex-version must run as root.' >&2
+  exit 2
+fi
+
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+version_file=${script_dir}/codex-min-version
+service_user=summing
+service_home=/var/lib/summing
+managed_bin=${service_home}/.local/bin/codex
+public_bin=/usr/local/bin/codex
+installer_url=https://chatgpt.com/codex/install.sh
+
+if [ -L "${version_file}" ] || [ ! -f "${version_file}" ]; then
+  printf 'Codex minimum-version file is missing or unsafe: %s\n' "${version_file}" >&2
+  exit 2
+fi
+minimum_version=$(tr -d '[:space:]' < "${version_file}")
+if ! printf '%s\n' "${minimum_version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+  printf 'Invalid stable Codex version in %s.\n' "${version_file}" >&2
+  exit 2
+fi
+if ! id "${service_user}" >/dev/null 2>&1; then
+  printf 'The %s service account is missing.\n' "${service_user}" >&2
+  exit 2
+fi
+
+read_version() {
+  local executable=$1
+  local output
+  if [ ! -x "${executable}" ]; then return 0; fi
+  output=$("${executable}" --version 2>/dev/null || true)
+  printf '%s\n' "${output}" | \
+    sed -nE 's/^codex-cli ([0-9]+\.[0-9]+\.[0-9]+)$/\1/p' | head -n 1
+}
+
+version_is_older() {
+  local installed=$1
+  local required=$2
+  [ "${installed}" != "${required}" ] && \
+    [ "$(printf '%s\n%s\n' "${installed}" "${required}" | sort -V | head -n 1)" = "${installed}" ]
+}
+
+installed_version=$(read_version "${managed_bin}")
+if [ -n "${installed_version}" ] && \
+  ! version_is_older "${installed_version}" "${minimum_version}"; then
+  if [ "${check_only}" = 0 ]; then
+    ln -sfn "${managed_bin}" "${public_bin}"
+  fi
+  printf 'Codex CLI %s satisfies minimum %s.\n' \
+    "${installed_version}" "${minimum_version}"
+  exit 0
+fi
+
+if [ "${check_only}" = 1 ]; then
+  printf 'Codex CLI %s is below required minimum %s.\n' \
+    "${installed_version:-missing}" "${minimum_version}" >&2
+  exit 1
+fi
+
+installer=$(mktemp /run/summing-codex-installer.XXXXXX)
+trap 'rm -f -- "${installer}"' EXIT
+chmod 0644 "${installer}"
+curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+  "${installer_url}" -o "${installer}"
+sudo -u "${service_user}" \
+  env -i \
+  HOME="${service_home}" \
+  USER="${service_user}" \
+  LOGNAME="${service_user}" \
+  PATH=/usr/local/bin:/usr/bin:/bin \
+  CODEX_NON_INTERACTIVE=1 \
+  sh "${installer}" --release "${minimum_version}"
+
+updated_version=$(read_version "${managed_bin}")
+if [ "${updated_version}" != "${minimum_version}" ]; then
+  printf 'Codex installer returned version %s; expected %s.\n' \
+    "${updated_version:-missing}" "${minimum_version}" >&2
+  exit 1
+fi
+ln -sfn "${managed_bin}" "${public_bin}"
+"${public_bin}" --version

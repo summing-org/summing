@@ -24,6 +24,7 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
   const selfProjectProvisioner = asset("deploy/provision-self-project-worktree");
   const projectRunnerService = asset("deploy/summing-project-runner.service");
   const cloudInit = asset("deploy/cloud-init.yaml");
+  const codexEnsurerPath = join(root, "deploy/ensure-codex-version");
 
   const syntax = spawnSync("bash", ["-n", join(root, "deploy/summing-deploy")], {
     encoding: "utf8",
@@ -43,6 +44,10 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
     encoding: "utf8",
   });
   assert.equal(selfProjectProvisionerSyntax.status, 0, selfProjectProvisionerSyntax.stderr);
+  const codexEnsurerSyntax = spawnSync("bash", ["-n", codexEnsurerPath], {
+    encoding: "utf8",
+  });
+  assert.equal(codexEnsurerSyntax.status, 0, codexEnsurerSyntax.stderr);
   assert.notEqual(statSync(cutoverPath).mode & 0o111, 0, "cutover hook must be executable");
   assert.notEqual(
     statSync(systemdSyncPath).mode & 0o111,
@@ -58,6 +63,11 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
     statSync(selfProjectProvisionerPath).mode & 0o111,
     0,
     "self-project worktree provisioner must be executable",
+  );
+  assert.notEqual(
+    statSync(codexEnsurerPath).mode & 0o111,
+    0,
+    "Codex version ensurer must be executable",
   );
   assert.match(script, /git_as_summing -C "\$\{repo_dir\}" fetch --prune/);
   assert.match(script, /manual_action=deploy/);
@@ -113,7 +123,17 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
   assert.match(script, /sync_systemd_units\(\)/);
   assert.match(script, /sync_systemd_units "\$\{previous_target\}"/);
   assert.match(script, /sync_systemd_units "\$\{release_dir\}"/);
+  assert.match(script, /"\$\{release_dir\}\/deploy\/ensure-codex-version"/);
+  assert.match(activation, /"\$\{repo_dir\}\/deploy\/ensure-codex-version"/);
   const unchangedRelease = script.indexOf('if [ "${previous_sha}" = "${target_sha}" ]; then');
+  const unchangedCodexCheck = script.indexOf(
+    '"${previous_target}/deploy/ensure-codex-version" --check',
+    unchangedRelease,
+  );
+  const unchangedCodexUpdate = script.indexOf(
+    '"${previous_target}/deploy/ensure-codex-version"',
+    unchangedCodexCheck + 1,
+  );
   const unchangedSync = script.indexOf(
     'sync_project_runner_configs "${previous_target}"',
     unchangedRelease,
@@ -131,19 +151,26 @@ test("deployment assets use an atomic release and one timer/path worker", () => 
     unchangedRelease,
   );
   assert.ok(
-    unchangedRelease >= 0 && unchangedRunnerInstall > unchangedRelease &&
+    unchangedRelease >= 0 && unchangedCodexCheck > unchangedRelease &&
+      unchangedCodexUpdate > unchangedCodexCheck &&
+      unchangedRunnerInstall > unchangedCodexUpdate &&
       unchangedSync > unchangedRunnerInstall,
   );
   assert.ok(unchangedUnitSync > unchangedSync && unchangedCutover > unchangedUnitSync);
   const releaseSwitch = script.indexOf('switch_current "${release_dir}"');
   const idleWait = script.lastIndexOf("wait_for_idle_runtime", releaseSwitch);
+  const codexEnsure = script.lastIndexOf(
+    '"${release_dir}/deploy/ensure-codex-version"',
+    releaseSwitch,
+  );
   const selfProjectProvision = script.lastIndexOf(
     'provision_self_project_worktree "${release_dir}"',
     releaseSwitch,
   );
   assert.ok(
-    idleWait >= 0 && selfProjectProvision > idleWait && selfProjectProvision < releaseSwitch,
-    "self-project master must move to durable storage while the runtime is idle",
+    idleWait >= 0 && codexEnsure > idleWait && selfProjectProvision > codexEnsure &&
+      selfProjectProvision < releaseSwitch,
+    "Codex and self-project state must update while the runtime is idle",
   );
   const releaseSync = script.indexOf(
     'sync_project_runner_configs "${release_dir}"',

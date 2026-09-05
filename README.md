@@ -1,4 +1,4 @@
-# SUMMING 9.30
+# SUMMING 9.31
 
 SUMMING — один постоянно живущий агент с одним администратором и назначаемыми
 владельцами проектов. Он работает на Linux VPS, принимает команды из Telegram
@@ -221,6 +221,16 @@ origin для будущих atomic updates, формирует конфигур
 durable state. Затем владелец завершает `/login` и видит последовательность
 MTProto → подписанное согласие всей группы → полный sync в
 **Управление → База знаний**.
+
+Минимальная production-версия standalone Codex закреплена в
+`deploy/codex-min-version`. `deploy/activate.sh` и atomic deployment перед
+перезапуском сервиса запускают `deploy/ensure-codex-version`: более новая
+стабильная версия сохраняется, устаревшая атомарно обновляется официальным
+installer до закреплённого релиза. Проверка без изменений:
+
+```bash
+sudo /opt/summing-current/deploy/ensure-codex-version --check
+```
 
 ## Ручная установка
 

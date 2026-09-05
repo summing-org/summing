@@ -120,7 +120,15 @@ test("provisioning and secure bootstrap assets keep application secrets out of m
   const provisioner = asset("deploy/provision-host");
   const recoveryPath = join(root, "deploy/restore-node-recovery");
   const recovery = asset("deploy/restore-node-recovery");
-  for (const path of [bootstrapPath, installerPath, provisionerPath, recoveryPath]) {
+  const codexEnsurerPath = join(root, "deploy/ensure-codex-version");
+  const codexEnsurer = asset("deploy/ensure-codex-version");
+  for (const path of [
+    bootstrapPath,
+    installerPath,
+    provisionerPath,
+    recoveryPath,
+    codexEnsurerPath,
+  ]) {
     const syntax = spawnSync("bash", ["-n", path], { encoding: "utf8" });
     assert.equal(syntax.status, 0, syntax.stderr);
     assert.notEqual(statSync(path).mode & 0o111, 0, `${path} must be executable`);
@@ -177,6 +185,12 @@ test("provisioning and secure bootstrap assets keep application secrets out of m
     /TELEGRAM_BOT_TOKEN|OPENAI_API_KEY|SUMMING_S3_SECRET_ACCESS_KEY/,
   );
   assert.match(asset("deploy/activate.sh"), /\/usr\/local\/sbin\/restore-node-recovery/);
+  assert.equal(asset("deploy/codex-min-version").trim(), "0.153.4");
+  assert.match(codexEnsurer, /CODEX_NON_INTERACTIVE=1/);
+  assert.match(codexEnsurer, /--release "\$\{minimum_version\}"/);
+  assert.match(codexEnsurer, /sort -V/);
+  assert.match(codexEnsurer, /ln -sfn "\$\{managed_bin\}" "\$\{public_bin\}"/);
+  assert.doesNotMatch(codexEnsurer, /rm\s+-rf/);
   assert.match(recovery, /read -r -s recovery_key <\/dev\/tty/);
   assert.match(
     recovery,

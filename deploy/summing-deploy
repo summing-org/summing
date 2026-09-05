@@ -657,6 +657,19 @@ if [ "${manual_action}" = check ]; then
   exit 0
 fi
 if [ "${previous_sha}" = "${target_sha}" ]; then
+  phase=codex
+  failure_kind=runtime
+  if ! "${previous_target}/deploy/ensure-codex-version" --check; then
+    phase=drain
+    wait_for_idle_runtime
+    phase=codex
+    write_state deploying "Обновляем Codex CLI" "${previous_sha}" "${target_sha}"
+    "${previous_target}/deploy/ensure-codex-version"
+    phase=restart
+    systemctl restart summing.service
+    phase=health
+    wait_for_health
+  fi
   phase=runner-host
   failure_kind=runtime
   install_project_runner_host "${previous_target}"
@@ -764,6 +777,10 @@ fi
 phase=drain
 failure_kind=runtime
 wait_for_idle_runtime
+phase=codex
+failure_kind=runtime
+write_state deploying "Проверяем минимальную версию Codex CLI" "${previous_sha}" "${target_sha}"
+"${release_dir}/deploy/ensure-codex-version"
 phase=self-project
 failure_kind=runtime
 write_state deploying "Готовим постоянный worktree SUMMING" "${previous_sha}" "${target_sha}"
