@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,11 +10,12 @@ import { ProjectConfig, RuntimeConfig } from "../src/config.js";
 import { ProjectCatalog } from "../src/project-catalog.js";
 import { ProjectViewerServer } from "../src/project-viewer.js";
 import { StateStore } from "../src/state-store.js";
-import type { GitInspector } from "../src/git-inspector.js";
+import { GitInspector } from "../src/git-inspector.js";
 
 test("viewer list and diff enforce immutable run scope before and after async artifact reads", async () => {
   const root = mkdtempSync(join(tmpdir(), "summing-run-scope-"));
-  const projects = new Map(["alpha", "beta"].map((id) => [id, new ProjectConfig(id, id, "repo", new Map([["repo", { id: "repo", path: root }]]))]));
+  const repository = join(root, "repository");
+  const projects = new Map(["alpha", "beta"].map((id) => [id, new ProjectConfig(id, id, "repo", new Map([["repo", { id: "repo", path: repository }]]))]));
   const config = new RuntimeConfig(root, join(root, "codex"), join(root, "worktrees"), "token", 1, "codex", 8765, 1, 1, "", "medium", false, projects);
   const state = new StateStore(join(root, "state.sqlite3"));
   const catalog = new ProjectCatalog(config, state);
@@ -28,6 +30,11 @@ test("viewer list and diff enforce immutable run scope before and after async ar
   const request = (path: string) => ({ method: "GET", url: path, headers: { "x-telegram-init-data": auth.toString() } }) as unknown as IncomingMessage;
   const snapshots = { snapshot: async () => "a".repeat(40), commitDiff: async () => "ALPHA_PRIVATE_PATCH" } as unknown as GitInspector;
   try {
+    mkdirSync(repository);
+    execFileSync("git", ["init", "--initial-branch=main", repository], { stdio: "pipe" });
+    // Never accidentally use the checkout enclosing TMPDIR. Deploy tests run
+    // from an exported release with no .git directory in its parent chain.
+    assert.equal(realpathSync(await GitInspector.worktreeRoot(repository)), realpathSync(repository));
     const topic = state.bind(-100, 1, "alpha", "repo");
     const old = state.startRun(topic.id, "ALPHA_PRIVATE_PROMPT", []);
     state.finishRun(old, "interrupted", "", "restart");
