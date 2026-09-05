@@ -23,6 +23,14 @@ export interface Conversation {
 }
 
 export type ConversationRole = "primary" | "observer";
+export interface RunModelSettings {
+  requestedModel: string;
+  requestedEffort: string;
+  model: string | null;
+  effort: string | null;
+  confirmation: "thread" | "settings" | "rerouted" | "review-source" | null;
+  reroutes: Array<{ fromModel: string; toModel: string; reason: string }>;
+}
 type StoredConversationBindingMode = "project" | "external-readonly";
 export type RunAccess = "write" | "read-only";
 export type ResponseMode = "direct" | "ambient";
@@ -1741,6 +1749,9 @@ export class StateStore {
           )
       `);
       const runColumns = this.db.prepare("PRAGMA table_info(runs)").all() as Row[];
+      if (!runColumns.some((column) => column.name === "model_json")) {
+        this.db.exec("ALTER TABLE runs ADD COLUMN model_json TEXT NOT NULL DEFAULT ''");
+      }
       if (!runColumns.some((column) => column.name === "project_id")) {
         this.db.exec("ALTER TABLE runs ADD COLUMN project_id TEXT NOT NULL DEFAULT ''");
       }
@@ -4953,6 +4964,28 @@ export class StateStore {
     this.transaction(() => {
       this.db.prepare("UPDATE runs SET turn_id = ? WHERE id = ?").run(turnId, runId);
     });
+  }
+
+  setRunModel(runId: number, settings: RunModelSettings): void {
+    this.db.prepare("UPDATE runs SET model_json = ? WHERE id = ?")
+      .run(JSON.stringify(settings), runId);
+  }
+
+  runModel(runId: number): RunModelSettings | null {
+    const row = this.db.prepare("SELECT model_json FROM runs WHERE id = ?").get(runId) as Row | undefined;
+    return row?.model_json ? JSON.parse(String(row.model_json)) as RunModelSettings : null;
+  }
+
+  conversationModelHistory(conversationId: string) {
+    return (this.db.prepare(`
+      SELECT runs.id, runs.status, runs.model_json FROM runs
+      JOIN conversations c ON c.id = runs.conversation_id
+      WHERE c.id = ? AND runs.project_id = c.project_id AND runs.workspace_id = c.workspace_id
+      ORDER BY runs.id DESC LIMIT 10
+    `).all(conversationId) as Row[]).map((row) => ({
+      runId: Number(row.id), status: String(row.status),
+      settings: row.model_json ? JSON.parse(String(row.model_json)) as RunModelSettings : null,
+    }));
   }
 
   setRunPrompt(runId: number, prompt: string): void {

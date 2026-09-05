@@ -27,11 +27,24 @@ export const VIEWER_HTML = `<!doctype html>
       <button data-tab="changes">Изменения <span id="changeBadge" class="badge hidden">0</span></button>
       <button data-tab="repository">Репозиторий</button>
       <button data-tab="history">История</button>
+      <button data-tab="model">Модель</button>
       <button data-tab="runs">Правки агента</button>
       <button data-tab="launch">Раннер</button>
       <button id="environmentTab" data-tab="environment" class="hidden">Энвы</button>
     </nav>
     <main>
+      <section id="modelPanel" class="panel repository-panel">
+        <div class="section-heading"><div><span class="eyebrow">ЭТОТ TOPIC</span><h2>Модель агента</h2><p id="modelScope">Загрузка настройки…</p></div><button id="reloadModel" class="secondary">Обновить</button></div>
+        <article class="repository-card">
+          <h3>Следующий запуск</h3><p id="modelSaved"></p>
+          <div class="model-controls"><label for="modelSelect">Модель<select id="modelSelect" disabled></select></label><label for="modelEffort">Reasoning effort<select id="modelEffort" disabled></select></label></div>
+          <p class="repository-note">Настройка действует только для этого topic/conversation. Активный запуск не переключается. Default наследует конфигурацию сервера, а если модель в ней не задана — default Codex.</p>
+          <div class="repository-actions"><button id="saveModel" class="primary-action" disabled>Сохранить</button></div>
+          <p id="modelStatus" class="repository-note" role="status" aria-live="polite"></p>
+        </article>
+        <article class="repository-card"><h3>Активный запуск</h3><p id="modelActive">Нет данных</p></article>
+        <article class="repository-card"><h3>Последние запуски</h3><p>Запрошенные параметры и подтверждение Codex показаны отдельно. Исходный thread review не является подтверждением модели reviewer. Для старых запусков данных может не быть.</p><div id="modelHistory" class="repository-audit"></div></article>
+      </section>
       <section id="filesPanel" class="panel split-panel active">
         <aside class="tree-pane">
           <label class="search"><span>⌕</span><input id="fileSearch" placeholder="Найти файл" autocomplete="off"></label>
@@ -161,6 +174,7 @@ export const VIEWER_HTML = `<!doctype html>
 </html>`;
 
 export const VIEWER_CSS = `
+.model-controls{display:flex;gap:16px;flex-wrap:wrap;margin-top:18px}.model-controls label{display:flex;flex-direction:column;gap:8px;flex:1;min-width:180px;font-size:12px}.model-controls select{width:100%;padding:12px;border:1px solid var(--border);border-radius:6px;background:var(--surface2);color:var(--text);font:12px var(--mono)}#modelHistory p{padding:12px 0;border-top:1px solid var(--border);overflow-wrap:anywhere}#modelActive,#modelSaved{overflow-wrap:anywhere;white-space:pre-line}
 :root{color-scheme:dark;--bg:#0a0a0c;--surface:#18181c;--surface2:#1c1c20;--surface3:#121215;--border:rgba(156,156,163,.16);--border-strong:#494951;--text:#e7e7e9;--muted:#9c9ca3;--disabled:#494951;--primary:#7c9bb7;--primary-dark:#1f3245;--accent:#ff2e6b;--accent-light:#ff759b;--accent-soft:#3f0819;--success:#7c9bb7;--warning:#ffa6bf;--danger:#ff4a7e;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
 :root[data-theme="light"]{color-scheme:light;--bg:#f5f5f6;--surface:#e7e7e9;--surface2:#fff;--surface3:#eef3f8;--border:rgba(156,156,163,.25);--border-strong:#c9c9cd;--text:#121215;--muted:#6e6e76;--disabled:#9c9ca3;--primary:#3c5d7d;--primary-dark:#d5e0ec;--accent:#ff2e6b;--accent-light:#d81d55;--accent-soft:#ffd5e0;--success:#3c5d7d;--warning:#a81441;--danger:#d81d55}
 *{box-sizing:border-box}html,body{margin:0;min-height:100%;background:var(--bg);color:var(--text)}body{min-height:100vh;min-height:100dvh}button,input{font:inherit}.topbar{height:64px;display:flex;align-items:center;gap:18px;padding:0 20px;border-bottom:1px solid var(--border);background:color-mix(in srgb,var(--bg) 91%,transparent);position:sticky;top:0;z-index:10;backdrop-filter:blur(18px)}.brand{display:flex;align-items:center;gap:9px;font-weight:700;letter-spacing:.045em}.brand-logo{width:30px;height:30px;display:block}.repo-title{min-width:0;display:flex;flex:1;flex-direction:column}.repo-title strong{font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.repo-title span{font:11px var(--mono);color:var(--muted);margin-top:3px}.icon-button,.secondary{border:1px solid var(--border);background:var(--surface2);color:var(--text);border-radius:6px;cursor:pointer}.icon-button{width:36px;height:36px;font-size:21px}.secondary{padding:8px 12px;font-size:12px}.icon-button:hover,.secondary:hover{border-color:var(--accent);color:var(--accent)}
@@ -180,7 +194,7 @@ export const VIEWER_CSS = `
 
 export const VIEWER_JS = `
 (() => {
-  const state={conversation:"",session:null,repository:null,repositoryConnection:null,repositoryExperience:null,originPreview:null,tree:[],jobs:[],services:[],tab:"files",token:"",initData:"",selectedJob:"",selectedService:"",artifactReportUrl:"",initialTabApplied:false,environmentRevision:0};
+  const state={conversation:"",session:null,repository:null,repositoryConnection:null,repositoryExperience:null,originPreview:null,tree:[],jobs:[],services:[],tab:"files",token:"",initData:"",selectedJob:"",selectedService:"",artifactReportUrl:"",initialTabApplied:false,environmentRevision:0,modelSettings:null,modelBusy:false};
   const REQUEST_TIMEOUT_MS=15000;
   const $=(id)=>document.getElementById(id);
   const tg=window.Telegram&&window.Telegram.WebApp;
@@ -200,11 +214,63 @@ export const VIEWER_JS = `
   const toast=(message)=>{const el=$("toast");el.textContent=message;el.classList.add("show");clearTimeout(toast.timer);toast.timer=setTimeout(()=>el.classList.remove("show"),2600)};
   const localTime=(value)=>value?new Date(value).toLocaleString("ru-RU"):"—";
   const renderDiff=(element,value)=>{if(!value){element.innerHTML="<code><span class='empty'>Изменений нет.</span></code>";return}element.innerHTML="<code>"+value.split("\\n").map(line=>{let kind="";if(line.startsWith("+++ ")||line.startsWith("--- ")||line.startsWith("diff ")||line.startsWith("index "))kind="meta";else if(line.startsWith("+"))kind="add";else if(line.startsWith("-"))kind="del";else if(line.startsWith("@@"))kind="hunk";return "<span class='diff-line "+kind+"'>"+esc(line)+"</span>"}).join("")+"</code>"};
-  const setTab=(name)=>{state.tab=name;document.querySelectorAll(".tabs button").forEach(button=>button.classList.toggle("active",button.dataset.tab===name));const activeTab=document.querySelector('.tabs button[data-tab="'+name+'"]');if(activeTab){const tabs=activeTab.parentElement;tabs.scrollLeft=Math.max(0,activeTab.offsetLeft-(tabs.clientWidth-activeTab.offsetWidth)/2)}document.querySelectorAll(".panel").forEach(panel=>panel.classList.remove("active"));$(name+"Panel").classList.add("active");if(name==="changes")loadWorkingDiff();if(name==="repository")loadRepository();if(name==="history")loadCommits();if(name==="runs")loadRuns();if(name==="launch"){loadServices();loadJobs()}if(name==="environment")loadEnvironment()};
+  const setTab=(name)=>{state.tab=name;document.querySelectorAll(".tabs button").forEach(button=>button.classList.toggle("active",button.dataset.tab===name));const activeTab=document.querySelector('.tabs button[data-tab="'+name+'"]');if(activeTab){const tabs=activeTab.parentElement;tabs.scrollLeft=Math.max(0,activeTab.offsetLeft-(tabs.clientWidth-activeTab.offsetWidth)/2)}document.querySelectorAll(".panel").forEach(panel=>panel.classList.remove("active"));$(name+"Panel").classList.add("active");if(name==="changes")loadWorkingDiff();if(name==="repository")loadRepository();if(name==="history")loadCommits();if(name==="runs")loadRuns();if(name==="launch"){loadServices();loadJobs()}if(name==="environment")loadEnvironment();if(name==="model")loadModel()};
   document.querySelectorAll(".tabs button").forEach(button=>button.addEventListener("click",()=>setTab(button.dataset.tab)));
   const sessionUrl=()=>"/api/viewer/session?conversation="+encodeURIComponent(state.conversation);
-  async function loadSession(){if(!state.conversation)throw new Error("Conversation не указан. Откройте viewer из команды /files.");await waitForAuthentication();state.session=await api(sessionUrl());$("projectName").textContent=state.session.project.name;const repo=state.session.repository;$("repoMeta").textContent=repo.branch+" · "+repo.shortHead+(repo.remote?" · origin":" · local only");$("repoMeta").className=repo.dirty?"dirty":"clean";$("changeBadge").textContent=repo.changes;$("changeBadge").classList.toggle("hidden",repo.changes===0);$("runnerStatus").textContent=state.session.runnerAvailable?"Раннер доступен":"Раннер пока недоступен";$("environmentTab").classList.toggle("hidden",!state.session.environmentAccess);document.title=state.session.project.name+" · SUMMING";await loadTree();if(!state.initialTabApplied){state.initialTabApplied=true;const requested=query.get("tab");if(["files","changes","repository","history","runs","launch"].includes(requested)||(requested==="environment"&&state.session.environmentAccess))setTab(requested)}}
+  async function loadSession(){if(!state.conversation)throw new Error("Conversation не указан. Откройте viewer из команды /files.");await waitForAuthentication();state.session=await api(sessionUrl());$("projectName").textContent=state.session.project.name;const repo=state.session.repository;$("repoMeta").textContent=repo.branch+" · "+repo.shortHead+(repo.remote?" · origin":" · local only");$("repoMeta").className=repo.dirty?"dirty":"clean";$("changeBadge").textContent=repo.changes;$("changeBadge").classList.toggle("hidden",repo.changes===0);$("runnerStatus").textContent=state.session.runnerAvailable?"Раннер доступен":"Раннер пока недоступен";$("environmentTab").classList.toggle("hidden",!state.session.environmentAccess);document.title=state.session.project.name+" · SUMMING";await loadTree();if(!state.initialTabApplied){state.initialTabApplied=true;const requested=query.get("tab");if(["files","changes","repository","history","runs","launch","model"].includes(requested)||(requested==="environment"&&state.session.environmentAccess))setTab(requested)}}
   async function loadTree(){const result=await api("/api/viewer/tree?conversation="+encodeURIComponent(state.conversation));state.tree=result.files;renderTree()}
+  function modelEvidence(settings){
+    if(!settings)return "Нет данных о модели";
+    const requested="Запрошено: "+settings.requestedModel+" ("+settings.requestedEffort+")";
+    const label=settings.confirmation==="review-source"?"Исходный thread review":settings.confirmation==="rerouted"?"Codex перенаправил запрос":"Подтверждено Codex";
+    const confirmed=settings.model?label+": "+settings.model+" ("+(settings.effort||"effort не подтверждён")+")":"Codex не подтвердил модель/effort";
+    const reroutes=(settings.reroutes||[]).map(item=>item.fromModel+" → "+item.toModel+(item.reason?" · "+item.reason:""));
+    return [requested,confirmed,...reroutes].join(" · ");
+  }
+  function modelControls(){
+    const data=state.modelSettings,selected=data&&data.models.find(item=>item.model===$("modelSelect").value);
+    $("modelSelect").disabled=state.modelBusy||!data;
+    $("modelEffort").disabled=state.modelBusy||!selected||Boolean(data&&data.catalogError);
+    $("reloadModel").disabled=state.modelBusy;
+    $("saveModel").disabled=state.modelBusy||!data||Boolean($("modelSelect").value&&(!selected||data.catalogError));
+  }
+  function modelEfforts(preferred){
+    const data=state.modelSettings,selected=data&&data.models.find(item=>item.model===$("modelSelect").value);
+    const efforts=selected?selected.supportedReasoningEfforts:[];
+    $("modelEffort").innerHTML=efforts.length?efforts.map(item=>"<option value='"+esc(item.reasoningEffort)+"'>"+esc(item.reasoningEffort)+"</option>").join(""):"<option value=''>Наследуется / недоступен</option>";
+    if(selected)$("modelEffort").value=efforts.some(item=>item.reasoningEffort===preferred)?preferred:selected.defaultReasoningEffort;
+    modelControls();
+  }
+  function renderModel(data){
+    state.modelSettings=data;
+    $("modelScope").textContent="Chat "+data.chatId+" · topic "+data.topicId+" · "+data.conversationId;
+    const selected=data.selection;
+    $("modelSaved").textContent=selected?selected.model+" ("+selected.effort+") · "+(selected.source==="conversation"?"выбор topic":selected.source==="config"?"конфигурация сервера":"default Codex"):"Модель по умолчанию не определена";
+    const options=["<option value=''>Default — наследовать</option>",...data.models.map(item=>"<option value='"+esc(item.model)+"'>"+esc(item.model)+(item.isDefault?" · default Codex":"")+"</option>")];
+    if(data.override.model&&!data.models.some(item=>item.model===data.override.model))options.push("<option value='"+esc(data.override.model)+"'>"+esc(data.override.model)+" · вне каталога</option>");
+    $("modelSelect").innerHTML=options.join("");$("modelSelect").value=data.override.model||"";
+    modelEfforts(data.override.effort);
+    $("modelStatus").textContent=data.catalogError||(data.catalogUpdatedAt?"Каталог обновлён: "+localTime(data.catalogUpdatedAt):"");
+    $("modelActive").textContent=data.active?"Run #"+data.active.runId+" · "+modelEvidence(data.active.settings):"Активного запуска нет";
+    $("modelHistory").innerHTML=data.history.length?data.history.map(run=>"<p><strong>Run #"+esc(run.runId)+" · "+esc(run.status)+"</strong><br>"+esc(modelEvidence(run.settings))+"</p>").join(""):"<p>Запусков пока нет</p>";
+  }
+  async function loadModel(){
+    if(state.modelBusy)return;state.modelBusy=true;modelControls();$("modelStatus").textContent="Загрузка каталога…";
+    try{renderModel(await api("/api/viewer/model?conversation="+encodeURIComponent(state.conversation)))}
+    catch(error){$("modelStatus").textContent=error.message}
+    finally{state.modelBusy=false;modelControls()}
+  }
+  async function saveModel(){
+    if(state.modelBusy)return;state.modelBusy=true;modelControls();$("modelStatus").textContent="Сохранение…";
+    const model=$("modelSelect").value,body={conversation:state.conversation,model:model||null};
+    if(model)body.effort=$("modelEffort").value;
+    try{renderModel(await api("/api/viewer/model",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)}));toast("Сохранено для следующего запуска в этом topic")}
+    catch(error){$("modelStatus").textContent=error.message;toast(error.message)}
+    finally{state.modelBusy=false;modelControls()}
+  }
+  $("reloadModel").addEventListener("click",loadModel);
+  $("saveModel").addEventListener("click",saveModel);
+  $("modelSelect").addEventListener("change",()=>modelEfforts());
   function renderTree(){const search=$("fileSearch").value.trim().toLowerCase();const files=state.tree.filter(item=>!search||item.path.toLowerCase().includes(search));$("fileTree").innerHTML=files.length?files.map(item=>{const depth=Math.min(item.path.split("/").length-1,5);const name=item.path.split("/").pop();const status=item.status==="untracked"?"untracked":item.status?"changed":"";return "<button class='file-item "+status+"' style='padding-left:"+(9+depth*12)+"px' data-path='"+esc(item.path)+"'><span class='dot'></span><span class='path' title='"+esc(item.path)+"'>"+esc(name)+"</span></button>"}).join(""):"<div class='empty'>Файлы не найдены.</div>";document.querySelectorAll(".file-item").forEach(button=>button.addEventListener("click",()=>openFile(button.dataset.path,button)))}
   async function openFile(path,button){document.querySelectorAll(".file-item").forEach(item=>item.classList.remove("active"));button.classList.add("active");$("filePath").textContent=path;$("fileContent").innerHTML="<code>Загрузка…</code>";try{const file=await api("/api/viewer/file?conversation="+encodeURIComponent(state.conversation)+"&path="+encodeURIComponent(path));$("fileSize").textContent=file.bytes<1024?file.bytes+" B":(file.bytes/1024).toFixed(1)+" KB";$("fileContent").innerHTML="<code>"+file.content.split("\\n").map(line=>"<span class='diff-line'>"+esc(line)+"</span>").join("")+"</code>"}catch(error){$("fileContent").innerHTML="<code>"+esc(error.message)+"</code>"}}
   async function loadWorkingDiff(){$("workingDiff").innerHTML="<code>Загрузка…</code>";try{const result=await api("/api/viewer/diff?conversation="+encodeURIComponent(state.conversation)+"&mode=working");renderDiff($("workingDiff"),result.diff)}catch(error){renderDiff($("workingDiff"),error.message)}}
@@ -253,7 +319,7 @@ export const VIEWER_JS = `
   async function loadEnvironment(){const status=$("environmentState");status.textContent="Загрузка…";try{const result=await api("/api/viewer/environment?conversation="+encodeURIComponent(state.conversation));state.environmentRevision=result.environment.revision;$("environmentText").value=result.environment.text;status.textContent=result.environment.updatedAt?"Версия "+result.environment.revision+" · "+new Date(result.environment.updatedAt).toLocaleString():"Энвы ещё не сохранены"}catch(error){status.textContent=error.message}}
   async function saveEnvironment(){const button=$("saveEnvironment"),status=$("environmentState");button.disabled=true;status.textContent="Сохранение…";try{const result=await api("/api/viewer/environment?conversation="+encodeURIComponent(state.conversation),{method:"PUT",headers:{"content-type":"application/json"},body:JSON.stringify({text:$("environmentText").value,expectedRevision:state.environmentRevision})});state.environmentRevision=result.environment.revision;$("environmentText").value=result.environment.text;status.textContent="Версия "+result.environment.revision+" · сохранено "+new Date(result.environment.updatedAt).toLocaleString();toast("Энвы сохранены")}catch(error){status.textContent=error.message;toast(error.message)}finally{button.disabled=false}}
   $("repositoryNewUrl").addEventListener("input",()=>{state.originPreview=null;$("changeOrigin").disabled=true;$("originPreview").textContent="URL изменён — запустите проверку снова."});
-  $("fileSearch").addEventListener("input",renderTree);$("refreshButton").addEventListener("click",async()=>{try{await loadSession();if(state.tab==="changes")await loadWorkingDiff();if(state.tab==="repository")await loadRepository();if(state.tab==="launch")await Promise.all([loadServices(),loadJobs()]);if(state.tab==="environment")await loadEnvironment();toast("Обновлено")}catch(error){toast(error.message)}});$("reloadDiff").addEventListener("click",loadWorkingDiff);$("reloadRepository").addEventListener("click",loadRepository);$("connectRepository").addEventListener("click",()=>connectRepository(true));$("createRepositoryKey").addEventListener("click",()=>connectRepository(false));$("copyRepositoryKey").addEventListener("click",()=>copyFrom("repositoryPublicKey","Публичный ключ"));$("verifyRepository").addEventListener("click",verifyRepository);$("previewOrigin").addEventListener("click",previewOrigin);$("changeOrigin").addEventListener("click",changeOrigin);$("rollbackOrigin").addEventListener("click",rollbackOrigin);$("migrateLegacy").addEventListener("click",migrateLegacy);$("prepareRotation").addEventListener("click",()=>rotationAction("prepare-rotation"));$("copyRotationKey").addEventListener("click",()=>copyFrom("rotationPublicKey","Новый публичный ключ"));$("verifyRotation").addEventListener("click",()=>rotationAction("verify-rotation"));$("activateRotation").addEventListener("click",()=>rotationAction("activate-rotation"));$("cancelRotation").addEventListener("click",()=>rotationAction("cancel-rotation"));$("pullRepository").addEventListener("click",()=>syncRepository("pull"));$("pushRepository").addEventListener("click",()=>syncRepository("push"));$("pushDefaultRepository").addEventListener("click",pushRepositoryDefault);$("reloadServices").addEventListener("click",loadServices);$("reloadJobs").addEventListener("click",loadJobs);$("cancelJob").addEventListener("click",cancelSelectedJob);$("reloadEnvironment").addEventListener("click",loadEnvironment);$("saveEnvironment").addEventListener("click",saveEnvironment);
+  $("fileSearch").addEventListener("input",renderTree);$("refreshButton").addEventListener("click",async()=>{try{await loadSession();if(state.tab==="changes")await loadWorkingDiff();if(state.tab==="repository")await loadRepository();if(state.tab==="launch")await Promise.all([loadServices(),loadJobs()]);if(state.tab==="environment")await loadEnvironment();if(state.tab==="model")await loadModel();toast("Обновлено")}catch(error){toast(error.message)}});$("reloadDiff").addEventListener("click",loadWorkingDiff);$("reloadRepository").addEventListener("click",loadRepository);$("connectRepository").addEventListener("click",()=>connectRepository(true));$("createRepositoryKey").addEventListener("click",()=>connectRepository(false));$("copyRepositoryKey").addEventListener("click",()=>copyFrom("repositoryPublicKey","Публичный ключ"));$("verifyRepository").addEventListener("click",verifyRepository);$("previewOrigin").addEventListener("click",previewOrigin);$("changeOrigin").addEventListener("click",changeOrigin);$("rollbackOrigin").addEventListener("click",rollbackOrigin);$("migrateLegacy").addEventListener("click",migrateLegacy);$("prepareRotation").addEventListener("click",()=>rotationAction("prepare-rotation"));$("copyRotationKey").addEventListener("click",()=>copyFrom("rotationPublicKey","Новый публичный ключ"));$("verifyRotation").addEventListener("click",()=>rotationAction("verify-rotation"));$("activateRotation").addEventListener("click",()=>rotationAction("activate-rotation"));$("cancelRotation").addEventListener("click",()=>rotationAction("cancel-rotation"));$("pullRepository").addEventListener("click",()=>syncRepository("pull"));$("pushRepository").addEventListener("click",()=>syncRepository("push"));$("pushDefaultRepository").addEventListener("click",pushRepositoryDefault);$("reloadServices").addEventListener("click",loadServices);$("reloadJobs").addEventListener("click",loadJobs);$("cancelJob").addEventListener("click",cancelSelectedJob);$("reloadEnvironment").addEventListener("click",loadEnvironment);$("saveEnvironment").addEventListener("click",saveEnvironment);
   loadSession().catch(error=>{document.body.innerHTML="<main style='padding:32px;font-family:system-ui;color:#e7e7e9;background:#0a0a0c;min-height:100vh'><img src='/logo.svg' alt='' style='width:42px;height:42px'><h1>Project Viewer</h1><p style='color:#ff759b'>"+esc(error.message)+"</p><p>Откройте viewer из Telegram или передайте локальный token в URL fragment.</p><button id='retryViewer' style='padding:10px 14px;border:1px solid #494951;border-radius:6px;background:#18181c;color:#e7e7e9'>Повторить</button></main>";$("retryViewer").addEventListener("click",()=>location.reload())});
 })();
 `;

@@ -34,7 +34,7 @@ export function helpMessage(isAdministrator: boolean): string {
     command("/status", "показать версию SUMMING, состояние Codex, привязку и очередь"),
     command("/model [model [effort]]", "показать или выбрать модель отдельно для текущего topic"),
     example("/model gpt-5.6-luna high"),
-    command("/model default", "вернуть live default Codex для текущего topic"),
+    command("/model default", "наследовать модель сервера (если не задана — default Codex)"),
     command("/files", "открыть дерево файлов, diff и project runner"),
     command("/env", "открыть энвы репозитория"),
     "",

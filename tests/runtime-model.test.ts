@@ -86,7 +86,7 @@ test("/model persists a validated model only for the current conversation", asyn
 
   try {
     await handleCommand(-100, 5, 1, 1, "supergroup", "/model");
-    assert.match(replies.at(-1) ?? "", /Модель этого topic: gpt-5\.6-luna/);
+    assert.match(replies.at(-1) ?? "", /Модель этого topic \(следующий run\): gpt-5\.6-luna/);
     assert.match(replies.at(-1) ?? "", /gpt-astra/);
 
     await handleCommand(-100, 5, 2, 1, "supergroup", "/model astra high");
@@ -112,6 +112,39 @@ test("/model persists a validated model only for the current conversation", asyn
       ["", ""],
     );
     assert.match(replies.at(-1) ?? "", /Модель этого topic: gpt-5\.6-luna/);
+
+    const internals = runtime as unknown as {
+      handleMessage(message: Record<string, unknown>): Promise<void>;
+      modelCommands: Map<string, Promise<void>>;
+      recordTurnModel(active: { runId: number; threadId: string; turnId: string }): void;
+    };
+    let finishCatalog!: (models: CodexModel[]) => void;
+    runtime.codex.models = () => new Promise((resolve) => { finishCatalog = resolve; });
+    await internals.handleMessage({
+      message_id: 6, message_thread_id: 5, text: "/model astra high",
+      from: { id: 1 }, chat: { id: -100, type: "supergroup" },
+    });
+    assert.ok(internals.modelCommands.has(alpha.id), "polling returns while catalog is still pending");
+    await handleCommand(-100, 6, 7, 1, "supergroup", "/help");
+    assert.ok(internals.modelCommands.has(alpha.id), "another topic can finish its command");
+    const pending = internals.modelCommands.get(alpha.id)!;
+    finishCatalog(catalog());
+    await pending;
+    assert.equal(runtime.state.get(alpha.id).modelOverride, "gpt-astra");
+
+    const runId = runtime.state.startRun(alpha.id, "model evidence", []);
+    runtime.state.setRunModel(runId, {
+      requestedModel: "gpt-astra", requestedEffort: "high", model: null, effort: null, confirmation: null, reroutes: [],
+    });
+    const dispatch = (runtime.codex as unknown as { dispatch(value: unknown): Promise<void> }).dispatch.bind(runtime.codex);
+    await dispatch({ method: "thread/settings/updated", params: { threadId: "thread", threadSettings: { model: "gpt-astra", effort: "high" } } });
+    internals.recordTurnModel({ runId, threadId: "thread", turnId: "turn" });
+    assert.equal(runtime.state.runModel(runId)?.confirmation, "settings");
+    await dispatch({ method: "model/rerouted", params: { threadId: "thread", turnId: "turn", fromModel: "gpt-astra", toModel: "gpt-5.6-luna", reason: "capacity" } });
+    internals.recordTurnModel({ runId, threadId: "thread", turnId: "turn" });
+    assert.equal(runtime.state.runModel(runId)?.model, "gpt-5.6-luna");
+    assert.equal(runtime.state.runModel(runId)?.requestedModel, "gpt-astra");
+    assert.equal(runtime.state.runModel(runId)?.effort, null, "a reroute does not confirm effective effort");
   } finally {
     runtime.requestStop();
     runtime.state.close();

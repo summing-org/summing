@@ -551,6 +551,50 @@ test("reads ChatGPT rate limits through the account RPC", async () => {
   assert.deepEqual(client.calls, [["account/rateLimits/read", {}]]);
 });
 
+test("thread acknowledgements, changed settings and reroutes remain distinct evidence", async () => {
+  const client = new CodexAppServer("codex", "/tmp/codex-test");
+  const calls: Array<[string, JsonRecord]> = [];
+  client.request = async (method, params = {}) => {
+    calls.push([method, params]);
+    return method === "thread/start" || method === "thread/resume"
+      ? { thread: { id: "source" }, model: "astra", reasoningEffort: "high", runtimeWorkspaceRoots: params.runtimeWorkspaceRoots }
+      : { turn: { id: "turn" } };
+  };
+  const dispatch = (client as unknown as { dispatch(value: unknown): Promise<void> }).dispatch.bind(client);
+  await client.startThread("/tmp", "astra", { readOnly: true, workspaceAccess: false, effort: "high", reviewModel: "astra" });
+  assert.equal((calls[0]![1].config as JsonRecord).model_reasoning_effort, "high");
+  assert.equal((calls[0]![1].config as JsonRecord).review_model, "astra");
+  assert.deepEqual(client.threadModel("source"), { model: "astra", effort: "high", confirmation: "thread" });
+  await client.startTurn("source", "test", "/tmp", { readOnly: true, workspaceAccess: false, model: "astra", effort: "high" });
+  assert.equal(client.threadModel("source")?.model, "astra", "unchanged settings do not emit a notification");
+  await client.startTurn("source", "test", "/tmp", { readOnly: true, workspaceAccess: false, model: "luna", effort: "low" });
+  assert.equal(client.threadModel("source"), null, "an override request is not confirmation");
+  await dispatch({ method: "thread/settings/updated", params: { threadId: "source", threadSettings: { model: "luna", effort: "low" } } });
+  assert.deepEqual(client.threadModel("source"), { model: "luna", effort: "low", confirmation: "settings" });
+  await dispatch({ method: "model/rerouted", params: { threadId: "source", turnId: "turn", fromModel: "luna", toModel: "sol", reason: "capacity" } });
+  assert.equal(client.turnReroutes("source", "turn")[0]?.toModel, "sol");
+  assert.deepEqual(client.turnReroutes("source", "next-turn"), []);
+  assert.equal(client.threadModel("source")?.model, "luna", "turn reroute is not a next-turn preference");
+  await client.resumeThread("source", "/tmp", { readOnly: true, workspaceAccess: false });
+  assert.equal(client.threadModel("source")?.model, "astra");
+  await client.unsubscribeThread("source");
+  assert.equal(client.threadModel("source"), null);
+});
+
+test("catalog pagination has one five-second budget and rejects cyclic or malformed pages", async () => {
+  const client = new CodexAppServer("codex", "/tmp/codex-test");
+  const budgets: number[] = [];
+  client.request = async (_method, _params, timeout) => {
+    budgets.push(timeout!);
+    return { data: [], nextCursor: "again" };
+  };
+  await assert.rejects(client.models(), /repeated cursor/);
+  assert.equal(budgets.length, 2);
+  assert.ok(budgets.every((budget) => budget > 0 && budget <= 5_000));
+  client.request = async () => ({ bad: [] });
+  await assert.rejects(client.models(), /invalid data/);
+});
+
 test("reads estimated usage for one thread through the account RPC", async () => {
   class FakeCodex extends CodexAppServer {
     readonly calls: Array<[string, JsonRecord]> = [];

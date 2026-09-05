@@ -28,6 +28,7 @@ import {
   type StoredAttachment,
 } from "./attachment-service.js";
 import { ConfigError, type RuntimeConfig } from "./config.js";
+import { ConversationModels, type ModelSelection } from "./conversation-models.js";
 import { DeploymentEventNotifier } from "./deployment-event-notifier.js";
 import { HealthServer } from "./health-server.js";
 import { productionEnvironmentMigrationCoordinator } from "./project-environment-coordinator.js";
@@ -624,13 +625,9 @@ interface ParticipantRateState {
   notifiedAt: number;
 }
 
-interface EffectiveConversationModel {
-  model: string;
-  effort: string;
-  source: "conversation" | "config" | "codex-default";
-}
-
 export class SummingRuntime {
+  readonly conversationModels: ConversationModels;
+  private readonly modelCommands = new Map<string, Promise<void>>();
   readonly state: StateStore;
   readonly projects: ProjectCatalog;
   readonly codex: CodexAppServer;
@@ -676,7 +673,6 @@ export class SummingRuntime {
   private readonly teamUnderstandingTimers = new Map<string, TeamUnderstandingTimer>();
   private readonly teamUnderstandingFailureCounts = new Map<string, number>();
   private readonly loadedThreads = new Set<string>();
-  private modelCatalogCache: { expiresAt: number; models: CodexModel[] } | null = null;
   private readonly workspaceRuns = new KeyedMutex();
   private readonly participantRates = new Map<string, ParticipantRateState>();
   private telegramBotId = 0;
@@ -701,6 +697,7 @@ export class SummingRuntime {
     projectRunnerRegistry = new ManagedProjectRunnerRegistry(projectRunnerClient, this.projects);
     this.projectRunnerRegistry = projectRunnerRegistry;
     this.codex = new CodexAppServer(config.codexBinary, config.codexHome);
+    this.conversationModels = new ConversationModels(config, this.state, this.codex);
     this.telegram = new TelegramAPI(config.telegramToken);
     this.knowledgeSync = new KnowledgeSyncService(
       config.knowledgeSync,
@@ -833,6 +830,13 @@ export class SummingRuntime {
           return this.projectPortalOutbox.get(record.id) ?? record;
         },
         cancel: (id) => this.projectPortalOutbox.cancel(id),
+      },
+      {
+        overview: (id) => this.conversationModelOverview(id),
+        set: async (id, model, effort) => {
+          await this.conversationModels.set(id, model, effort);
+          return this.conversationModelOverview(id, false);
+        },
       },
     );
     this.runnerControl = new RunnerControlPlane(
@@ -1025,6 +1029,7 @@ export class SummingRuntime {
       if (environmentMigrationTask) await Promise.allSettled([environmentMigrationTask]);
       await Promise.allSettled([...this.provisioning.values()].map((task) => task.promise));
       await Promise.allSettled([...this.processors.values()]);
+      await Promise.allSettled([...this.modelCommands.values()]);
       await Promise.allSettled([...this.unboundProcessors]);
       await Promise.allSettled([...this.teamUnderstandingProcessors.values()]);
       await this.health.close();
@@ -2508,6 +2513,18 @@ export class SummingRuntime {
         );
         return;
       }
+      if (/^\/model(?:@\w+)?(?:\s|$)/iu.test(text)) {
+        const key = conversation?.id ?? `${chatId}:${topicId}`;
+        if (this.modelCommands.has(key) || this.modelCommands.size >= 64) {
+          await this.reply(chatId, topicId, messageId, "Выбор модели ещё обрабатывается; повторите через несколько секунд.");
+          return;
+        }
+        const task = this.handleCommand(chatId, topicId, messageId, senderId, chatType, text)
+          .catch((error) => console.error("model command failed", error))
+          .finally(() => { this.modelCommands.delete(key); });
+        this.modelCommands.set(key, task);
+        return;
+      }
       await this.handleCommand(
         chatId,
         topicId,
@@ -3414,60 +3431,41 @@ export class SummingRuntime {
     return true;
   }
 
-  private async codexModels(force = false): Promise<CodexModel[]> {
-    const now = Date.now();
-    if (!force && this.modelCatalogCache && this.modelCatalogCache.expiresAt > now) {
-      return this.modelCatalogCache.models;
-    }
-    const models = (await this.codex.models(false)).filter((model) => !model.hidden);
-    if (models.length === 0) throw new Error("Codex не вернул ни одной доступной модели");
-    this.modelCatalogCache = { expiresAt: now + 300_000, models };
-    return models;
+  private async conversationModelOverview(id: string, refresh = true) {
+    const overview = await this.conversationModels.overview(id, refresh);
+    const active = this.activeForConversation(id) ?? this.activeReviewForConversation(id);
+    return {
+      ...overview,
+      active: active ? { runId: active.runId, settings: this.state.runModel(active.runId) } : null,
+      history: this.state.conversationModelHistory(id),
+    };
   }
 
   private async effectiveConversationModel(
     conversation: Conversation,
-    forceCatalog = false,
-  ): Promise<EffectiveConversationModel> {
-    if (conversation.modelOverride) {
-      return {
-        model: conversation.modelOverride,
-        effort: conversation.effortOverride || this.config.effort,
-        source: "conversation",
-      };
-    }
-    if (this.config.model) {
-      return { model: this.config.model, effort: this.config.effort, source: "config" };
-    }
-    const defaultModel = (await this.codexModels(forceCatalog)).find((model) => model.isDefault);
-    if (!defaultModel) {
-      throw new Error("Codex не обозначил модель по умолчанию; выберите её командой /model");
-    }
-    return {
-      model: defaultModel.model,
-      effort: this.config.effort || defaultModel.defaultReasoningEffort,
-      source: "codex-default",
-    };
+  ): Promise<ModelSelection> {
+    return this.conversationModels.resolve(conversation);
   }
 
   private modelSelectionText(
-    selection: EffectiveConversationModel,
+    selection: ModelSelection | null,
     models: CodexModel[],
-    active: Pick<ActiveRun, "model" | "effort"> | null,
+    active: Pick<ActiveRun, "model" | "effort" | "runId"> | null,
   ): string {
-    const source = selection.source === "conversation"
+    const source = selection?.source === "conversation"
       ? "настройка этого topic"
-      : selection.source === "config"
+      : selection?.source === "config"
         ? "конфигурация сервера"
         : "live default Codex";
     const lines = [
-      `Модель этого topic: ${selection.model}`,
-      `Reasoning effort: ${selection.effort}`,
+      `Модель этого topic (следующий run): ${selection?.model ?? "не определена"}`,
+      `Reasoning effort: ${selection?.effort ?? "не определён"}`,
       `Источник: ${source}`,
     ];
-    if (active && (active.model !== selection.model || active.effort !== selection.effort)) {
+    if (active) {
       lines.push(
-        `Активный run продолжает работать на ${active.model} (${active.effort}); выбор применяется со следующего run.`,
+        `Активный run #${active.runId}: запрошено ${active.model} (${active.effort}); выбор применяется со следующего run.`,
+        this.runModelText(active.runId),
       );
     }
     lines.push("", "Доступные модели:");
@@ -3482,6 +3480,34 @@ export class SummingRuntime {
     }
     lines.push("", "Выбор: /model <model> [effort]", "Сброс: /model default");
     return lines.join("\n");
+  }
+
+  private runModelText(runId: number): string {
+    const settings = this.state.runModel(runId);
+    if (!settings?.model) return `Run #${runId}: Codex не подтвердил модель/effort`;
+    const label = settings.confirmation === "review-source" ? "Исходный thread review" : "Подтверждено Codex";
+    return `${label}: ${settings.model} (${settings.effort ?? "effort не подтверждён"})`;
+  }
+
+  private recordThreadModel(runId: number, threadId: string, reviewSource = false): void {
+    const settings = this.state.runModel(runId);
+    const confirmed = this.codex.threadModel(threadId);
+    if (!settings || !confirmed || settings.confirmation === "rerouted") return;
+    this.state.setRunModel(runId, {
+      ...settings, ...confirmed,
+      confirmation: reviewSource ? "review-source" : confirmed.confirmation,
+    });
+  }
+
+  private recordTurnModel(active: Pick<ActiveRun, "runId" | "threadId" | "turnId">): void {
+    this.recordThreadModel(active.runId, active.threadId);
+    if (!active.turnId) return;
+    const reroutes = this.codex.turnReroutes(active.threadId, active.turnId);
+    const settings = this.state.runModel(active.runId);
+    if (!settings || !reroutes.length) return;
+    this.state.setRunModel(active.runId, {
+      ...settings, model: reroutes.at(-1)!.toModel, effort: null, confirmation: "rerouted", reroutes,
+    });
   }
 
   private async handleCommand(
@@ -3877,20 +3903,21 @@ export class SummingRuntime {
         return;
       }
       try {
-        const models = await this.codexModels(true);
         const parts = argument.split(/\s+/u).filter(Boolean);
         if (parts.length === 0) {
-          const selection = await this.effectiveConversationModel(conversation);
+          const overview = await this.conversationModelOverview(conversation.id);
           await this.replyLong(
             chatId,
             topicId,
             messageId,
-            this.modelSelectionText(
-              selection,
-              models,
+            [this.modelSelectionText(
+              overview.selection,
+              overview.models,
               this.activeForConversation(conversation.id) ??
                 this.activeReviewForConversation(conversation.id),
-            ),
+            ), overview.catalogError,
+            overview.history[0] ? this.runModelText(overview.history[0].runId) : "История запусков пуста",
+            ].filter(Boolean).join("\n"),
           );
           return;
         }
@@ -3903,58 +3930,26 @@ export class SummingRuntime {
             await this.reply(chatId, topicId, messageId, "Использование: /model default");
             return;
           }
-          this.state.setConversationModel(conversation.id, "", "");
-        } else {
-          const requested = parts[0]!.toLowerCase();
-          const model = models.find((candidate) =>
-            candidate.model.toLowerCase() === requested || candidate.id.toLowerCase() === requested
-          );
-          if (!model) {
-            await this.reply(
-              chatId,
-              topicId,
-              messageId,
-              `Модель ${parts[0]} отсутствует в live-каталоге Codex. Используйте /model для списка.`,
-            );
-            return;
-          }
-          const requestedEffort = parts[1]?.toLowerCase() ?? model.defaultReasoningEffort;
-          const efforts = model.supportedReasoningEfforts.map((item) => item.reasoningEffort);
-          if (efforts.length > 0 && !efforts.includes(requestedEffort)) {
-            await this.reply(
-              chatId,
-              topicId,
-              messageId,
-              `Для ${model.model} доступны effort: ${efforts.join(", ")}.`,
-            );
-            return;
-          }
-          this.state.setConversationModel(conversation.id, model.model, requestedEffort);
         }
-        if (conversation.readOnlyCodexThreadId) {
-          this.loadedThreads.delete(conversation.readOnlyCodexThreadId);
-          this.codex.detachThreadHandler(conversation.readOnlyCodexThreadId);
-          this.state.setThread(conversation.id, null, "read-only");
-        }
-        const updated = this.state.get(conversation.id);
-        const selection = await this.effectiveConversationModel(updated);
+        const selection = await this.conversationModels.set(conversation.id,
+          parts[0]!.toLowerCase() === "default" ? null : parts[0]!.toLowerCase(), parts[1]?.toLowerCase());
         const active = this.activeForConversation(conversation.id) ??
           this.activeReviewForConversation(conversation.id);
         const suffix = active
-          ? `\nАктивный run продолжает работать на ${active.model} (${active.effort}); выбор применяется со следующего run.`
+          ? `\nАктивный run: запрошено ${active.model} (${active.effort}). ${this.runModelText(active.runId)}. Выбор применяется со следующего run.`
           : "\nВыбор применяется со следующего run.";
         await this.reply(
           chatId,
           topicId,
           messageId,
-          `Модель этого topic: ${selection.model}\nReasoning effort: ${selection.effort}${suffix}`,
+          `Модель этого topic: ${selection.model}\nReasoning effort: ${selection.effort}\nИсточник: ${selection.source}${suffix}`,
         );
       } catch (error) {
         await this.reply(
           chatId,
           topicId,
           messageId,
-          `Не удалось прочитать каталог моделей: ${errorText(error)}`,
+          `Настройка не изменена: ${errorText(error)}`,
         );
       }
       return;
@@ -4075,18 +4070,15 @@ export class SummingRuntime {
       let modelStatus = "Model: topic не привязан";
       if (conversation) {
         try {
-          const selected = await this.effectiveConversationModel(conversation, true);
+          const selected = await this.effectiveConversationModel(conversation);
           const activeRun = this.activeForConversation(conversation.id) ??
             this.activeReviewForConversation(conversation.id);
           modelStatus = `Model: ${selected.model} (${selected.effort}, ${
             selected.source === "conversation" ? "topic" : selected.source
           })`;
-          if (
-            activeRun &&
-            (activeRun.model !== selected.model || activeRun.effort !== selected.effort)
-          ) {
-            modelStatus += `; active: ${activeRun.model} (${activeRun.effort})`;
-          }
+          const latest = this.state.conversationModelHistory(conversation.id)[0];
+          if (activeRun) modelStatus += `; active requested: ${activeRun.model} (${activeRun.effort}); ${this.runModelText(activeRun.runId)}`;
+          else if (latest) modelStatus += `; ${this.runModelText(latest.runId)}`;
         } catch (error) {
           modelStatus = `Model: не определена (${errorText(error)})`;
         }
@@ -4544,6 +4536,7 @@ export class SummingRuntime {
     let releaseWorkspace: (() => void) | null = null;
     let inspector: GitInspector | null = null;
     let active: ActiveReview | null = null;
+    let sourceThreadId: string | null = null;
     let runFinished = false;
     try {
       runId = this.state.startRun(
@@ -4586,17 +4579,19 @@ export class SummingRuntime {
       );
       const readOnlyDeniedPaths = await this.workspaces.readOnlyDeniedPaths(prepared.readableRoot);
       this.state.setWorktree(conversation.id, prepared.path);
+      await this.modelCommands.get(conversationId);
       conversation = this.state.get(conversation.id);
       const modelSelection = await this.effectiveConversationModel(conversation);
-      const sourceThreadId = await this.thread(
-        conversation,
-        prepared.path,
-        prepared.readableRoot,
-        prepared.gitMetadataRoots,
-        readOnlyDeniedPaths,
-        "read-only",
-        modelSelection.model,
-      );
+      this.state.setRunModel(runId, {
+        requestedModel: modelSelection.model, requestedEffort: modelSelection.effort,
+        model: null, effort: null, confirmation: null, reroutes: [],
+      });
+      sourceThreadId = await this.codex.startThread(prepared.path, modelSelection.model, {
+        readOnly: true, networkAccess: false, deniedPaths: readOnlyDeniedPaths,
+        readableRoots: [prepared.readableRoot], gitMetadataRoots: prepared.gitMetadataRoots,
+        effort: modelSelection.effort, reviewModel: modelSelection.model,
+      });
+      this.recordThreadModel(runId, sourceThreadId, true);
       const root = await GitInspector.worktreeRoot(prepared.readableRoot);
       inspector = new GitInspector(root);
       const beforeRevision = await inspector.snapshot(`run ${runId} detached review before`);
@@ -4635,6 +4630,7 @@ export class SummingRuntime {
       this.state.setActive(conversation.id, started.turnId, null);
       this.activeReviewsByThread.set(started.reviewThreadId, active);
       this.activeReviewsByTurn.set(started.turnId, active);
+      this.recordTurnModel(active);
       await active.done.promise;
       showCodexWorkLog(active);
       await stream.settle();
@@ -4748,6 +4744,10 @@ export class SummingRuntime {
         } catch (error) {
           console.warn(`could not unsubscribe detached review thread ${active.threadId}`, error);
         }
+      }
+      if (sourceThreadId) {
+        try { await this.codex.unsubscribeThread(sourceThreadId); }
+        catch (error) { console.warn("could not unsubscribe review source thread", error); }
       }
       this.state.clearActive(conversationId);
       releaseWorkspace?.();
@@ -4934,8 +4934,13 @@ export class SummingRuntime {
           ? await this.workspaces.readOnlyDeniedPaths(prepared.readableRoot)
           : [];
       this.state.setWorktree(conversation.id, prepared.path);
+      await this.modelCommands.get(conversationId);
       conversation = this.state.get(conversation.id);
       const modelSelection = await this.effectiveConversationModel(conversation);
+      this.state.setRunModel(runId, {
+        requestedModel: modelSelection.model, requestedEffort: modelSelection.effort,
+        model: null, effort: null, confirmation: null, reroutes: [],
+      });
       const threadId = await this.thread(
         conversation,
         prepared.path,
@@ -5001,6 +5006,7 @@ export class SummingRuntime {
       active.turnId = turnId;
       this.activeByTurn.set(turnId, active);
       this.state.attachTurn(runId, turnId);
+      this.recordTurnModel(active);
       this.state.setActive(conversation.id, turnId, null);
       if (active.cancelRequested) await this.codex.interrupt(active.threadId, turnId);
       else await this.deliverSteer(active, this.state.pending(conversation.id, "steer"));
@@ -5657,6 +5663,7 @@ export class SummingRuntime {
     return {
       ...summarize(run),
       conversationId: run.conversationId,
+      modelSettings: this.state.runModel(run.id),
       turnId: run.turnId,
       errorDigest: createHash("sha256").update(run.error).digest("hex"),
       errorCharacters: Array.from(run.error).length,
@@ -6438,12 +6445,14 @@ export class SummingRuntime {
     }
     const active = this.activeForEvent(event);
     if (active) {
+      if (event.method === "thread/settings/updated" || event.method === "model/rerouted") this.recordTurnModel(active);
       this.captureRunEvidence(event, active);
       this.applyCodexResponseEvent(event, active, true);
       return;
     }
     const review = this.activeReviewForEvent(event);
     if (review) {
+      if (event.method === "thread/settings/updated" || event.method === "model/rerouted") this.recordTurnModel(review);
       this.applyCodexResponseEvent(event, review, true);
       return;
     }

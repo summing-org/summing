@@ -50,6 +50,7 @@ async function reviewFixture(mutatesWorkspace: boolean): Promise<{
   runtime.workspaces.initialize();
   const conversation = runtime.state.bind(42, 0, "demo", "repo");
   runtime.state.setConversationModel(conversation.id, "gpt-astra", "high");
+  runtime.state.setThread(conversation.id, "stale-qa-thread", "read-only");
   const messages: string[] = [];
   runtime.telegram.sendChatAction = async () => undefined;
   runtime.telegram.sendMessage = async (_chatId, text) => {
@@ -65,6 +66,8 @@ async function reviewFixture(mutatesWorkspace: boolean): Promise<{
     assert.equal(model, "gpt-astra");
     assert.equal(options?.readOnly, true);
     assert.equal(options?.networkAccess, false);
+    assert.equal(options?.effort, "high");
+    assert.equal(options?.reviewModel, "gpt-astra");
     return "thread-review-source";
   };
   runtime.codex.unsubscribeThread = async () => undefined;
@@ -114,6 +117,9 @@ async function reviewFixture(mutatesWorkspace: boolean): Promise<{
   ).executeReview.bind(runtime);
   try {
     await executeReview(conversation.id, 17, 1);
+    assert.equal(runtime.state.get(conversation.id).readOnlyCodexThreadId, "stale-qa-thread");
+    assert.equal(runtime.state.runModel(1)?.requestedEffort, "high");
+    assert.equal(runtime.state.runModel(1)?.model, null, "a request is not execution evidence");
     return { review: runtime.state.runReview(1), messages };
   } finally {
     runtime.state.close();

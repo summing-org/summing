@@ -110,6 +110,8 @@ function readableCanonicalFile(path: string): string | null {
 }
 
 interface WorkspacePermissionOptions {
+  effort?: string;
+  reviewModel?: string;
   deniedPaths?: string[];
   disableEnvironments?: boolean;
   ephemeral?: boolean;
@@ -161,7 +163,35 @@ export interface CodexModel {
   supportedReasoningEfforts: CodexModelReasoningEffort[];
 }
 
+export interface CodexThreadModel {
+  model: string | null;
+  effort: string | null;
+  confirmation: "thread" | "settings";
+}
+
 export class CodexAppServer extends EventEmitter {
+  private readonly modelReroutes = new Map<string, {
+    turnId: string; changes: Array<{ fromModel: string; toModel: string; reason: string }>;
+  }>();
+
+  turnReroutes(threadId: string, turnId: string) {
+    const entry = this.modelReroutes.get(threadId);
+    return entry?.turnId === turnId ? entry.changes : [];
+  }
+  private readonly threadModels = new Map<string, CodexThreadModel>();
+
+  threadModel(threadId: string): CodexThreadModel | null {
+    return this.threadModels.get(threadId) ?? null;
+  }
+
+  private rememberThreadModel(threadId: string, value: JsonRecord, confirmation: "thread" | "settings"): void {
+    this.threadModels.set(threadId, {
+      model: typeof value.model === "string" ? value.model : null,
+      effort: typeof value.effort === "string" ? value.effort
+        : typeof value.reasoningEffort === "string" ? value.reasoningEffort : null,
+      confirmation,
+    });
+  }
   private process: ChildProcessWithoutNullStreams | null = null;
   private readonly pending = new Map<number, PendingRequest>();
   private nextId = 1;
@@ -243,6 +273,8 @@ export class CodexAppServer extends EventEmitter {
     }
     this.rejectPending(new CodexProtocolError("Codex App Server stopped"));
     this.dynamicToolHandlers.clear();
+    this.threadModels.clear();
+    this.modelReroutes.clear();
     this.process = null;
   }
 
@@ -325,6 +357,19 @@ export class CodexAppServer extends EventEmitter {
     }
     if (message.method) {
       const params = this.record(message.params);
+      if (message.method === "thread/settings/updated" && typeof params.threadId === "string") {
+        this.rememberThreadModel(params.threadId, this.record(params.threadSettings), "settings");
+      }
+      if (message.method === "model/rerouted" && typeof params.threadId === "string" &&
+          typeof params.turnId === "string" && typeof params.toModel === "string" &&
+          typeof params.fromModel === "string") {
+        const previous = this.modelReroutes.get(params.threadId);
+        const changes = previous?.turnId === params.turnId ? previous.changes : [];
+        this.modelReroutes.set(params.threadId, { turnId: params.turnId, changes: [...changes, {
+          fromModel: params.fromModel, toModel: params.toModel,
+          reason: typeof params.reason === "string" ? params.reason : "",
+        }].slice(-20) });
+      }
       this.emit("event", { method: message.method, params } satisfies CodexEvent);
     }
   }
@@ -457,11 +502,16 @@ export class CodexAppServer extends EventEmitter {
   async models(includeHidden = false): Promise<CodexModel[]> {
     const models: CodexModel[] = [];
     let cursor = "";
+    const deadline = Date.now() + 5_000;
+    const cursors = new Set<string>();
     for (let page = 0; page < 20; page += 1) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new CodexProtocolError("model/list deadline exceeded");
       const params: JsonRecord = { includeHidden, limit: 100 };
       if (cursor) params.cursor = cursor;
-      const result = this.record(await this.request("model/list", params, 30_000));
-      const data = Array.isArray(result.data) ? result.data : [];
+      const result = this.record(await this.request("model/list", params, remaining));
+      if (!Array.isArray(result.data)) throw new CodexProtocolError("model/list returned invalid data");
+      const data = result.data;
       for (const value of data) {
         const entry = this.record(value);
         if (typeof entry.id !== "string" || typeof entry.model !== "string") continue;
@@ -491,7 +541,9 @@ export class CodexAppServer extends EventEmitter {
         });
       }
       const nextCursor = typeof result.nextCursor === "string" ? result.nextCursor : "";
-      if (!nextCursor || nextCursor === cursor) return models;
+      if (!nextCursor) return models;
+      if (cursors.has(nextCursor)) throw new CodexProtocolError("model/list repeated cursor");
+      cursors.add(nextCursor);
       cursor = nextCursor;
     }
     throw new CodexProtocolError("model/list returned too many pages");
@@ -516,6 +568,8 @@ export class CodexAppServer extends EventEmitter {
       selectedCapabilityRoots: [],
     };
     if (model) params.model = model;
+    if (options.effort) (params.config as JsonRecord).model_reasoning_effort = options.effort;
+    if (options.reviewModel) (params.config as JsonRecord).review_model = options.reviewModel;
     if (options.disableEnvironments) params.environments = [];
     if (options.ephemeral !== undefined) params.ephemeral = options.ephemeral;
     const result = this.record(await this.request("thread/start", params));
@@ -535,6 +589,7 @@ export class CodexAppServer extends EventEmitter {
     if (options.dynamicToolHandler) {
       this.dynamicToolHandlers.set(thread.id, options.dynamicToolHandler);
     }
+    this.rememberThreadModel(thread.id, result, "thread");
     return thread.id;
   }
 
@@ -546,14 +601,15 @@ export class CodexAppServer extends EventEmitter {
     const permissionProfile = options.readOnly
       ? READ_ONLY_PERMISSION_PROFILE
       : PROJECT_PERMISSION_PROFILE;
-    await this.request("thread/resume", {
+    const result = this.record(await this.request("thread/resume", {
       threadId,
       cwd,
       runtimeWorkspaceRoots: this.runtimeWorkspaceRoots(cwd, options),
       approvalPolicy: "never",
       permissions: permissionProfile,
       config: this.permissionConfig(cwd, options),
-    });
+    }));
+    this.rememberThreadModel(threadId, result, "thread");
     if (options.dynamicToolHandler) {
       this.dynamicToolHandlers.set(threadId, options.dynamicToolHandler);
     } else {
@@ -564,10 +620,14 @@ export class CodexAppServer extends EventEmitter {
   async unsubscribeThread(threadId: string): Promise<void> {
     await this.request("thread/unsubscribe", { threadId }, 30_000);
     this.dynamicToolHandlers.delete(threadId);
+    this.threadModels.delete(threadId);
+    this.modelReroutes.delete(threadId);
   }
 
   detachThreadHandler(threadId: string): void {
     this.dynamicToolHandlers.delete(threadId);
+    this.threadModels.delete(threadId);
+    this.modelReroutes.delete(threadId);
   }
 
   async startTurn(
@@ -591,6 +651,10 @@ export class CodexAppServer extends EventEmitter {
     };
     if (options.model) params.model = options.model;
     if (options.outputSchema) params.outputSchema = options.outputSchema;
+    const confirmed = this.threadModels.get(threadId);
+    // Changed settings need new server evidence; unchanged settings emit no notification.
+    if (confirmed && ((options.model && options.model !== confirmed.model) ||
+        params.effort !== confirmed.effort)) this.threadModels.delete(threadId);
     const result = this.record(await this.request("turn/start", params));
     const turn = this.record(result.turn);
     if (typeof turn.id !== "string") {

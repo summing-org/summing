@@ -315,7 +315,7 @@ export const ADMIN_JS = `
           "<div class='topic-name'><strong>"+esc(topic.name||(topic.topicId===0?"Общий чат":"Без названия"))+"</strong>"+
           "<span>topic_id: "+esc(topic.topicId)+" · "+esc(localTime(topic.updatedAt))+"</span>"+
           "<span class='binding-current "+(routes.length?"":"unbound")+"'>"+(routes.length?routes.map(esc).join("<br>"):"не привязан")+"</span>"+
-          (binding?"<a class='viewer-link' href='/?conversation="+encodeURIComponent(binding.conversationId)+"'>Открыть Project Viewer ↗</a>":"")+"<br>"+
+          (binding?"<a class='viewer-link' href='/?conversation="+encodeURIComponent(binding.conversationId)+"'>Открыть Project Viewer ↗</a> · <a class='viewer-link' href='/?conversation="+encodeURIComponent(binding.conversationId)+"&amp;tab=model'>Модель topic ↗</a>":"")+"<br>"+
           "<button class='users-toggle' data-users='"+esc(usersKey)+"' data-chat='"+esc(chat.chatId)+"' data-topic='"+esc(topic.topicId)+"' aria-expanded='false'>Пользователи · "+esc(topic.userCount)+"</button></div>"+
           "<div class='topic-controls'><select data-project='"+esc(key)+"' aria-label='Проект'>"+projectOptions(selectedProject)+"</select>"+
           "<select data-workspace='"+esc(key)+"' aria-label='Репозиторий'>"+workspaceOptions(selectedProject,selectedWorkspace)+"</select>"+

@@ -204,6 +204,10 @@ export class ProjectViewerServer {
     readonly nodeRecovery?: NodeRecoveryAdmin,
     readonly teamModelEgress?: TeamModelEgressAdmin,
     readonly projectPortalAdmin?: ProjectPortalAdmin,
+    readonly conversationModels?: {
+      overview: (conversationId: string) => Promise<unknown>;
+      set: (conversationId: string, model: string | null, effort?: string) => Promise<unknown>;
+    },
   ) {
     this.auth = new ViewerAuthenticator(
       config.telegramToken,
@@ -344,6 +348,32 @@ export class ProjectViewerServer {
     const telegramUser = this.auth.authenticate(
       request.headers as Record<string, string | string[] | undefined>,
     );
+    if (url.pathname === "/api/viewer/model" && ["GET", "POST"].includes(request.method ?? "")) {
+      const body = request.method === "POST" ? objectValue(await requestBody(request)) : {};
+      const id = request.method === "POST" ? String(body.conversation ?? "") : queryValue(url, "conversation");
+      const authorized = this.authorizedConversation(id, telegramUser);
+      if (!this.conversationModels) throw new ViewerHttpError(503, "model settings unavailable");
+      if (request.method === "GET") {
+        const overview = await this.conversationModels.overview(id);
+        const current = this.authorizedConversation(id, telegramUser);
+        if (current.projectId !== authorized.projectId || current.workspaceId !== authorized.workspaceId) {
+          throw new ViewerHttpError(409, "conversation binding changed; refresh and retry");
+        }
+        json(response, 200, overview);
+      } else {
+        if ((body.model !== null && (typeof body.model !== "string" || !body.model.trim())) ||
+            (body.effort !== undefined && typeof body.effort !== "string") ||
+            Object.keys(body).some((key) => !["conversation", "model", "effort"].includes(key))) {
+          throw new ViewerHttpError(400, "invalid model selection");
+        }
+        try {
+          json(response, 200, await this.conversationModels.set(id, body.model as string | null, body.effort as string | undefined));
+        } catch (error) {
+          throw new ViewerHttpError(400, error instanceof Error ? error.message : "model selection failed");
+        }
+      }
+      return;
+    }
     if (request.method === "GET" && url.pathname === "/api/viewer/admin") {
       this.requireAdminAccess(telegramUser);
       json(response, 200, this.adminOverview());
@@ -967,6 +997,7 @@ export class ProjectViewerServer {
           );
           return {
             ...run,
+            modelSettings: this.state.runModel(run.runId),
             delivery: {
               total: deliveries.length,
               sent: deliveries.filter((delivery) => delivery.status === "sent").length,
@@ -1779,7 +1810,7 @@ export class ProjectViewerServer {
     return /^ssh:\/\//i.test(remote) || /^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:/.test(remote);
   }
 
-  private async scope(conversationId: string, telegramUser: number): Promise<ViewerScope> {
+  private authorizedConversation(conversationId: string, telegramUser: number): Conversation {
     if (!/^tg-[0-9a-f]{20}$/.test(conversationId)) {
       throw new ViewerHttpError(400, "invalid conversation id");
     }
@@ -1798,6 +1829,11 @@ export class ProjectViewerServer {
     if (telegramUser !== 0 && !this.projects.canAccess(telegramUser, conversation.projectId)) {
       throw new ViewerHttpError(403, "project access denied");
     }
+    return conversation;
+  }
+
+  private async scope(conversationId: string, telegramUser: number): Promise<ViewerScope> {
+    const conversation = this.authorizedConversation(conversationId, telegramUser);
     const project = this.projects.project(conversation.projectId);
     const workspace = project.workspace(conversation.workspaceId);
     const path = conversation.worktreePath || workspace.path;
