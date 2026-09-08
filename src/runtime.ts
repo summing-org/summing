@@ -78,6 +78,7 @@ import {
   type ExternalMessageToolInput,
 } from "./project-portal-tools.js";
 import {
+  nextScheduleOccurrence,
   RunnerControlPlane,
   type RunnerControlContext,
   type RunnerLifecycleNotification,
@@ -762,6 +763,7 @@ export class SummingRuntime {
       config.deploymentStatePath,
       SUMMING_VERSION,
     );
+    const scheduleTimes = new Map<string, { revision: string; next: string | null }>();
     this.viewer = new ProjectViewerServer(
       config,
       this.state,
@@ -841,6 +843,24 @@ export class SummingRuntime {
           await this.conversationModels.set(id, model, effort);
           return this.conversationModelOverview(id, false);
         },
+      },
+      (projectId, workspaceId) => {
+        const now = Date.now();
+        return this.runnerControl.store.schedules(projectId, workspaceId)
+          .filter((schedule) => schedule.enabled)
+          .flatMap((schedule) => {
+            let cached = scheduleTimes.get(schedule.id);
+            if (!cached || cached.revision !== schedule.updatedAt || !cached.next || Date.parse(cached.next) <= now) {
+              cached = { revision: schedule.updatedAt, next: nextScheduleOccurrence(schedule, now) };
+              scheduleTimes.set(schedule.id, cached);
+            }
+            return cached.next ? [{
+              name: schedule.name,
+              nextRunAt: cached.next,
+              timeZone: schedule.timeZone,
+              destination: schedule.delivery?.label || "",
+            }] : [];
+          });
       },
     );
     this.runnerControl = new RunnerControlPlane(

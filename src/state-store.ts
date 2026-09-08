@@ -5436,6 +5436,36 @@ export class StateStore {
     return rows.map(projectRunHistory);
   }
 
+  /** Viewer history follows both the immutable run scope and the current binding. */
+  viewerConversationActivity(conversation: Conversation) {
+    const runs = (this.db.prepare(`
+      SELECT r.* FROM runs r JOIN conversations c ON c.id = r.conversation_id
+      WHERE c.id = ? AND c.project_id = ? AND c.workspace_id = ?
+        AND c.binding_mode = 'project'
+        AND r.project_id = c.project_id AND r.workspace_id = c.workspace_id
+      ORDER BY r.id DESC LIMIT 8
+    `).all(conversation.id, conversation.projectId, conversation.workspaceId) as Row[])
+      .map(projectRunHistory);
+    const pending = this.db.prepare(`
+      SELECT COUNT(*) AS count FROM pending_inputs p JOIN conversations c ON c.id = p.conversation_id
+      WHERE c.id = ? AND c.project_id = ? AND c.workspace_id = ? AND c.binding_mode = 'project'
+        AND p.state = 'pending'
+    `).get(conversation.id, conversation.projectId, conversation.workspaceId) as Row;
+    return {
+      pendingCount: Number(pending.count),
+      runs: runs.map((run) => ({
+        id: run.id,
+        conversationId: run.conversationId,
+        status: run.status,
+        request: run.requestText.slice(0, 240),
+        result: run.response.slice(0, 600),
+        error: run.error.slice(0, 240),
+        startedAt: new Date(run.startedAt * 1_000).toISOString(),
+        completedAt: run.completedAt === null ? null : new Date(run.completedAt * 1_000).toISOString(),
+      })),
+    };
+  }
+
   searchProjectRuns(
     projectId: string,
     workspaceId: string,

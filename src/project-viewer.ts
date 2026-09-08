@@ -62,6 +62,13 @@ export interface ProjectPortalAdmin {
   cancel(id: string): Promise<unknown> | unknown;
 }
 
+export interface ViewerSchedule {
+  name: string;
+  nextRunAt: string;
+  timeZone: string;
+  destination: string;
+}
+
 interface ViewerRepositoryConnection {
   mode: "none" | "external" | "managed-ssh";
   publicKey: string;
@@ -208,6 +215,7 @@ export class ProjectViewerServer {
       overview: (conversationId: string) => Promise<unknown>;
       set: (conversationId: string, model: string | null, effort?: string) => Promise<unknown>;
     },
+    readonly upcomingSchedules?: (projectId: string, workspaceId: string) => ViewerSchedule[],
   ) {
     this.auth = new ViewerAuthenticator(
       config.telegramToken,
@@ -891,6 +899,12 @@ export class ProjectViewerServer {
         ? ""
         : queryValue(url, "conversation");
 
+    if (request.method === "GET" && url.pathname === "/api/viewer/overview") {
+      // No Git or runner I/O: project activity stays available while either is busy/offline.
+      const conversation = this.authorizedConversation(conversationId, telegramUser);
+      json(response, 200, this.projectOverview(conversation));
+      return;
+    }
     if (request.method === "GET" && url.pathname === "/api/viewer/session") {
       const scope = await this.scope(conversationId, telegramUser);
       json(response, 200, {
@@ -1121,6 +1135,49 @@ export class ProjectViewerServer {
 
   private isAdministrator(telegramUser: number): boolean {
     return telegramUser === 0 || telegramUser === this.config.telegramOwnerId;
+  }
+
+  private projectOverview(selected: Conversation) {
+    const project = this.projects.project(selected.projectId);
+    project.workspace(selected.workspaceId);
+    const conversations = this.state.listConversations()
+      .filter((item) => item.projectId === selected.projectId &&
+        item.workspaceId === selected.workspaceId && item.role === "primary")
+      .sort((a, b) => Number(Boolean(b.isPrimary)) - Number(Boolean(a.isPrimary)) ||
+        a.chatId - b.chatId || a.topicId - b.topicId);
+    const topics = conversations.map((item) => {
+      const activity = this.state.viewerConversationActivity(item);
+      const latest = activity.runs[0];
+      const status = item.activeTurnId || latest?.status === "running" ? "running"
+        : this.bindingBusy(item) ? "preparing" : activity.pendingCount ? "queued" : "idle";
+      const chatId = String(item.chatId);
+      return {
+        id: item.id,
+        name: this.state.telegramTopic(item.chatId, item.topicId)?.name ||
+          (item.topicId ? `Топик ${item.topicId}` : "Общий"),
+        chat: this.state.telegramChat(item.chatId)?.title || "Telegram",
+        primary: Boolean(item.isPrimary),
+        status,
+        pendingCount: activity.pendingCount,
+        telegramUrl: chatId.startsWith("-100")
+          ? `https://t.me/c/${chatId.slice(4)}/${item.topicId || 1}` : null,
+        runs: activity.runs,
+      };
+    });
+    const recent = topics.flatMap((topic) => topic.runs)
+      .filter((run) => run.status !== "running")
+      .sort((a, b) => (b.completedAt ?? b.startedAt).localeCompare(a.completedAt ?? a.startedAt) || b.id - a.id)
+      .slice(0, 8);
+    return {
+      conversation: selected.id,
+      project: { id: project.id, name: project.name, workspace: selected.workspaceId },
+      updatedAt: new Date().toISOString(),
+      topics: topics.map(({ runs, ...topic }) => ({ ...topic, latestRun: runs[0] ?? null })),
+      recent,
+      schedules: this.upcomingSchedules
+        ? this.upcomingSchedules(project.id, selected.workspaceId).sort((a, b) => a.nextRunAt.localeCompare(b.nextRunAt)).slice(0, 3)
+        : null,
+    };
   }
 
   private async downloadArtifact(url: URL, response: ServerResponse): Promise<void> {
