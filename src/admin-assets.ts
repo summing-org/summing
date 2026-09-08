@@ -271,25 +271,23 @@ export const ADMIN_CSS = `
 .topic-name>strong{font-size:15px;white-space:normal;overflow-wrap:anywhere;line-height:1.4}
 .topic-name>span{line-height:1.5;overflow-wrap:anywhere}
 .topic-shortcuts{display:grid;gap:10px;margin-top:16px}
-.topic-shortcuts a,.topic-shortcuts .users-toggle{display:flex;align-items:center;justify-content:center;gap:8px;min-width:0;min-height:48px;margin:0;padding:11px 12px;border:1px solid var(--border-strong);border-radius:8px;background:var(--surface2);color:var(--text);font:600 12px/1.4 Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;text-decoration:none;touch-action:manipulation}
-.topic-shortcuts svg{width:18px;height:18px;flex:none;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
-.topic-shortcuts .topic-open-project{justify-content:flex-start;border-color:var(--accent);background:var(--accent-soft);color:var(--accent-light);font-size:14px}
+.topic-shortcuts a,.topic-shortcuts .users-toggle{display:flex;align-items:center;justify-content:center;justify-self:start;gap:6px;min-width:0;margin:0;padding:5px 8px;border:1px solid var(--border-strong);border-radius:6px;background:transparent;color:var(--text);font:500 10px/1.4 Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;text-decoration:none;touch-action:manipulation}
+.topic-shortcuts svg{width:14px;height:14px;flex:none;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.topic-shortcuts .topic-open-project{justify-content:flex-start;border-color:var(--accent);color:var(--accent-light);font-size:11px}
 .topic-shortcuts .topic-open-project span{flex:1;margin:0;color:inherit;font:inherit}
-.topic-secondary-actions{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.3fr);gap:10px}
-.topic-secondary-actions>:only-child{grid-column:1/-1}
+.topic-secondary-actions{display:flex;flex-wrap:wrap;gap:10px}
 .topic-shortcuts a:hover,.topic-shortcuts .users-toggle:hover,.topic-shortcuts .users-toggle.open{border-color:var(--primary);background:var(--primary-soft);color:var(--primary)}
-.topic-shortcuts .topic-open-project:hover{border-color:var(--accent-light);background:color-mix(in srgb,var(--accent-soft) 75%,var(--accent));color:var(--accent-light)}
+.topic-shortcuts .topic-open-project:hover{border-color:var(--accent-light);background:var(--accent-soft);color:var(--accent-light)}
 .topic-shortcuts a:focus-visible,.topic-shortcuts button:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 .topic-controls{min-width:0;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;padding:16px;border:1px solid var(--border);border-radius:9px;background:var(--surface2)}
 .topic-binding-heading{grid-column:1/-1;color:var(--muted);font-size:11px;font-weight:600}
 .topic-controls label{display:grid;min-width:0;gap:7px}
 .topic-controls label>span{color:var(--muted);font-size:10px}
-.topic-controls select{min-height:48px;background:var(--surface);font-size:12px}
+.topic-controls select{background:var(--surface);font-size:11px}
 .topic-controls .topic-actions{grid-column:1/-1;flex-wrap:wrap;gap:10px;margin-top:2px}
-.topic-controls .topic-actions button{flex:1;min-height:48px;padding:10px 12px;font-size:12px;touch-action:manipulation}
+.topic-controls .topic-actions button{flex:0 1 auto;padding:8px 10px;font-size:10px;font-weight:500;touch-action:manipulation}
 @media(max-width:800px){.topic-row{grid-template-columns:minmax(0,1fr);gap:18px}}
 @media(max-width:520px){.topic-row{padding:16px}.topic-controls{grid-template-columns:repeat(2,minmax(0,1fr));padding:14px}.topic-controls label:first-of-type{grid-column:1/-1}}
-@media(max-width:360px){.topic-secondary-actions{grid-template-columns:minmax(0,1fr)}}
 ${ADMIN_NAVIGATION_CSS}
 `;
 
