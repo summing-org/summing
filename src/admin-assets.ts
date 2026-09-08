@@ -267,6 +267,29 @@ export const ADMIN_CSS = `
 @media(max-width:520px){.portal-delivery-actions{display:grid;grid-template-columns:1fr 1fr}.portal-delivery-actions button{width:100%}}
 .copy-log,.deployment-copy-manual button{min-height:44px;margin-top:10px;padding:9px 12px;border:1px solid var(--border-strong);border-radius:7px;background:var(--surface);color:var(--text);font:12px/1.4 var(--mono);cursor:pointer}.copy-log:disabled{opacity:.5;cursor:wait}.copy-log:focus-visible,.deployment-copy-manual button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.deployment-log pre,.deployment-attempt-details pre,.deployment-copy-manual textarea{-webkit-user-select:text;user-select:text;-webkit-touch-callout:default}.deployment-copy-manual{margin-top:10px}.deployment-copy-manual p{color:var(--muted);font-size:12px;line-height:1.5}.deployment-copy-manual textarea{display:block;width:100%;min-height:200px;padding:10px;margin-top:8px;border:1px solid var(--border-strong);border-radius:6px;background:var(--bg);color:var(--text);font:16px/1.45 var(--mono);resize:vertical}.deployment-copy-buffer{position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;font-size:16px}
 .project-metrics{grid-template-columns:82px}.binding-metrics{grid-template-columns:repeat(3,82px)}
+.topic-row{grid-template-columns:minmax(230px,1fr) minmax(0,1.4fr);align-items:start;gap:24px;padding:20px}
+.topic-name>strong{font-size:15px;white-space:normal;overflow-wrap:anywhere;line-height:1.4}
+.topic-name>span{line-height:1.5;overflow-wrap:anywhere}
+.topic-shortcuts{display:grid;gap:10px;margin-top:16px}
+.topic-shortcuts a,.topic-shortcuts .users-toggle{display:flex;align-items:center;justify-content:center;gap:8px;min-width:0;min-height:48px;margin:0;padding:11px 12px;border:1px solid var(--border-strong);border-radius:8px;background:var(--surface2);color:var(--text);font:600 12px/1.4 Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;text-decoration:none;touch-action:manipulation}
+.topic-shortcuts svg{width:18px;height:18px;flex:none;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.topic-shortcuts .topic-open-project{justify-content:flex-start;border-color:var(--accent);background:var(--accent-soft);color:var(--accent-light);font-size:14px}
+.topic-shortcuts .topic-open-project span{flex:1;margin:0;color:inherit;font:inherit}
+.topic-secondary-actions{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.3fr);gap:10px}
+.topic-secondary-actions>:only-child{grid-column:1/-1}
+.topic-shortcuts a:hover,.topic-shortcuts .users-toggle:hover,.topic-shortcuts .users-toggle.open{border-color:var(--primary);background:var(--primary-soft);color:var(--primary)}
+.topic-shortcuts .topic-open-project:hover{border-color:var(--accent-light);background:color-mix(in srgb,var(--accent-soft) 75%,var(--accent));color:var(--accent-light)}
+.topic-shortcuts a:focus-visible,.topic-shortcuts button:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.topic-controls{min-width:0;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;padding:16px;border:1px solid var(--border);border-radius:9px;background:var(--surface2)}
+.topic-binding-heading{grid-column:1/-1;color:var(--muted);font-size:11px;font-weight:600}
+.topic-controls label{display:grid;min-width:0;gap:7px}
+.topic-controls label>span{color:var(--muted);font-size:10px}
+.topic-controls select{min-height:48px;background:var(--surface);font-size:12px}
+.topic-controls .topic-actions{grid-column:1/-1;flex-wrap:wrap;gap:10px;margin-top:2px}
+.topic-controls .topic-actions button{flex:1;min-height:48px;padding:10px 12px;font-size:12px;touch-action:manipulation}
+@media(max-width:800px){.topic-row{grid-template-columns:minmax(0,1fr);gap:18px}}
+@media(max-width:520px){.topic-row{padding:16px}.topic-controls{grid-template-columns:repeat(2,minmax(0,1fr));padding:14px}.topic-controls label:first-of-type{grid-column:1/-1}}
+@media(max-width:360px){.topic-secondary-actions{grid-template-columns:minmax(0,1fr)}}
 ${ADMIN_NAVIGATION_CSS}
 `;
 
@@ -315,11 +338,14 @@ export const ADMIN_JS = `
           "<div class='topic-name'><strong>"+esc(topic.name||(topic.topicId===0?"Общий чат":"Без названия"))+"</strong>"+
           "<span>topic_id: "+esc(topic.topicId)+" · "+esc(localTime(topic.updatedAt))+"</span>"+
           "<span class='binding-current "+(routes.length?"":"unbound")+"'>"+(routes.length?routes.map(esc).join("<br>"):"не привязан")+"</span>"+
-          (binding?"<a class='viewer-link' href='/?conversation="+encodeURIComponent(binding.conversationId)+"'>Открыть Project Viewer ↗</a> · <a class='viewer-link' href='/?conversation="+encodeURIComponent(binding.conversationId)+"&amp;tab=model'>Модель topic ↗</a>":"")+"<br>"+
-          "<button class='users-toggle' data-users='"+esc(usersKey)+"' data-chat='"+esc(chat.chatId)+"' data-topic='"+esc(topic.topicId)+"' aria-expanded='false'>Пользователи · "+esc(topic.userCount)+"</button></div>"+
-          "<div class='topic-controls'><select data-project='"+esc(key)+"' aria-label='Проект'>"+projectOptions(selectedProject)+"</select>"+
-          "<select data-workspace='"+esc(key)+"' aria-label='Репозиторий'>"+workspaceOptions(selectedProject,selectedWorkspace)+"</select>"+
-          "<select data-role='"+esc(key)+"' aria-label='Роль'><option value='primary' "+(selectedRole==="primary"?"selected":"")+">Рабочий</option><option value='external' "+(selectedRole==="external"?"selected":"")+">Внешний</option></select>"+
+          "<div class='topic-shortcuts'>"+
+          (binding?"<a class='topic-open-project' href='/?conversation="+encodeURIComponent(binding.conversationId)+"'><svg viewBox='0 0 24 24' aria-hidden='true'><rect x='3' y='3' width='7' height='7' rx='1.5'/><rect x='14' y='3' width='7' height='7' rx='1.5'/><rect x='3' y='14' width='7' height='7' rx='1.5'/><rect x='14' y='14' width='7' height='7' rx='1.5'/></svg><span>Открыть проект</span><svg viewBox='0 0 24 24' aria-hidden='true'><path d='M5 12h14m-6-6 6 6-6 6'/></svg></a>":"")+
+          "<div class='topic-secondary-actions'>"+
+          (binding?"<a class='topic-open-model' href='/?conversation="+encodeURIComponent(binding.conversationId)+"&amp;tab=model'><svg viewBox='0 0 24 24' aria-hidden='true'><path d='M4 7h4m6 0h6M4 17h10'/><circle cx='11' cy='7' r='3'/><circle cx='17' cy='17' r='3'/></svg>Модель</a>":"")+
+          "<button class='users-toggle' data-users='"+esc(usersKey)+"' data-chat='"+esc(chat.chatId)+"' data-topic='"+esc(topic.topicId)+"' aria-expanded='false'>Пользователи · "+esc(topic.userCount)+"</button></div></div></div>"+
+          "<div class='topic-controls'><div class='topic-binding-heading'>Настройки привязки</div><label><span>Проект</span><select data-project='"+esc(key)+"' aria-label='Проект'>"+projectOptions(selectedProject)+"</select></label>"+
+          "<label><span>Репозиторий</span><select data-workspace='"+esc(key)+"' aria-label='Репозиторий'>"+workspaceOptions(selectedProject,selectedWorkspace)+"</select></label>"+
+          "<label><span>Роль</span><select data-role='"+esc(key)+"' aria-label='Роль'><option value='primary' "+(selectedRole==="primary"?"selected":"")+">Рабочий</option><option value='external' "+(selectedRole==="external"?"selected":"")+">Внешний</option></select></label>"+
           "<div class='topic-actions'><button class='bind-button' data-bind='"+esc(key)+"' data-chat='"+esc(chat.chatId)+"' data-topic='"+esc(topic.topicId)+"'>Привязать</button>"+
           "<button class='unbind-button hidden' data-unbind='"+esc(key)+"' data-chat='"+esc(chat.chatId)+"' data-topic='"+esc(topic.topicId)+"'>Отвязать</button></div></div>"+
           userPanel(usersKey)+"</div>";
