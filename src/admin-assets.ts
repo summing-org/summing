@@ -210,6 +210,7 @@ export const ADMIN_HTML = `<!doctype html>
           <div class="deployment-failure-heading"><strong id="deploymentFailureTitle">Ошибка deployment</strong><span id="deploymentFailureCode"></span></div>
           <p id="deploymentFailureSummary"></p>
           <ul id="deploymentFailedTests" class="deployment-failed-tests hidden"></ul>
+          <button id="copyDeploymentLog" type="button" class="copy-log">Скопировать лог</button>
           <details id="deploymentLogDetails" class="deployment-log hidden"><summary>Последние строки журнала</summary><pre id="deploymentLog"></pre></details>
         </section>
         <button id="requestDeployment" class="primary" disabled>Обновиться сейчас</button>
@@ -267,6 +268,7 @@ export const ADMIN_CSS = `
 .portal-delivery-meta{margin:10px 0 0;color:var(--muted);font:10px/1.5 var(--mono)}.portal-delivery-text{margin:9px 0 0;font-size:11px;line-height:1.45;white-space:pre-wrap}.portal-delivery-actions{display:flex;gap:7px;margin-top:11px}.portal-delivery-actions button{border:1px solid var(--border);border-radius:6px;background:transparent;color:var(--text);padding:7px 9px;font-size:10px;cursor:pointer}.portal-delivery-actions button.retry{border-color:var(--accent);color:var(--accent-light)}
 .sync-state.uncertain,.sync-state.dead-letter{border-color:var(--danger);color:var(--danger)}.sync-state.pending,.sync-state.sending,.sync-state.failed{border-color:var(--accent);color:var(--accent-light)}
 @media(max-width:520px){.portal-delivery-actions{display:grid;grid-template-columns:1fr 1fr}.portal-delivery-actions button{width:100%}}
+.copy-log,.deployment-copy-manual button{min-height:44px;margin-top:10px;padding:9px 12px;border:1px solid var(--border-strong);border-radius:7px;background:var(--surface);color:var(--text);font:12px/1.4 var(--mono);cursor:pointer}.copy-log:disabled{opacity:.5;cursor:wait}.copy-log:focus-visible,.deployment-copy-manual button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.deployment-log pre,.deployment-attempt-details pre,.deployment-copy-manual textarea{-webkit-user-select:text;user-select:text;-webkit-touch-callout:default}.deployment-copy-manual{margin-top:10px}.deployment-copy-manual p{color:var(--muted);font-size:12px;line-height:1.5}.deployment-copy-manual textarea{display:block;width:100%;min-height:200px;padding:10px;margin-top:8px;border:1px solid var(--border-strong);border-radius:6px;background:var(--bg);color:var(--text);font:16px/1.45 var(--mono);resize:vertical}.deployment-copy-buffer{position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;font-size:16px}
 .project-metrics{grid-template-columns:82px}.binding-metrics{grid-template-columns:repeat(3,82px)}
 `;
 
@@ -389,9 +391,110 @@ export const ADMIN_JS = `
   const deploymentActive=new Set(["requested","checking","building","waiting","deploying","rolling_back"]);
   const shortSha=value=>value?value.slice(0,12):"—";
   const deploymentPhase=value=>deploymentPhaseLabels[value]||value||"—";
-  function renderDeploymentFailure(failure){const panel=$("deploymentFailure"),tests=failure&&failure.tests;panel.classList.toggle("hidden",!failure);if(!failure)return;$("deploymentFailureTitle").textContent=failure.kind==="tests"?"Тесты не пройдены":"Ошибка deployment · "+deploymentPhase(failure.phase);$("deploymentFailureCode").textContent=failure.exitCode===null||failure.exitCode===undefined?"":"exit "+failure.exitCode;const counts=tests&&tests.failed!==null?(tests.failed+" упало"+(tests.total!==null?" из "+tests.total:"")+(tests.passed!==null?" · "+tests.passed+" прошло":"")):"";$("deploymentFailureSummary").textContent=counts||"Этап: "+deploymentPhase(failure.phase);const list=$("deploymentFailedTests");list.replaceChildren(...((tests&&tests.failedTests)||[]).map(name=>{const item=document.createElement("li");item.textContent=name;return item}));list.classList.toggle("hidden",!list.children.length);const details=$("deploymentLogDetails");$("deploymentLog").textContent=failure.logTail||"";details.classList.toggle("hidden",!failure.logTail)}
-  function renderDeploymentHistory(history){const container=$("deploymentHistory"),attempts=history||[];container.replaceChildren();if(!attempts.length){const empty=document.createElement("div");empty.className="empty";empty.textContent="История пока пуста.";container.append(empty);return}for(const attempt of attempts){const card=document.createElement("article");card.className="deployment-attempt";const head=document.createElement("div");head.className="deployment-attempt-head";const sha=document.createElement("strong");sha.textContent=shortSha(attempt.remoteSha||attempt.currentSha);const status=document.createElement("span");status.className="deployment-attempt-status "+attempt.status;status.textContent=deploymentLabels[attempt.status]||attempt.status;head.append(sha,status);const meta=document.createElement("p");meta.className="deployment-attempt-meta";meta.textContent=deploymentTime(attempt.finishedAt||attempt.startedAt)+" · "+deploymentPhase(attempt.phase);const message=document.createElement("p");message.className="deployment-attempt-message";message.textContent=attempt.message;card.append(head,meta,message);const failure=attempt.failure,tests=failure&&failure.tests;if(tests&&tests.failed!==null){const summary=document.createElement("p");summary.className="deployment-attempt-tests";summary.textContent="Тесты: "+tests.failed+" упало"+(tests.total!==null?" из "+tests.total:"");card.append(summary)}const names=tests&&tests.failedTests||[];if(failure&&(names.length||failure.logTail)){const details=document.createElement("details");details.className="deployment-attempt-details";const detailsTitle=document.createElement("summary");detailsTitle.textContent="Диагностика";details.append(detailsTitle);if(names.length){const list=document.createElement("ul");for(const name of names){const item=document.createElement("li");item.textContent=name;list.append(item)}details.append(list)}if(failure.logTail){const log=document.createElement("pre");log.textContent=failure.logTail;details.append(log)}card.append(details)}container.append(card)}}
-  async function loadDeployment(){clearTimeout(state.deploymentTimer);try{const result=await api("/api/viewer/admin/deployment");$("deploymentBadge").textContent=deploymentLabels[result.status]||result.status;$("deploymentBadge").className="deployment-badge "+result.status;$("deploymentCurrent").textContent=shortSha(result.currentSha);$("deploymentCurrent").title=result.currentSha||"";$("deploymentRemote").textContent=shortSha(result.remoteSha);$("deploymentRemote").title=result.remoteSha||"";$("deploymentPhase").textContent=deploymentPhase(result.phase);$("deploymentChecked").textContent=deploymentTime(result.finishedAt||result.startedAt);$("deploymentMessage").textContent=result.message;renderDeploymentFailure(result.failure);renderDeploymentHistory(result.history);const deploymentBusy=deploymentActive.has(result.status);$("requestDeployment").disabled=!result.available||deploymentBusy;$("refreshDeployment").disabled=!result.available||deploymentBusy;if(deploymentBusy&&state.section==="system")state.deploymentTimer=setTimeout(loadDeployment,3000)}catch(error){$("deploymentBadge").textContent="недоступно";$("deploymentBadge").className="deployment-badge failed";$("deploymentMessage").textContent=error.message;$("requestDeployment").disabled=true;$("refreshDeployment").disabled=true}}
+  function deploymentDiagnostic(attempt){
+    const failure=attempt.failure;
+    if(!failure)return "";
+    const lines=["SUMMING · ошибка deployment","Commit: "+(attempt.remoteSha||attempt.currentSha||"—"),"Этап: "+deploymentPhase(failure.phase||attempt.phase)];
+    if(attempt.finishedAt||attempt.startedAt)lines.push("Время: "+(attempt.finishedAt||attempt.startedAt));
+    if(failure.exitCode!==null&&failure.exitCode!==undefined)lines.push("Exit: "+failure.exitCode);
+    if(attempt.message)lines.push(attempt.message);
+    if(failure.tests){
+      const tests=failure.tests;
+      if(tests.failed!==null&&tests.failed!==undefined)lines.push("Тесты: "+tests.failed+" упало"+(tests.total!==null&&tests.total!==undefined?" из "+tests.total:""));
+      if(tests.failedTests&&tests.failedTests.length)lines.push("Упали:",...tests.failedTests);
+    }
+    if(failure.logTail)lines.push("","Последние строки журнала:",failure.logTail);
+    return lines.join("\\n");
+  }
+  function clearManualDiagnostic(button){
+    const next=button.nextElementSibling;
+    if(next&&next.classList.contains("deployment-copy-manual"))next.remove();
+  }
+  function selectDiagnosticText(field){field.focus({preventScroll:true});field.select();field.setSelectionRange(0,field.value.length)}
+  function legacyCopyDiagnostic(text){
+    const field=document.createElement("textarea"),focused=document.activeElement;
+    field.value=text;field.readOnly=true;field.className="deployment-copy-buffer";
+    field.setAttribute("aria-label","Копируемый лог");
+    document.body.append(field);
+    try{selectDiagnosticText(field);return document.execCommand("copy")===true}
+    catch{return false}
+    finally{field.remove();if(focused&&typeof focused.focus==="function")focused.focus({preventScroll:true})}
+  }
+  function showManualDiagnostic(text,button){
+    clearManualDiagnostic(button);
+    const panel=document.createElement("div"),hint=document.createElement("p"),field=document.createElement("textarea"),select=document.createElement("button");
+    panel.className="deployment-copy-manual";
+    hint.textContent="Автокопирование недоступно. Выделите текст ниже, затем удерживайте его и выберите «Скопировать».";
+    field.value=text;field.readOnly=true;field.spellcheck=false;field.rows=10;
+    field.setAttribute("aria-label","Лог ошибки для ручного копирования");
+    select.type="button";select.textContent="Выделить всё";
+    select.addEventListener("click",()=>selectDiagnosticText(field));
+    panel.append(hint,select,field);button.after(panel);selectDiagnosticText(field);
+  }
+  let diagnosticCopyRequest=0;
+  async function copyDiagnostic(text,button){
+    if(!text){toast("Нет лога для копирования");return}
+    if(button.disabled)return;
+    const request=++diagnosticCopyRequest;
+    button.disabled=true;
+    clearManualDiagnostic(button);
+    try{
+      // Invoke writeText directly from the click, without awaiting network work.
+      if(navigator.clipboard&&typeof navigator.clipboard.writeText==="function"){
+        try{await navigator.clipboard.writeText(text);if(request===diagnosticCopyRequest)toast("Лог скопирован");return}catch{}
+      }
+      // A superseded permission request must not overwrite a newer copy.
+      if(request!==diagnosticCopyRequest)return;
+      if(legacyCopyDiagnostic(text)){toast("Лог скопирован");return}
+      showManualDiagnostic(text,button);
+      toast("Лог доступен для ручного копирования");
+    }finally{button.disabled=false}
+  }
+  function renderDeploymentFailure(failure,attempt={}){
+    const panel=$("deploymentFailure"),tests=failure&&failure.tests,copy=$("copyDeploymentLog");
+    clearManualDiagnostic(copy);copy.onclick=null;copy.disabled=!failure;
+    panel.classList.toggle("hidden",!failure);if(!failure)return;
+    const diagnostic=deploymentDiagnostic({...attempt,failure});
+    copy.onclick=()=>copyDiagnostic(diagnostic,copy);
+    $("deploymentFailureTitle").textContent=failure.kind==="tests"?"Тесты не пройдены":"Ошибка deployment · "+deploymentPhase(failure.phase);
+    $("deploymentFailureCode").textContent=failure.exitCode===null||failure.exitCode===undefined?"":"exit "+failure.exitCode;
+    const counts=tests&&tests.failed!==null?(tests.failed+" упало"+(tests.total!==null?" из "+tests.total:"")+(tests.passed!==null?" · "+tests.passed+" прошло":"")):"";
+    $("deploymentFailureSummary").textContent=counts||"Этап: "+deploymentPhase(failure.phase);
+    const list=$("deploymentFailedTests");
+    list.replaceChildren(...((tests&&tests.failedTests)||[]).map(name=>{const item=document.createElement("li");item.textContent=name;return item}));
+    list.classList.toggle("hidden",!list.children.length);
+    const details=$("deploymentLogDetails");$("deploymentLog").textContent=failure.logTail||"";details.classList.toggle("hidden",!failure.logTail);
+  }
+  function renderDeploymentHistory(history){
+    const container=$("deploymentHistory"),attempts=history||[];container.replaceChildren();
+    if(!attempts.length){const empty=document.createElement("div");empty.className="empty";empty.textContent="История пока пуста.";container.append(empty);return}
+    for(const attempt of attempts){
+      const card=document.createElement("article");card.className="deployment-attempt";
+      const head=document.createElement("div");head.className="deployment-attempt-head";
+      const sha=document.createElement("strong");sha.textContent=shortSha(attempt.remoteSha||attempt.currentSha);
+      const status=document.createElement("span");status.className="deployment-attempt-status "+attempt.status;status.textContent=deploymentLabels[attempt.status]||attempt.status;
+      head.append(sha,status);
+      const meta=document.createElement("p");meta.className="deployment-attempt-meta";meta.textContent=deploymentTime(attempt.finishedAt||attempt.startedAt)+" · "+deploymentPhase(attempt.phase);
+      const message=document.createElement("p");message.className="deployment-attempt-message";message.textContent=attempt.message;card.append(head,meta,message);
+      const failure=attempt.failure,tests=failure&&failure.tests;
+      if(tests&&tests.failed!==null){const summary=document.createElement("p");summary.className="deployment-attempt-tests";summary.textContent="Тесты: "+tests.failed+" упало"+(tests.total!==null?" из "+tests.total:"");card.append(summary)}
+      const names=tests&&tests.failedTests||[];
+      if(failure&&(names.length||failure.logTail)){
+        const details=document.createElement("details");details.className="deployment-attempt-details";
+        const detailsTitle=document.createElement("summary");detailsTitle.textContent="Диагностика";details.append(detailsTitle);
+        if(names.length){const list=document.createElement("ul");for(const name of names){const item=document.createElement("li");item.textContent=name;list.append(item)}details.append(list)}
+        if(failure.logTail){const log=document.createElement("pre");log.textContent=failure.logTail;details.append(log)}
+        card.append(details);
+      }
+      if(failure){
+        const copy=document.createElement("button"),diagnostic=deploymentDiagnostic(attempt);
+        copy.type="button";copy.className="copy-log";copy.textContent="Скопировать лог";
+        copy.addEventListener("click",()=>copyDiagnostic(diagnostic,copy));card.append(copy);
+      }
+      container.append(card);
+    }
+  }
+  async function loadDeployment(){clearTimeout(state.deploymentTimer);try{const result=await api("/api/viewer/admin/deployment");$("deploymentBadge").textContent=deploymentLabels[result.status]||result.status;$("deploymentBadge").className="deployment-badge "+result.status;$("deploymentCurrent").textContent=shortSha(result.currentSha);$("deploymentCurrent").title=result.currentSha||"";$("deploymentRemote").textContent=shortSha(result.remoteSha);$("deploymentRemote").title=result.remoteSha||"";$("deploymentPhase").textContent=deploymentPhase(result.phase);$("deploymentChecked").textContent=deploymentTime(result.finishedAt||result.startedAt);$("deploymentMessage").textContent=result.message;renderDeploymentFailure(result.failure,result);renderDeploymentHistory(result.history);const deploymentBusy=deploymentActive.has(result.status);$("requestDeployment").disabled=!result.available||deploymentBusy;$("refreshDeployment").disabled=!result.available||deploymentBusy;if(deploymentBusy&&state.section==="system")state.deploymentTimer=setTimeout(loadDeployment,3000)}catch(error){$("deploymentBadge").textContent="недоступно";$("deploymentBadge").className="deployment-badge failed";$("deploymentMessage").textContent=error.message;$("requestDeployment").disabled=true;$("refreshDeployment").disabled=true}}
   async function requestDeployment(){if(!confirm("Проверить origin/master и установить новую версию SUMMING, если она доступна?"))return;$("requestDeployment").disabled=true;try{await api("/api/viewer/admin/deployment",{method:"POST"});toast("Проверка обновлений запрошена");await loadDeployment()}catch(error){toast(error.message);await loadDeployment()}}
   async function refreshDeployment(){const button=$("refreshDeployment");button.disabled=true;try{await api("/api/viewer/admin/deployment/refresh",{method:"POST"});toast("Проверка origin запрошена");await loadDeployment()}catch(error){toast(error.message);await loadDeployment()}}
   function renderModelEgress(){const egress=state.modelEgress||{enabled:false,proactive_replies_enabled:false,model:"—",effort:"—",active_turns:0,scheduled_turns:0,account_weekly:null,usage:{observed_weekly_percent:0,estimated_credits:0,turns:0,measured_turns:0}};const usage=egress.usage||{},weekly=egress.account_weekly,percent=Math.max(0,Math.min(100,Number(usage.observed_weekly_percent)||0)),enabled=Boolean(egress.enabled),proactive=Boolean(egress.proactive_replies_enabled),active=Number(egress.active_turns)||0;$("modelEgressBadge").textContent=enabled?"включено":"выключено";$("modelEgressBadge").className="deployment-badge "+(enabled?"succeeded":"idle");$("modelEgressModel").textContent=(egress.model||"—")+" · "+(egress.effort||"—");$("modelEgressToggle").checked=enabled;$("modelEgressToggle").disabled=false;$("modelEgressToggleHint").textContent=enabled?(active?"Активных turns: "+active+"; запланировано: "+(egress.scheduled_turns||0):"Новые события будут собраны в batch после quiet period"):(active?"Новые turns не запускаются; текущий turn завершится":"Новые сообщения остаются локальными и не отправляются в модель");$("proactiveRepliesToggle").checked=proactive;$("proactiveRepliesToggle").disabled=false;$("proactiveRepliesToggleHint").textContent=proactive?(enabled?"Модель может отвечать только на ambient-сообщения, не занятые Project-turn":"Сохранено; ответы станут возможны после включения фонового осмысления"):(enabled?"Модельные реплики не отправляются; background memory продолжает обновляться":"Модельные реплики выключены; background memory возобновится вместе с model egress");$("modelEgressWeeklyPercent").textContent="≈"+percent.toFixed(percent%1?1:0)+"%";$("modelEgressProgress").style.width=percent+"%";$("modelEgressAccountWeekly").textContent=weekly?(Number(weekly.used_percent).toFixed(0)+"% использовано"):"нет данных";$("modelEgressCredits").textContent=(Number(usage.estimated_credits)||0).toFixed(3);$("modelEgressTurns").textContent=(usage.turns||0)+" · измерено "+(usage.measured_turns||0);$("modelEgressReset").textContent=localTime(usage.weekly_resets_at||(weekly&&weekly.resets_at))}
