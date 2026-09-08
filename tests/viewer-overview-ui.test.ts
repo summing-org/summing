@@ -17,6 +17,7 @@ function harness() {
   const document = { hidden: false, activeElement: null, addEventListener() {} };
   const state: any = { conversation: "main", tab: "environment" };
   const navigated: string[] = [];
+  let documentReloads = 0;
   let confirm = true, calls = 0, reloads = 0;
   let respond: () => Promise<any> = async () => data;
   const scheduled = new Map<number, number>();
@@ -24,14 +25,14 @@ function harness() {
   const esc = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]!));
   const api = async () => { calls++; return respond(); };
   const ui = new Function("state", "$", "document", "window", "location", "api", "esc", "safeUrl", "localTime", "confirm", "setTimeout", "clearTimeout", "loadJobs", "loadServices", OVERVIEW_JS + "; return {renderOverview,loadOverview,refreshLiveStatus,scheduleOverviewRefresh,switchTopic,hasUnsavedSettings};")(
-    state, $, document, { addEventListener() {} }, { href: "https://viewer.example/?conversation=main&tab=environment", assign: (url: string) => navigated.push(url) }, api, esc, (v: string) => v || "", (v: string) => v,
+    state, $, document, { addEventListener() {} }, { href: "https://viewer.example/?conversation=main&tab=environment", assign: (url: string) => navigated.push(url), reload: () => { documentReloads++; } }, api, esc, (v: string) => v || "", (v: string) => v,
     () => confirm, (_callback: unknown, delay: number) => { scheduled.set(++timerId, delay); return timerId; }, (id: number) => scheduled.delete(id), async () => { reloads++; }, async () => { reloads++; },
   );
-  return { $, state, document, ui, navigated, scheduled, setConfirm: (value: boolean) => { confirm = value; }, setResponse: (value: typeof respond) => { respond = value; }, calls: () => calls, reloads: () => reloads };
+  return { $, state, document, ui, navigated, scheduled, setConfirm: (value: boolean) => { confirm = value; }, setResponse: (value: typeof respond) => { respond = value; }, documentReloads: () => documentReloads, calls: () => calls, reloads: () => reloads };
 }
 
 const data = {
-  project: { name: "Example", workspace: "repo" }, updatedAt: "2026-09-08T10:00:00Z",
+  project: { id: "example", name: "Example", workspace: "repo" }, updatedAt: "2026-09-08T10:00:00Z",
   topics: [
     { id: "main", name: "Main", chat: "Team", primary: true, status: "running", pendingCount: 1, telegramUrl: "https://t.me/c/123/1", latestRun: { id: 7, status: "running", request: "<script>request</script>" } },
     { id: "parallel", name: "Parallel", chat: "Team", primary: false, status: "idle", pendingCount: 0, latestRun: { id: 6, status: "failed", error: "failed" } },
@@ -113,4 +114,14 @@ test("environment editor waits for its revision and does not discard a draft on 
   await load();
   assert.equal(calls, 1);
   assert.equal(h.$("environmentText").value, "UNSAVED=1");
+});
+
+
+test("a rebound topic reloads the document before displaying another project with cached panels", () => {
+  const h = harness(); h.ui.renderOverview(data);
+  h.ui.renderOverview({ ...data, project: { id: "other-project", name: "Other", workspace: "repo" } });
+  assert.equal(h.documentReloads(), 1);
+  assert.equal(h.state.overview.project.id, "example", "old content must not be relabelled as the new project");
+  h.ui.renderOverview({ ...data, project: { ...data.project, workspace: "other-workspace" } });
+  assert.equal(h.documentReloads(), 2);
 });

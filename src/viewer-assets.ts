@@ -1,4 +1,5 @@
-import { OVERVIEW_HTML, OVERVIEW_PANEL, OVERVIEW_CSS, OVERVIEW_JS } from "./viewer-overview-assets.js";
+import { NAVIGATION_HTML, NAVIGATION_CSS, NAVIGATION_JS } from "./viewer-navigation-assets.js";
+import { OVERVIEW_HTML, OVERVIEW_PANEL, OVERVIEW_RESULTS_PANEL, OVERVIEW_CSS, OVERVIEW_JS } from "./viewer-overview-assets.js";
 
 export const VIEWER_LOGO_SVG = `<svg viewBox="0 0 315 315" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M157.5 0C244.485 0 315 70.5152 315 157.5C315 244.485 244.485 315 157.5 315C70.5152 315 0 244.485 0 157.5C0 70.5152 70.5152 0 157.5 0ZM163.305 36C150.235 36 138.094 38.1576 126.979 42.5918V42.5908C115.921 46.8915 106.289 53.084 98.1865 61.1865C90.1856 69.1875 84.0089 78.8123 79.6084 89.9355C75.1658 101.053 73 113.152 73 126.137C73 140.777 75.4947 153.635 80.917 164.351C86.1623 174.716 93.348 183.316 102.461 190.024L102.481 190.04L102.503 190.056C111.498 196.587 121.812 201.502 133.35 204.867L133.36 204.871L133.371 204.874C144.82 208.179 157.022 210.281 169.952 211.213C175.98 211.651 181.35 212.196 186.075 212.841C190.541 213.45 193.889 214.317 196.297 215.305C198.658 216.337 200.002 217.474 200.781 218.497L200.814 218.54C201.326 219.202 202 220.602 202 223.559C202 226.789 200.853 230.526 197.761 234.892C195.281 238.393 190.164 242.19 180.988 245.631L172.151 248.944L176.867 257.119L186.945 274.588L190.261 280.333L196.521 278.14C210.671 273.181 221.945 265.802 229.628 255.622L229.629 255.623C237.062 245.883 241.012 235.139 241.012 223.559C241.012 214.319 239.156 206 234.651 199.336H234.652C230.735 193.393 225.509 188.722 219.128 185.345L218.507 185.022C212.138 181.662 204.882 179.435 196.869 178.21H196.87C189.254 176.941 181.368 175.963 173.217 175.274L173.189 175.272L171.716 175.146C164.372 174.476 157.017 173.247 149.646 171.458C142.309 169.543 135.842 166.659 130.173 162.853C124.836 159.196 120.452 154.461 117.005 148.539C113.839 142.999 112.012 135.672 112.012 126.137C112.012 118.003 113.227 110.713 115.558 104.188C118.027 97.4785 121.426 91.786 125.715 87.0117C130.083 82.2721 135.374 78.4879 141.684 75.6699C147.925 72.9313 155.087 71.4844 163.305 71.4844C173.879 71.4844 182.968 73.5621 190.766 77.5088C198.716 81.5333 204.498 86.7123 208.445 92.9551L212.889 99.9814L219.739 95.2725L235.864 84.1865L242.249 79.7969L238.066 73.2754C230.667 61.738 220.532 52.6474 207.863 46H207.864C195.06 39.2215 180.113 36 163.305 36Z" fill="#FF3366"/></svg>`;
 
@@ -24,20 +25,11 @@ export const VIEWER_HTML = `<!doctype html>
       </div>
       <button id="refreshButton" class="icon-button" aria-label="Обновить">↻</button>
     </header>
-    <nav class="tabs" aria-label="Разделы">
-      <button data-tab="overview" class="active">Обзор</button>
-      <button data-tab="files">Файлы</button>
-      <button data-tab="changes">Изменения <span id="changeBadge" class="badge hidden">0</span></button>
-      <button data-tab="repository">Репозиторий</button>
-      <button data-tab="history">История</button>
-      <button data-tab="model">Модель</button>
-      <button data-tab="runs">Правки агента</button>
-      <button data-tab="launch">Раннер</button>
-      <button id="environmentTab" data-tab="environment" class="hidden">Энвы</button>
-    </nav>
     ${OVERVIEW_HTML}
+    ${NAVIGATION_HTML}
     <main>
       ${OVERVIEW_PANEL}
+      ${OVERVIEW_RESULTS_PANEL}
       <section id="modelPanel" class="panel repository-panel">
         <div class="section-heading"><div><span class="eyebrow">ЭТОТ TOPIC</span><h2>Модель агента</h2><p id="modelScope">Загрузка настройки…</p></div><button id="reloadModel" class="secondary">Обновить</button></div>
         <article class="repository-card">
@@ -196,6 +188,7 @@ export const VIEWER_CSS = `
 @media(max-width:760px){.repository-connect>div{flex-direction:column}.repository-connect>div>button{width:100%}.repository-access-details{grid-template-columns:1fr}.repository-audit-item{grid-template-columns:1fr}.repository-audit-item>strong:last-child{justify-self:start}}
 @media(max-width:420px){.actions-grid{grid-template-columns:1fr}.actions-grid button{min-height:98px}.artifact-file{grid-template-columns:1fr auto}.artifact-file [data-download]{grid-column:2}.artifact-file button[data-view]{grid-column:2}.post-preview dl{grid-template-columns:1fr}.hero-heading{padding-top:22px}}
 ${OVERVIEW_CSS}
+${NAVIGATION_CSS}
 `;
 
 export const VIEWER_JS = `
@@ -220,8 +213,7 @@ export const VIEWER_JS = `
   const toast=(message)=>{const el=$("toast");el.textContent=message;el.classList.add("show");clearTimeout(toast.timer);toast.timer=setTimeout(()=>el.classList.remove("show"),2600)};
   const localTime=(value)=>value?new Date(value).toLocaleString("ru-RU"):"—";
   const renderDiff=(element,value)=>{if(!value){element.innerHTML="<code><span class='empty'>Изменений нет.</span></code>";return}element.innerHTML="<code>"+value.split("\\n").map(line=>{let kind="";if(line.startsWith("+++ ")||line.startsWith("--- ")||line.startsWith("diff ")||line.startsWith("index "))kind="meta";else if(line.startsWith("+"))kind="add";else if(line.startsWith("-"))kind="del";else if(line.startsWith("@@"))kind="hunk";return "<span class='diff-line "+kind+"'>"+esc(line)+"</span>"}).join("")+"</code>"};
-  const setTab=(name)=>{state.tab=name;document.querySelectorAll(".tabs button").forEach(button=>button.classList.toggle("active",button.dataset.tab===name));const activeTab=document.querySelector('.tabs button[data-tab="'+name+'"]');if(activeTab){const tabs=activeTab.parentElement;tabs.scrollLeft=Math.max(0,activeTab.offsetLeft-(tabs.clientWidth-activeTab.offsetWidth)/2)}document.querySelectorAll(".panel").forEach(panel=>panel.classList.remove("active"));$(name+"Panel").classList.add("active");if(name==="overview")loadOverview().catch(()=>{});if(name==="files")loadTree().catch(error=>toast(error.message));if(name==="changes")loadWorkingDiff();if(name==="repository")loadRepository();if(name==="history")loadCommits();if(name==="runs")loadRuns();if(name==="launch"){loadServices();loadJobs()}if(name==="environment"&&state.environmentSaved===null)loadEnvironment();if(name==="model"&&!state.modelSettings)loadModel()};
-  document.querySelectorAll(".tabs button").forEach(button=>button.addEventListener("click",()=>setTab(button.dataset.tab)));
+  ${NAVIGATION_JS}
   const sessionUrl=()=>"/api/viewer/session?conversation="+encodeURIComponent(state.conversation);
   async function loadSession(){
     if(!state.conversation)throw new Error("Conversation не указан. Откройте viewer из команды /files.");
@@ -236,7 +228,7 @@ export const VIEWER_JS = `
       $("environmentTab").classList.toggle("hidden",!state.session.environmentAccess);
     }catch(error){$("repoMeta").textContent="Репозиторий недоступен";toast(error.message)}
     document.title=state.overview.project.name+" · SUMMING";
-    if(!state.initialTabApplied){state.initialTabApplied=true;const requested=query.get("tab");if(["overview","files","changes","repository","history","runs","launch","model"].includes(requested)||(requested==="environment"&&state.session&&state.session.environmentAccess))setTab(requested)}
+    if(!state.initialTabApplied){state.initialTabApplied=true;initializeNavigation()}
     scheduleOverviewRefresh();
   }
   ${OVERVIEW_JS}
@@ -350,7 +342,7 @@ export const VIEWER_JS = `
   }
   async function saveEnvironment(){const button=$("saveEnvironment"),status=$("environmentState");button.disabled=true;status.textContent="Сохранение…";try{const result=await api("/api/viewer/environment?conversation="+encodeURIComponent(state.conversation),{method:"PUT",headers:{"content-type":"application/json"},body:JSON.stringify({text:$("environmentText").value,expectedRevision:state.environmentRevision})});state.environmentRevision=result.environment.revision;$("environmentText").value=result.environment.text;state.environmentSaved=result.environment.text;status.textContent="Версия "+result.environment.revision+" · сохранено "+new Date(result.environment.updatedAt).toLocaleString();toast("Энвы сохранены")}catch(error){status.textContent=error.message;toast(error.message)}finally{button.disabled=false}}
   $("repositoryNewUrl").addEventListener("input",()=>{state.originPreview=null;$("changeOrigin").disabled=true;$("originPreview").textContent="URL изменён — запустите проверку снова."});
-  $("fileSearch").addEventListener("input",renderTree);$("refreshButton").addEventListener("click",async()=>{try{await loadSession();if(state.tab==="files")await loadTree();if(state.tab==="changes")await loadWorkingDiff();if(state.tab==="repository")await loadRepository();if(state.tab==="launch")await Promise.all([loadServices(),loadJobs()]);if(state.tab==="environment")await loadEnvironment();if(state.tab==="model")await loadModel();toast("Обновлено")}catch(error){toast(error.message)}});$("reloadDiff").addEventListener("click",loadWorkingDiff);$("reloadRepository").addEventListener("click",loadRepository);$("connectRepository").addEventListener("click",()=>connectRepository(true));$("createRepositoryKey").addEventListener("click",()=>connectRepository(false));$("copyRepositoryKey").addEventListener("click",()=>copyFrom("repositoryPublicKey","Публичный ключ"));$("verifyRepository").addEventListener("click",verifyRepository);$("previewOrigin").addEventListener("click",previewOrigin);$("changeOrigin").addEventListener("click",changeOrigin);$("rollbackOrigin").addEventListener("click",rollbackOrigin);$("migrateLegacy").addEventListener("click",migrateLegacy);$("prepareRotation").addEventListener("click",()=>rotationAction("prepare-rotation"));$("copyRotationKey").addEventListener("click",()=>copyFrom("rotationPublicKey","Новый публичный ключ"));$("verifyRotation").addEventListener("click",()=>rotationAction("verify-rotation"));$("activateRotation").addEventListener("click",()=>rotationAction("activate-rotation"));$("cancelRotation").addEventListener("click",()=>rotationAction("cancel-rotation"));$("pullRepository").addEventListener("click",()=>syncRepository("pull"));$("pushRepository").addEventListener("click",()=>syncRepository("push"));$("pushDefaultRepository").addEventListener("click",pushRepositoryDefault);$("reloadServices").addEventListener("click",loadServices);$("reloadJobs").addEventListener("click",loadJobs);$("cancelJob").addEventListener("click",cancelSelectedJob);$("reloadEnvironment").addEventListener("click",loadEnvironment);$("saveEnvironment").addEventListener("click",saveEnvironment);
+  $("fileSearch").addEventListener("input",renderTree);$("refreshButton").addEventListener("click",async()=>{const tab=state.tab;try{await loadSession();if(tab!=="overview")await refreshCurrentTab(tab);toast("Обновлено")}catch(error){toast(error.message)}});$("reloadDiff").addEventListener("click",loadWorkingDiff);$("reloadRepository").addEventListener("click",loadRepository);$("connectRepository").addEventListener("click",()=>connectRepository(true));$("createRepositoryKey").addEventListener("click",()=>connectRepository(false));$("copyRepositoryKey").addEventListener("click",()=>copyFrom("repositoryPublicKey","Публичный ключ"));$("verifyRepository").addEventListener("click",verifyRepository);$("previewOrigin").addEventListener("click",previewOrigin);$("changeOrigin").addEventListener("click",changeOrigin);$("rollbackOrigin").addEventListener("click",rollbackOrigin);$("migrateLegacy").addEventListener("click",migrateLegacy);$("prepareRotation").addEventListener("click",()=>rotationAction("prepare-rotation"));$("copyRotationKey").addEventListener("click",()=>copyFrom("rotationPublicKey","Новый публичный ключ"));$("verifyRotation").addEventListener("click",()=>rotationAction("verify-rotation"));$("activateRotation").addEventListener("click",()=>rotationAction("activate-rotation"));$("cancelRotation").addEventListener("click",()=>rotationAction("cancel-rotation"));$("pullRepository").addEventListener("click",()=>syncRepository("pull"));$("pushRepository").addEventListener("click",()=>syncRepository("push"));$("pushDefaultRepository").addEventListener("click",pushRepositoryDefault);$("reloadServices").addEventListener("click",loadServices);$("reloadJobs").addEventListener("click",loadJobs);$("cancelJob").addEventListener("click",cancelSelectedJob);$("reloadEnvironment").addEventListener("click",loadEnvironment);$("saveEnvironment").addEventListener("click",saveEnvironment);
   loadSession().catch(error=>{document.body.innerHTML="<main style='padding:32px;font-family:system-ui;color:#e7e7e9;background:#0a0a0c;min-height:100vh'><img src='/logo.svg' alt='' style='width:42px;height:42px'><h1>Project Viewer</h1><p style='color:#ff759b'>"+esc(error.message)+"</p><p>Откройте viewer из Telegram или передайте локальный token в URL fragment.</p><button id='retryViewer' style='padding:10px 14px;border:1px solid #494951;border-radius:6px;background:#18181c;color:#e7e7e9'>Повторить</button></main>";$("retryViewer").addEventListener("click",()=>location.reload())});
 })();
 `;
