@@ -1,3 +1,4 @@
+import { ADMIN_RETURN_STATE_JS } from "./admin-return-assets.js";
 import { ADMIN_NAVIGATION_HTML, ADMIN_NAVIGATION_CSS, ADMIN_NAVIGATION_JS } from "./admin-navigation-assets.js";
 
 export const ADMIN_HTML = `<!doctype html>
@@ -337,9 +338,9 @@ export const ADMIN_JS = `
           "<span>topic_id: "+esc(topic.topicId)+" · "+esc(localTime(topic.updatedAt))+"</span>"+
           "<span class='binding-current "+(routes.length?"":"unbound")+"'>"+(routes.length?routes.map(esc).join("<br>"):"не привязан")+"</span>"+
           "<div class='topic-shortcuts'>"+
-          (binding?"<a class='topic-open-project' href='/?conversation="+encodeURIComponent(binding.conversationId)+"'><svg viewBox='0 0 24 24' aria-hidden='true'><rect x='3' y='3' width='7' height='7' rx='1.5'/><rect x='14' y='3' width='7' height='7' rx='1.5'/><rect x='3' y='14' width='7' height='7' rx='1.5'/><rect x='14' y='14' width='7' height='7' rx='1.5'/></svg><span>Открыть проект</span><svg viewBox='0 0 24 24' aria-hidden='true'><path d='M5 12h14m-6-6 6 6-6 6'/></svg></a>":"")+
+          (binding?"<a class='topic-open-project' href='/?conversation="+encodeURIComponent(binding.conversationId)+"&amp;from=admin'><svg viewBox='0 0 24 24' aria-hidden='true'><rect x='3' y='3' width='7' height='7' rx='1.5'/><rect x='14' y='3' width='7' height='7' rx='1.5'/><rect x='3' y='14' width='7' height='7' rx='1.5'/><rect x='14' y='14' width='7' height='7' rx='1.5'/></svg><span>Открыть проект</span><svg viewBox='0 0 24 24' aria-hidden='true'><path d='M5 12h14m-6-6 6 6-6 6'/></svg></a>":"")+
           "<div class='topic-secondary-actions'>"+
-          (binding?"<a class='topic-open-model' href='/?conversation="+encodeURIComponent(binding.conversationId)+"&amp;tab=model'><svg viewBox='0 0 24 24' aria-hidden='true'><path d='M4 7h4m6 0h6M4 17h10'/><circle cx='11' cy='7' r='3'/><circle cx='17' cy='17' r='3'/></svg>Модель</a>":"")+
+          (binding?"<a class='topic-open-model' href='/?conversation="+encodeURIComponent(binding.conversationId)+"&amp;from=admin&amp;tab=model'><svg viewBox='0 0 24 24' aria-hidden='true'><path d='M4 7h4m6 0h6M4 17h10'/><circle cx='11' cy='7' r='3'/><circle cx='17' cy='17' r='3'/></svg>Модель</a>":"")+
           "<button class='users-toggle' data-users='"+esc(usersKey)+"' data-chat='"+esc(chat.chatId)+"' data-topic='"+esc(topic.topicId)+"' aria-expanded='false'>Пользователи · "+esc(topic.userCount)+"</button></div></div></div>"+
           "<div class='topic-controls'><div class='topic-binding-heading'>Настройки привязки</div><label><span>Проект</span><select data-project='"+esc(key)+"' aria-label='Проект'>"+projectOptions(selectedProject)+"</select></label>"+
           "<label><span>Репозиторий</span><select data-workspace='"+esc(key)+"' aria-label='Репозиторий'>"+workspaceOptions(selectedProject,selectedWorkspace)+"</select></label>"+
@@ -548,6 +549,7 @@ export const ADMIN_JS = `
   async function knowledgeAction(button){const action=button.dataset.syncAction,chatId=Number(button.dataset.syncChat);if(action==="unbind"&&!confirm("Отвязать группу? MTProto-аккаунт останется активным для других групп."))return;await api("/api/viewer/admin/knowledge/sources",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action,chatId})});await loadKnowledge();toast(action==="pause"?"Синхронизация приостановлена":action==="resume"?"Синхронизация продолжена":"Группа отвязана")}
   async function revokeConnector(button){const connectorId=button.dataset.revokeConnector;if(!confirm("Полностью выйти из Telegram и удалить локальную MTProto-сессию?"))return;await api("/api/viewer/admin/mtproto/connectors/"+encodeURIComponent(connectorId),{method:"DELETE"});await loadKnowledge();toast("MTProto-коннектор отозван")}
 ${ADMIN_NAVIGATION_JS}
+${ADMIN_RETURN_STATE_JS}
   async function refreshAdminSection(){if(state.section==="system")await loadSystem();else if(state.section==="knowledge")await loadKnowledge();else if(state.section==="bindings"){await loadOverview();await loadPortalDeliveries()}else await loadOverview();toast("Обновлено")}
   function filterTopics(){const query=$("topicSearch").value.trim().toLowerCase();document.querySelectorAll("[data-topic-row]").forEach(row=>row.classList.toggle("hidden",Boolean(query&&!row.dataset.search.includes(query))));document.querySelectorAll("[data-chat-card]").forEach(card=>card.classList.toggle("hidden",Boolean(query&&![...card.querySelectorAll("[data-topic-row]")].some(row=>!row.classList.contains("hidden"))))) }
   $("refreshPortalDeliveries").addEventListener("click",()=>loadPortalDeliveries().catch(error=>toast(error.message)));$("portalDeliveries").addEventListener("click",event=>{const button=event.target.closest("[data-portal-delivery-action]");if(button)projectPortalDeliveryAction(button).catch(error=>{button.disabled=false;toast(error.message)})});

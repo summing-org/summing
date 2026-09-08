@@ -1,3 +1,4 @@
+import { ADMIN_BACK_HTML, ADMIN_BACK_CSS, VIEWER_ADMIN_RETURN_JS } from "./admin-return-assets.js";
 import { NAVIGATION_HTML, NAVIGATION_CSS, NAVIGATION_JS } from "./viewer-navigation-assets.js";
 import { OVERVIEW_HTML, OVERVIEW_PANEL, OVERVIEW_RESULTS_PANEL, OVERVIEW_CSS, OVERVIEW_JS } from "./viewer-overview-assets.js";
 
@@ -18,6 +19,7 @@ export const VIEWER_HTML = `<!doctype html>
 <body>
   <div id="app">
     <header class="topbar">
+      ${ADMIN_BACK_HTML}
       <div class="brand"><img class="brand-logo" src="/logo.svg" alt=""><span>SUMMING</span></div>
       <div class="repo-title">
         <strong id="projectName">Project Viewer</strong>
@@ -189,6 +191,7 @@ export const VIEWER_CSS = `
 @media(max-width:420px){.actions-grid{grid-template-columns:1fr}.actions-grid button{min-height:98px}.artifact-file{grid-template-columns:1fr auto}.artifact-file [data-download]{grid-column:2}.artifact-file button[data-view]{grid-column:2}.post-preview dl{grid-template-columns:1fr}.hero-heading{padding-top:22px}}
 ${OVERVIEW_CSS}
 ${NAVIGATION_CSS}
+${ADMIN_BACK_CSS}
 `;
 
 export const VIEWER_JS = `
@@ -232,6 +235,7 @@ export const VIEWER_JS = `
     scheduleOverviewRefresh();
   }
   ${OVERVIEW_JS}
+  ${VIEWER_ADMIN_RETURN_JS}
   async function loadTree(){const result=await api("/api/viewer/tree?conversation="+encodeURIComponent(state.conversation));state.tree=result.files;renderTree()}
   function modelEvidence(settings){
     if(!settings)return "Нет данных о модели";
@@ -343,6 +347,6 @@ export const VIEWER_JS = `
   async function saveEnvironment(){const button=$("saveEnvironment"),status=$("environmentState");button.disabled=true;status.textContent="Сохранение…";try{const result=await api("/api/viewer/environment?conversation="+encodeURIComponent(state.conversation),{method:"PUT",headers:{"content-type":"application/json"},body:JSON.stringify({text:$("environmentText").value,expectedRevision:state.environmentRevision})});state.environmentRevision=result.environment.revision;$("environmentText").value=result.environment.text;state.environmentSaved=result.environment.text;status.textContent="Версия "+result.environment.revision+" · сохранено "+new Date(result.environment.updatedAt).toLocaleString();toast("Энвы сохранены")}catch(error){status.textContent=error.message;toast(error.message)}finally{button.disabled=false}}
   $("repositoryNewUrl").addEventListener("input",()=>{state.originPreview=null;$("changeOrigin").disabled=true;$("originPreview").textContent="URL изменён — запустите проверку снова."});
   $("fileSearch").addEventListener("input",renderTree);$("refreshButton").addEventListener("click",async()=>{const tab=state.tab;try{await loadSession();if(tab!=="overview")await refreshCurrentTab(tab);toast("Обновлено")}catch(error){toast(error.message)}});$("reloadDiff").addEventListener("click",loadWorkingDiff);$("reloadRepository").addEventListener("click",loadRepository);$("connectRepository").addEventListener("click",()=>connectRepository(true));$("createRepositoryKey").addEventListener("click",()=>connectRepository(false));$("copyRepositoryKey").addEventListener("click",()=>copyFrom("repositoryPublicKey","Публичный ключ"));$("verifyRepository").addEventListener("click",verifyRepository);$("previewOrigin").addEventListener("click",previewOrigin);$("changeOrigin").addEventListener("click",changeOrigin);$("rollbackOrigin").addEventListener("click",rollbackOrigin);$("migrateLegacy").addEventListener("click",migrateLegacy);$("prepareRotation").addEventListener("click",()=>rotationAction("prepare-rotation"));$("copyRotationKey").addEventListener("click",()=>copyFrom("rotationPublicKey","Новый публичный ключ"));$("verifyRotation").addEventListener("click",()=>rotationAction("verify-rotation"));$("activateRotation").addEventListener("click",()=>rotationAction("activate-rotation"));$("cancelRotation").addEventListener("click",()=>rotationAction("cancel-rotation"));$("pullRepository").addEventListener("click",()=>syncRepository("pull"));$("pushRepository").addEventListener("click",()=>syncRepository("push"));$("pushDefaultRepository").addEventListener("click",pushRepositoryDefault);$("reloadServices").addEventListener("click",loadServices);$("reloadJobs").addEventListener("click",loadJobs);$("cancelJob").addEventListener("click",cancelSelectedJob);$("reloadEnvironment").addEventListener("click",loadEnvironment);$("saveEnvironment").addEventListener("click",saveEnvironment);
-  loadSession().catch(error=>{document.body.innerHTML="<main style='padding:32px;font-family:system-ui;color:#e7e7e9;background:#0a0a0c;min-height:100vh'><img src='/logo.svg' alt='' style='width:42px;height:42px'><h1>Project Viewer</h1><p style='color:#ff759b'>"+esc(error.message)+"</p><p>Откройте viewer из Telegram или передайте локальный token в URL fragment.</p><button id='retryViewer' style='padding:10px 14px;border:1px solid #494951;border-radius:6px;background:#18181c;color:#e7e7e9'>Повторить</button></main>";$("retryViewer").addEventListener("click",()=>location.reload())});
+  loadSession().catch(error=>{const adminBack=$("adminBack");document.body.innerHTML="<main style='padding:32px;font-family:system-ui;color:#e7e7e9;background:#0a0a0c;min-height:100vh'><img src='/logo.svg' alt='' style='width:42px;height:42px'><h1>Project Viewer</h1><p style='color:#ff759b'>"+esc(error.message)+"</p><p>Откройте viewer из Telegram или передайте локальный token в URL fragment.</p><button id='retryViewer' style='padding:10px 14px;border:1px solid #494951;border-radius:6px;background:#18181c;color:#e7e7e9'>Повторить</button></main>";$("retryViewer").addEventListener("click",()=>location.reload());if(adminBack&&viewerFromAdmin)document.querySelector("main").prepend(adminBack)});
 })();
 `;
