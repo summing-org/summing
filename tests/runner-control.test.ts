@@ -36,6 +36,7 @@ function context(turnId: string): RunnerControlContext {
 function schedule(overrides: Partial<RunnerSchedule> = {}): RunnerSchedule {
   return {
     id: "fef80899-e998-4c5a-8f58-cd775802a954",
+    version: 1,
     projectId: "demo",
     workspaceId: "repo",
     name: "Утренний запуск",
@@ -347,13 +348,10 @@ test("schedule changes require a later-turn confirmation and execute each occurr
     ["-C", repository, "rev-parse", "HEAD"],
     { encoding: "utf8" },
   ).trim();
-  execFileSync("git", [
-    "-C",
-    repository,
-    "update-ref",
-    "refs/remotes/origin/master",
-    publishedRevision,
-  ]);
+  const origin = join(repository, ".git", "test-origin.git");
+  execFileSync("git", ["init", "--bare", "--initial-branch=master", origin]);
+  execFileSync("git", ["-C", repository, "remote", "add", "origin", origin]);
+  execFileSync("git", ["-C", repository, "push", "origin", "HEAD:master"]);
   execFileSync("git", ["-C", repository, "switch", "main"]);
 
   let now = Date.parse("2026-08-17T05:50:00.000Z");

@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { withRepositoryOperation } from "./repository-operation.js";
 import { ConfigError, type RuntimeConfig } from "./config.js";
 import { ADMIN_CSS, ADMIN_HTML, ADMIN_JS } from "./admin-assets.js";
 import {
@@ -188,7 +189,6 @@ async function requestBody(request: IncomingMessage, maximumBytes = 16_384): Pro
 
 export class ProjectViewerServer {
   private server: Server | null = null;
-  private readonly repositoryOperations = new Set<string>();
   private readonly projectOperations = new Set<string>();
   readonly auth: ViewerAuthenticator;
   readonly artifacts: RunArtifactStore;
@@ -1440,15 +1440,8 @@ export class ProjectViewerServer {
     repositoryKey: string,
     operation: () => Promise<T>,
   ): Promise<T> {
-    if (this.repositoryOperations.has(repositoryKey)) {
-      throw new ViewerHttpError(409, "другая операция с репозиторием ещё выполняется");
-    }
-    this.repositoryOperations.add(repositoryKey);
-    try {
-      return await operation();
-    } finally {
-      this.repositoryOperations.delete(repositoryKey);
-    }
+    return withRepositoryOperation(repositoryKey, operation,
+      () => new ViewerHttpError(409, "другая операция с репозиторием ещё выполняется"));
   }
 
   private async repositoryAction(

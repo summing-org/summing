@@ -155,6 +155,8 @@ export class ProjectRunnerClient {
           timeout: 120_000,
         },
         (response) => {
+          response.once("aborted", () => reject(new ProjectRunnerClientError("runner response was aborted")));
+          response.once("error", (error) => reject(new ProjectRunnerClientError(error.message)));
           const chunks: Buffer[] = [];
           let bytes = 0;
           let tooLarge = false;
@@ -209,6 +211,8 @@ export class ProjectRunnerClient {
           timeout: 120_000,
         },
         (response) => {
+          response.once("aborted", () => reject(new ProjectRunnerClientError("runner artifact response was aborted")));
+          response.once("error", (error) => reject(new ProjectRunnerClientError(error.message)));
           const chunks: Buffer[] = [];
           let bytes = 0;
           let tooLarge = false;
@@ -312,6 +316,23 @@ export class ProjectRunnerClient {
       `/jobs?${query.toString()}`,
     );
     return result.jobs;
+  }
+
+  async findJob(
+    projectId: string,
+    workspaceId: string,
+    selector: { jobId: string } | { idempotencyKey: string },
+  ): Promise<RunnerJob | null> {
+    const query = new URLSearchParams({ project: projectId, workspace: workspaceId });
+    if ("jobId" in selector) query.set("job", selector.jobId);
+    else query.set("idempotency_key", selector.idempotencyKey);
+    try {
+      const result = await this.call<{ job: RunnerJob | null }>("GET", `/jobs/lookup?${query}`);
+      return result.job;
+    } catch (error) {
+      if (error instanceof ProjectRunnerClientError && error.status === 404) return null;
+      throw error;
+    }
   }
 
   async replay(

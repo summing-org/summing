@@ -6,6 +6,8 @@ import { GitInspector } from "./git-inspector.js";
 import { ProjectCatalog } from "./project-catalog.js";
 import {
   ProjectRunnerClient,
+  ProjectRunnerClientError,
+  type RunnerSubmissionMetadata,
   type RunnerAction,
   type RunnerArtifact,
   type RunnerArtifactDeletion,
@@ -66,6 +68,7 @@ export type RunnerDeliveryCondition = "success" | "failure" | "always";
 
 export interface RunnerSchedule {
   id: string;
+  version: number;
   projectId: string;
   workspaceId: string;
   name: string;
@@ -90,6 +93,7 @@ export interface RunnerSchedule {
 
 export type RunnerScheduleExecutionStatus =
   | "claimed"
+  | "reconciling"
   | "queued"
   | "running"
   | "cancelling"
@@ -104,6 +108,8 @@ export interface RunnerScheduleExecution {
   projectId: string;
   workspaceId: string;
   occurrenceKey: string;
+  scheduleSnapshot: RunnerSchedule;
+  submission: ScheduledSubmission | null;
   scheduledFor: string;
   status: RunnerScheduleExecutionStatus;
   jobId: string | null;
@@ -113,7 +119,29 @@ export interface RunnerScheduleExecution {
   updatedAt: string;
 }
 
+interface ScheduledSubmission {
+  revision: string;
+  action: RunnerSchedulableAction;
+  archiveSha256: string;
+  metadata: RunnerSubmissionMetadata;
+}
+
+type DeliveryPayload =
+  | { kind: "scheduled-report"; job: RunnerJob; schedule: RunnerSchedule }
+  | { kind: "manual-report"; job: RunnerJob; conversationId: string; actorUserId: number }
+  | { kind: "lifecycle"; job: RunnerJob; notification: RunnerLifecycleNotification; createdBy: number }
+  | { kind: "notice"; projectId: string; workspaceId: string; message: string;
+      conversationId?: string };
+
+interface DeliveryIntent {
+  key: string;
+  payload: DeliveryPayload;
+  attempts: number;
+}
+
 interface SchedulePlanPayload {
+  // null means create. Plans made before versioning must be prepared again.
+  expectedVersion: number | null;
   operation: "upsert" | "delete";
   schedule?: RunnerSchedule;
   scheduleId?: string;
@@ -184,6 +212,8 @@ export interface RunnerInspection {
   recent: RunnerJob[];
   services: RunnerService[];
   schedules: RunnerScheduleView[];
+  deliveryFailures: ReturnType<RunnerControlStore["deliveryFailures"]>;
+  executions: RunnerScheduleExecution[];
   artifacts: Array<{ jobId: string; action: RunnerAction; count: number; createdAt: string }>;
   capabilities: RunnerAction[];
 }
@@ -299,21 +329,28 @@ function terminalNotificationKinds(job: RunnerJob): RunnerNotificationWhen[] {
     : ["failed", "finished"];
 }
 
+const scheduleFormatters = new Map<string, Intl.DateTimeFormat>();
+
 function scheduleParts(epochMilliseconds: number, timeZone: string): {
   date: string;
   time: string;
   weekday: number;
 } {
-  const formatter = new Intl.DateTimeFormat("en-CA", {
-    timeZone,
-    weekday: "short",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-  });
+  let formatter = scheduleFormatters.get(timeZone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat("en-CA", {
+      timeZone,
+      weekday: "short",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    });
+    if (scheduleFormatters.size >= 128) scheduleFormatters.delete(scheduleFormatters.keys().next().value!);
+    scheduleFormatters.set(timeZone, formatter);
+  }
   const parts = Object.fromEntries(
     formatter.formatToParts(epochMilliseconds).map((part) => [part.type, part.value]),
   );
@@ -396,6 +433,7 @@ export class RunnerControlStore {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS runner_schedules (
         id TEXT PRIMARY KEY,
+        version INTEGER NOT NULL DEFAULT 1,
         project_id TEXT NOT NULL,
         workspace_id TEXT NOT NULL,
         name TEXT NOT NULL,
@@ -424,13 +462,15 @@ export class RunnerControlStore {
         ON runner_schedules(project_id, workspace_id, enabled, name);
       CREATE TABLE IF NOT EXISTS runner_schedule_executions (
         id TEXT PRIMARY KEY,
-        schedule_id TEXT NOT NULL REFERENCES runner_schedules(id) ON DELETE CASCADE,
+        schedule_id TEXT NOT NULL,
         project_id TEXT NOT NULL,
         workspace_id TEXT NOT NULL,
         occurrence_key TEXT NOT NULL,
+        schedule_snapshot_json TEXT NOT NULL,
+        submission_json TEXT,
         scheduled_for TEXT NOT NULL,
         status TEXT NOT NULL CHECK(status IN
-          ('claimed', 'queued', 'running', 'cancelling', 'completed', 'cancelled', 'failed', 'skipped')),
+          ('claimed', 'reconciling', 'queued', 'running', 'cancelling', 'completed', 'cancelled', 'failed', 'skipped')),
         job_id TEXT,
         revision TEXT,
         reason TEXT,
@@ -442,6 +482,19 @@ export class RunnerControlStore {
         ON runner_schedule_executions(project_id, workspace_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS runner_schedule_executions_active
         ON runner_schedule_executions(status, updated_at);
+      CREATE TABLE IF NOT EXISTS runner_delivery_intents (
+        key TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at TEXT NOT NULL,
+        last_error TEXT,
+        accepted_at TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS runner_delivery_intents_due
+        ON runner_delivery_intents(accepted_at, next_attempt_at);
       CREATE TABLE IF NOT EXISTS runner_control_plans (
         token TEXT PRIMARY KEY,
         project_id TEXT NOT NULL,
@@ -575,6 +628,49 @@ export class RunnerControlStore {
         "ALTER TABLE runner_schedules ADD COLUMN origin_conversation_id TEXT NOT NULL DEFAULT ''",
       );
     }
+    if (!scheduleColumns.some((column) => column.name === "version")) {
+      this.db.exec("ALTER TABLE runner_schedules ADD COLUMN version INTEGER NOT NULL DEFAULT 1");
+    }
+    const executionColumns = this.db.prepare("PRAGMA table_info(runner_schedule_executions)").all() as Row[];
+    if (!executionColumns.some((column) => column.name === "schedule_snapshot_json")) {
+      this.transaction(() => {
+        this.db.exec(`
+          ALTER TABLE runner_schedule_executions RENAME TO runner_schedule_executions_legacy;
+          DROP INDEX runner_schedule_executions_scope;
+          DROP INDEX runner_schedule_executions_active;
+          CREATE TABLE runner_schedule_executions (
+            id TEXT PRIMARY KEY, schedule_id TEXT NOT NULL,
+            project_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+            occurrence_key TEXT NOT NULL, scheduled_for TEXT NOT NULL,
+            schedule_snapshot_json TEXT NOT NULL, submission_json TEXT,
+            status TEXT NOT NULL CHECK(status IN
+              ('claimed', 'reconciling', 'queued', 'running', 'cancelling', 'completed', 'cancelled', 'failed', 'skipped')),
+            job_id TEXT, revision TEXT, reason TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            UNIQUE(schedule_id, occurrence_key)
+          );
+        `);
+        const insert = this.db.prepare(`
+          INSERT INTO runner_schedule_executions
+            (id, schedule_id, project_id, workspace_id, occurrence_key, scheduled_for,
+             schedule_snapshot_json, status, job_id, revision, reason, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+        for (const row of this.db.prepare("SELECT * FROM runner_schedule_executions_legacy").all() as Row[]) {
+          const schedule = this.schedule(String(row.schedule_id), String(row.project_id), String(row.workspace_id));
+          if (!schedule) throw new RunnerControlError("cannot migrate execution without its schedule");
+          insert.run(String(row.id), schedule.id, schedule.projectId, schedule.workspaceId,
+            String(row.occurrence_key), String(row.scheduled_for), JSON.stringify(schedule),
+            String(row.status), row.job_id as string | null, row.revision as string | null,
+            row.reason as string | null, String(row.created_at), String(row.updated_at));
+        }
+        this.db.exec(`
+          DROP TABLE runner_schedule_executions_legacy;
+          CREATE INDEX runner_schedule_executions_scope
+            ON runner_schedule_executions(project_id, workspace_id, created_at DESC);
+          CREATE INDEX runner_schedule_executions_active ON runner_schedule_executions(status, updated_at);
+        `);
+      });
+    }
   }
 
   schedules(projectId?: string, workspaceId?: string): RunnerSchedule[] {
@@ -648,6 +744,12 @@ export class RunnerControlStore {
         throw new RunnerControlError("schedule confirmation token expired");
       }
       const payload = parseJson<SchedulePlanPayload>(row.payload_json, "schedule plan");
+      const scheduleId = payload.schedule?.id ?? String(payload.scheduleId ?? "");
+      const current = this.schedule(scheduleId, context.projectId, context.workspaceId);
+      if (payload.expectedVersion === undefined ||
+          (payload.expectedVersion === null ? current !== null : current?.version !== payload.expectedVersion)) {
+        throw new RunnerControlError("schedule changed or was deleted; inspect it and prepare a new confirmation plan");
+      }
       let result: RunnerSchedule | null;
       if (payload.operation === "delete") {
         const scheduleId = String(payload.scheduleId ?? "");
@@ -658,15 +760,16 @@ export class RunnerControlStore {
         result = null;
       } else {
         if (!payload.schedule) throw new RunnerControlError("schedule plan has no schedule");
-        const schedule = payload.schedule;
+        const schedule = { ...payload.schedule, version: (payload.expectedVersion ?? 0) + 1 };
         this.db.prepare(`
           INSERT INTO runner_schedules
             (id, project_id, workspace_id, name, action, local_time, time_zone,
              weekdays_json, enabled, revision_ref, overlap_policy, misfire_grace_minutes,
              delivery_chat_id, delivery_topic_id, delivery_label, delivery_condition,
-             notifications_json, origin_conversation_id, created_by, updated_by, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             notifications_json, origin_conversation_id, created_by, updated_by, created_at, updated_at, version)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET
+            version = excluded.version,
             name = excluded.name,
             action = excluded.action,
             local_time = excluded.local_time,
@@ -710,7 +813,8 @@ export class RunnerControlStore {
           schedule.createdBy,
           schedule.updatedBy,
           schedule.createdAt,
-          schedule.updatedAt,
+          iso(nowMilliseconds),
+          schedule.version,
         );
         result = this.schedule(schedule.id, schedule.projectId, schedule.workspaceId);
         if (!result) throw new RunnerControlError("schedule could not be stored");
@@ -803,7 +907,7 @@ export class RunnerControlStore {
     nowMilliseconds: number,
   ): RunnerSchedule {
     const updated = this.db.prepare(`
-      UPDATE runner_schedules SET enabled = ?, updated_by = ?, updated_at = ?
+      UPDATE runner_schedules SET enabled = ?, updated_by = ?, updated_at = ?, version = version + 1
       WHERE id = ? AND project_id = ? AND workspace_id = ?
     `).run(enabled ? 1 : 0, actorUserId, iso(nowMilliseconds), id, projectId, workspaceId);
     if (Number(updated.changes) !== 1) throw new RunnerControlError("schedule was not found");
@@ -814,25 +918,31 @@ export class RunnerControlStore {
     schedule: RunnerSchedule,
     occurrence: { key: string; scheduledFor: string },
     nowMilliseconds: number,
+    requireEnabled = false,
   ): RunnerScheduleExecution | null {
-    const id = randomUUID();
-    const inserted = this.db.prepare(`
-      INSERT OR IGNORE INTO runner_schedule_executions
-        (id, schedule_id, project_id, workspace_id, occurrence_key, scheduled_for,
-         status, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, 'claimed', ?, ?)
-    `).run(
-      id,
-      schedule.id,
-      schedule.projectId,
-      schedule.workspaceId,
-      occurrence.key,
-      occurrence.scheduledFor,
-      iso(nowMilliseconds),
-      iso(nowMilliseconds),
-    );
-    if (Number(inserted.changes) !== 1) return null;
-    return this.execution(id)!;
+    return this.transaction(() => {
+      const current = this.schedule(schedule.id, schedule.projectId, schedule.workspaceId);
+      if (!current || current.version !== schedule.version || (requireEnabled && !current.enabled)) return null;
+      const id = randomUUID();
+      const inserted = this.db.prepare(`
+        INSERT OR IGNORE INTO runner_schedule_executions
+          (id, schedule_id, project_id, workspace_id, occurrence_key, scheduled_for,
+           status, created_at, updated_at, schedule_snapshot_json)
+        VALUES (?, ?, ?, ?, ?, ?, 'claimed', ?, ?, ?)
+      `).run(
+        id,
+        schedule.id,
+        schedule.projectId,
+        schedule.workspaceId,
+        occurrence.key,
+        occurrence.scheduledFor,
+        iso(nowMilliseconds),
+        iso(nowMilliseconds),
+        JSON.stringify(schedule),
+      );
+      if (Number(inserted.changes) !== 1) return null;
+      return this.execution(id)!;
+    });
   }
 
   updateExecution(
@@ -858,6 +968,61 @@ export class RunnerControlStore {
     return this.execution(id)!;
   }
 
+  prepareSubmission(id: string, submission: ScheduledSubmission, nowMilliseconds: number): void {
+    this.db.prepare(`UPDATE runner_schedule_executions
+      SET submission_json = ?, revision = ?, status = 'reconciling', updated_at = ? WHERE id = ?
+    `).run(JSON.stringify(submission), submission.revision, iso(nowMilliseconds), id);
+  }
+
+  recordExecution(
+    id: string, status: RunnerScheduleExecutionStatus,
+    values: { jobId?: string; revision?: string; reason?: string | null },
+    deliveries: Array<{ key: string; payload: DeliveryPayload }>, nowMilliseconds: number,
+  ): void {
+    this.transaction(() => {
+      this.updateExecution(id, status, values, nowMilliseconds);
+      for (const delivery of deliveries) this.queueDelivery(delivery.key, delivery.payload, nowMilliseconds);
+    });
+  }
+
+  queueDelivery(key: string, payload: DeliveryPayload, nowMilliseconds: number): void {
+    const scope = payload.kind === "notice" ? payload : payload.job;
+    this.db.prepare(`INSERT OR IGNORE INTO runner_delivery_intents
+      (key, project_id, workspace_id, payload_json, next_attempt_at, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(key, scope.projectId, scope.workspaceId, JSON.stringify(payload), iso(nowMilliseconds), iso(nowMilliseconds));
+  }
+
+  dueDeliveries(nowMilliseconds: number): DeliveryIntent[] {
+    return (this.db.prepare(`SELECT * FROM runner_delivery_intents
+      WHERE accepted_at IS NULL AND next_attempt_at <= ? ORDER BY next_attempt_at, key LIMIT 50
+    `).all(iso(nowMilliseconds)) as Row[]).map((row) => ({
+      key: String(row.key), payload: parseJson<DeliveryPayload>(row.payload_json, "runner delivery"),
+      attempts: Number(row.attempts),
+    }));
+  }
+
+  acceptDelivery(key: string, nowMilliseconds: number): void {
+    this.db.prepare("UPDATE runner_delivery_intents SET accepted_at = ? WHERE key = ?")
+      .run(iso(nowMilliseconds), key);
+  }
+
+  retryDelivery(intent: DeliveryIntent, error: unknown, nowMilliseconds: number): void {
+    const delay = Math.min(30 * 60_000, 15_000 * 2 ** Math.min(intent.attempts, 7));
+    this.db.prepare(`UPDATE runner_delivery_intents
+      SET attempts = attempts + 1, last_error = ?, next_attempt_at = ? WHERE key = ?
+    `).run((error instanceof Error ? error.message : String(error)).slice(0, 2000),
+      iso(nowMilliseconds + delay), intent.key);
+  }
+
+  deliveryFailures(projectId: string, workspaceId: string): Array<{ key: string; attempts: number; error: string; nextAttemptAt: string }> {
+    return (this.db.prepare(`SELECT key, attempts, last_error, next_attempt_at FROM runner_delivery_intents
+      WHERE project_id = ? AND workspace_id = ? AND accepted_at IS NULL AND attempts > 0
+      ORDER BY next_attempt_at LIMIT 50
+    `).all(projectId, workspaceId) as Row[]).map((row) => ({ key: String(row.key), attempts: Number(row.attempts),
+      error: String(row.last_error), nextAttemptAt: String(row.next_attempt_at) }));
+  }
+
   execution(id: string): RunnerScheduleExecution | null {
     const row = this.db.prepare(
       "SELECT * FROM runner_schedule_executions WHERE id = ?",
@@ -865,10 +1030,18 @@ export class RunnerControlStore {
     return row ? this.toExecution(row) : null;
   }
 
+  recentExecutions(projectId: string, workspaceId: string): RunnerScheduleExecution[] {
+    return (this.db.prepare(`SELECT * FROM runner_schedule_executions
+      WHERE project_id = ? AND workspace_id = ?
+      ORDER BY CASE WHEN status IN ('claimed', 'reconciling', 'queued', 'running', 'cancelling') THEN 0 ELSE 1 END,
+        created_at DESC, id DESC LIMIT 50
+    `).all(projectId, workspaceId) as Row[]).map((row) => this.toExecution(row));
+  }
+
   activeExecutions(): RunnerScheduleExecution[] {
     return (this.db.prepare(`
       SELECT * FROM runner_schedule_executions
-      WHERE status IN ('claimed', 'queued', 'running', 'cancelling')
+      WHERE status IN ('claimed', 'reconciling', 'queued', 'running', 'cancelling')
       ORDER BY created_at
     `).all() as Row[]).map((row) => this.toExecution(row));
   }
@@ -879,24 +1052,30 @@ export class RunnerControlStore {
     nowMilliseconds: number,
     notifications: RunnerLifecycleNotification[] = [],
   ): void {
-    const timestamp = iso(nowMilliseconds);
-    this.db.prepare(`
-      INSERT OR IGNORE INTO runner_job_watches
-        (job_id, project_id, workspace_id, conversation_id, actor_user_id, action,
-         last_status, created_at, updated_at, notifications_json)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      job.id,
-      context.projectId,
-      context.workspaceId,
-      context.conversationId,
-      context.actorUserId,
-      job.action,
-      job.status,
-      timestamp,
-      timestamp,
-      JSON.stringify(notifications),
-    );
+    this.transaction(() => {
+      const timestamp = iso(nowMilliseconds);
+      this.db.prepare(`
+        INSERT OR IGNORE INTO runner_job_watches
+          (job_id, project_id, workspace_id, conversation_id, actor_user_id, action,
+           last_status, created_at, updated_at, notifications_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        job.id,
+        context.projectId,
+        context.workspaceId,
+        context.conversationId,
+        context.actorUserId,
+        job.action,
+        job.status,
+        timestamp,
+        timestamp,
+        JSON.stringify(notifications),
+      );
+      for (const [index, notification] of notifications.filter((item) => item.when === "started").entries()) {
+        this.queueDelivery(idempotencyKey(`manual:${job.id}:started`, notification.when, String(index)),
+          { kind: "lifecycle", job, notification, createdBy: context.actorUserId }, nowMilliseconds);
+      }
+    });
   }
 
   pendingJobWatches(): RunnerJobWatch[] {
@@ -945,6 +1124,13 @@ export class RunnerControlStore {
     `).run(job.status, iso(nowMilliseconds), job.id);
   }
 
+  completeJobWatch(jobId: string, deliveries: Array<{ key: string; payload: DeliveryPayload }>, nowMilliseconds: number): void {
+    this.transaction(() => {
+      for (const delivery of deliveries) this.queueDelivery(delivery.key, delivery.payload, nowMilliseconds);
+      this.markJobWatchNotified(jobId, nowMilliseconds);
+    });
+  }
+
   markJobWatchNotified(jobId: string, nowMilliseconds: number): void {
     const timestamp = iso(nowMilliseconds);
     this.db.prepare(`
@@ -988,6 +1174,7 @@ export class RunnerControlStore {
   private toSchedule(row: Row): RunnerSchedule {
     return {
       id: String(row.id),
+      version: Number(row.version),
       projectId: String(row.project_id),
       workspaceId: String(row.workspace_id),
       name: String(row.name),
@@ -1029,6 +1216,8 @@ export class RunnerControlStore {
       projectId: String(row.project_id),
       workspaceId: String(row.workspace_id),
       occurrenceKey: String(row.occurrence_key),
+      scheduleSnapshot: parseJson<RunnerSchedule>(row.schedule_snapshot_json, "execution schedule"),
+      submission: row.submission_json === null ? null : parseJson<ScheduledSubmission>(row.submission_json, "submission"),
       scheduledFor: String(row.scheduled_for),
       status: String(row.status) as RunnerScheduleExecutionStatus,
       jobId: row.job_id === null ? null : String(row.job_id),
@@ -1054,6 +1243,7 @@ export class RunnerControlPlane {
       projectId: string,
       message: string,
       conversationId?: string,
+      delivery?: { key: string; workspaceId: string },
     ) => Promise<void> = async () => {},
     readonly now: () => number = Date.now,
     readonly intervalMilliseconds = 15_000,
@@ -1084,6 +1274,8 @@ export class RunnerControlPlane {
       idempotencyKey: string,
       createdBy: number,
     ) => Promise<boolean> = async () => false,
+    readonly scheduleInspector: (projectId: string, workspaceId: string) => Promise<GitInspector> =
+      async (projectId, workspaceId) => new GitInspector(projects.project(projectId).workspace(workspaceId).path),
   ) {
     this.store = new RunnerControlStore(storePath);
   }
@@ -1108,11 +1300,12 @@ export class RunnerControlPlane {
   async stopAndWait(): Promise<void> {
     this.stop();
     if (this.scheduledTick) await this.scheduledTick;
+    if (this.deliveryDrain) await this.deliveryDrain;
   }
 
   private runScheduledTick(): Promise<void> {
     if (this.scheduledTick) return this.scheduledTick;
-    const pending = this.tick();
+    const pending = this.tick(false);
     this.scheduledTick = pending;
     void pending.finally(() => {
       if (this.scheduledTick === pending) this.scheduledTick = null;
@@ -1191,6 +1384,8 @@ export class RunnerControlPlane {
       recent,
       services,
       schedules,
+      deliveryFailures: this.store.deliveryFailures(context.projectId, context.workspaceId),
+      executions: this.store.recentExecutions(context.projectId, context.workspaceId),
       artifacts: jobs
         .filter((job) => Number(job.artifactCount ?? 0) > 0)
         .map((job) => ({
@@ -1573,7 +1768,7 @@ export class RunnerControlPlane {
       if (!existing) throw new RunnerControlError("schedule was not found");
       return this.store.savePlan(
         context,
-        { operation: "delete", scheduleId },
+        { operation: "delete", scheduleId, expectedVersion: existing.version },
         `Удалить расписание «${existing.name}» (${existing.action}, ${existing.time} ${existing.timeZone})`,
         nowMilliseconds,
       );
@@ -1640,6 +1835,7 @@ export class RunnerControlPlane {
     const timestamp = iso(nowMilliseconds);
     const schedule: RunnerSchedule = {
       id: existing?.id ?? randomUUID(),
+      version: existing?.version ?? 1,
       projectId: context.projectId,
       workspaceId: context.workspaceId,
       name,
@@ -1673,7 +1869,7 @@ export class RunnerControlPlane {
       : "";
     return this.store.savePlan(
       context,
-      { operation: "upsert", schedule },
+      { operation: "upsert", schedule, expectedVersion: existing?.version ?? null },
       `${existing ? "Изменить" : "Создать"} расписание «${name}»: ${action}, ${days} в ${time} (${timeZone}), ` +
         `${schedule.enabled ? "включено" : "выключено"}${deliverySummary}${notificationSummary}`,
       nowMilliseconds,
@@ -1715,109 +1911,134 @@ export class RunnerControlPlane {
     return schedule;
   }
 
-  async tick(): Promise<void> {
+  async tick(waitForDeliveries = true): Promise<void> {
     if (this.ticking) return;
     this.ticking = true;
     try {
       await this.refreshExecutions();
       await this.refreshWatchedJobs();
-      if (!(await this.runner.available())) return;
-      for (const schedule of this.store.enabledSchedules()) {
-        const occurrence = dueScheduleOccurrence(schedule, this.now());
-        if (!occurrence) continue;
-        const execution = this.store.claimExecution(schedule, occurrence, this.now());
-        if (!execution) continue;
-        await this.enqueueScheduled(schedule, execution);
+      if (await this.runner.available()) {
+        for (const schedule of this.store.enabledSchedules()) {
+          try {
+            const occurrence = dueScheduleOccurrence(schedule, this.now());
+            if (!occurrence) continue;
+            const execution = this.store.claimExecution(schedule, occurrence, this.now(), true);
+            if (execution) await this.enqueueScheduled(schedule, execution);
+          } catch (error) {
+            console.warn(`could not process schedule ${schedule.id}`, error);
+          }
+        }
       }
     } catch (error) {
       console.error("runner scheduler tick failed", error);
     } finally {
       this.ticking = false;
+      // The periodic scheduler must keep advancing while artifact/outbox I/O is slow.
+      // Explicit ticks may await delivery for callers that need a settled snapshot.
+      const delivery = this.drainDeliveries();
+      if (waitForDeliveries) await delivery;
+      else void delivery.catch((error) => console.error("runner delivery drain failed", error));
     }
   }
 
-  private async enqueueScheduled(
-    schedule: RunnerSchedule,
-    execution: RunnerScheduleExecution,
-  ): Promise<void> {
+  private scheduleKey(execution: RunnerScheduleExecution): string {
+    return idempotencyKey("schedule", execution.projectId, execution.workspaceId,
+      execution.scheduleId, execution.occurrenceKey);
+  }
+
+  private scheduleNotice(execution: RunnerScheduleExecution, message: string): DeliveryPayload {
+    return { kind: "notice", projectId: execution.projectId, workspaceId: execution.workspaceId, message };
+  }
+
+  private lifecycleIntents(
+    job: RunnerJob, notifications: RunnerLifecycleNotification[], scope: string, createdBy: number,
+  ): Array<{ key: string; payload: DeliveryPayload }> {
+    return notifications.map((notification, index) => ({
+      key: idempotencyKey(scope, notification.when, String(index)),
+      payload: { kind: "lifecycle", job, notification, createdBy },
+    }));
+  }
+
+  private recordScheduledJob(execution: RunnerScheduleExecution, job: RunnerJob): void {
+    const schedule = execution.scheduleSnapshot;
+    const status: RunnerScheduleExecutionStatus = job.status === "interrupted" ? "failed" : job.status;
+    const scope = `schedule:${schedule.id}:${execution.occurrenceKey}`;
+    const deliveries = this.lifecycleIntents(job,
+      schedule.notifications.filter((notification) => notification.when === "started"),
+      `${scope}:started`, schedule.updatedBy);
+    if (TERMINAL_EXECUTION_STATUSES.has(status)) {
+      if (deliveryConditionMatches(schedule.deliveryCondition, status) &&
+          (job.action === "dry-run" || job.action === "run") && (job.portalMessageCount ?? 0) > 0) {
+        deliveries.push({ key: `${scope}:report`, payload: { kind: "scheduled-report", job, schedule } });
+      }
+      deliveries.push(...this.lifecycleIntents(job, schedule.notifications.filter((notification) =>
+        terminalNotificationKinds(job).includes(notification.when)), `${scope}:${status}`, schedule.updatedBy));
+      if (status !== "completed") {
+        deliveries.push({ key: `${scope}:notice`, payload: this.scheduleNotice(execution,
+          `Запуск расписания «${schedule.name}» завершился со статусом ${status}${job.error ? `: ${job.error}` : ""}`) });
+      }
+    }
+    this.store.recordExecution(execution.id, status,
+      { jobId: job.id, revision: job.revision, reason: job.error ?? null }, deliveries, this.now());
+  }
+
+  private async enqueueScheduled(schedule: RunnerSchedule, execution: RunnerScheduleExecution): Promise<void> {
+    let submitting = false;
     try {
       if (!(await this.runner.available())) throw new RunnerControlError("runner is unavailable");
       const jobs = await this.runner.jobs(schedule.projectId, schedule.workspaceId);
-      if (jobs.some((job) => job.scheduleId === schedule.id && ACTIVE_JOB_STATUSES.has(job.status))) {
-        this.store.updateExecution(
-          execution.id,
-          "skipped",
-          { reason: "previous job from this schedule is still active" },
-          this.now(),
-        );
+      const unresolved = this.store.activeExecutions().some((other) =>
+        other.id !== execution.id && other.scheduleId === schedule.id);
+      if (unresolved || jobs.some((job) => job.scheduleId === schedule.id && ACTIVE_JOB_STATUSES.has(job.status))) {
+        this.store.updateExecution(execution.id, "skipped",
+          { reason: "previous job from this schedule is still active or awaiting reconciliation" }, this.now());
         return;
       }
-      const workspace = this.projects.project(schedule.projectId).workspace(schedule.workspaceId);
-      const inspector = new GitInspector(workspace.path);
-      // revision_ref historically stores "master", but managed repositories may publish main or
-      // another unambiguous default branch and may not have a matching local branch at all.
-      const revision = await inspector.resolveDefaultRevision();
+      const inspector = await this.scheduleInspector(schedule.projectId, schedule.workspaceId);
+      const revision = await inspector.resolvePublishedDefaultRevision();
       const archive = await inspector.archive(revision);
-      const job = await this.runner.submit(
-        schedule.projectId,
-        schedule.workspaceId,
-        schedule.action,
-        revision,
-        archive,
-        {
-          trigger: "schedule",
-          scheduleId: schedule.id,
-          scheduledFor: execution.scheduledFor,
-          idempotencyKey: idempotencyKey(
-            "schedule",
-            schedule.projectId,
-            schedule.workspaceId,
-            schedule.id,
-            execution.occurrenceKey,
-          ),
-        },
-      );
-      this.store.updateExecution(
-        execution.id,
-        "queued",
-        { jobId: job.id, revision },
-        this.now(),
-      );
-      try {
-        await this.deliverNotifications(
-          job,
-          schedule.notifications.filter((notification) => notification.when === "started"),
-          `schedule:${schedule.id}:${execution.occurrenceKey}:started`,
-          schedule.updatedBy,
-        );
-      } catch (error) {
-        console.warn(`could not queue started notifications for schedule ${schedule.id}`, error);
-      }
+      const metadata: RunnerSubmissionMetadata = { trigger: "schedule", scheduleId: schedule.id,
+        scheduledFor: execution.scheduledFor, idempotencyKey: this.scheduleKey(execution) };
+      this.store.prepareSubmission(execution.id, { action: schedule.action, revision,
+        archiveSha256: createHash("sha256").update(archive).digest("hex"), metadata }, this.now());
+      submitting = true;
+      const job = await this.runner.submit(schedule.projectId, schedule.workspaceId, schedule.action,
+        revision, archive, metadata);
+      this.recordScheduledJob(this.store.execution(execution.id)!, job);
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
-      this.store.updateExecution(execution.id, "failed", { reason }, this.now());
-      await this.notify(
-        schedule.projectId,
-        `Расписание «${schedule.name}» не смогло запустить ${schedule.action}: ${reason}`,
-      );
+      // After network I/O starts, a transport error is not proof that the job was rejected.
+      // Never replay a production submission with a newly selected revision or key.
+      const uncertain = submitting && !(error instanceof ProjectRunnerClientError &&
+        error.status >= 400 && error.status < 500 && error.status !== 408);
+      const message = uncertain
+        ? `Расписание «${schedule.name}»: ответ раннера потерян; проверяем, принят ли запуск. Повторный запуск не создаётся.`
+        : `Расписание «${schedule.name}» не смогло запустить ${schedule.action}: ${reason}`;
+      this.store.recordExecution(execution.id, uncertain ? "reconciling" : "failed", { reason },
+        [{ key: `schedule:${execution.id}:${uncertain ? "recovery" : "submission"}-notice`, payload: this.scheduleNotice(execution, message) }], this.now());
     }
+  }
+
+  private async findExecutionJob(execution: RunnerScheduleExecution, jobs: RunnerJob[]): Promise<RunnerJob | null> {
+    const key = execution.submission?.metadata.idempotencyKey ?? this.scheduleKey(execution);
+    const found = jobs.find((job) => execution.jobId ? job.id === execution.jobId : job.idempotencyKey === key);
+    // Direct lookup is not bounded by the recent-jobs page (50 items).
+    const job = found ?? await this.runner.findJob(execution.projectId, execution.workspaceId,
+      execution.jobId ? { jobId: execution.jobId } : { idempotencyKey: key });
+    if (job && (job.projectId !== execution.projectId || job.workspaceId !== execution.workspaceId ||
+        (!execution.jobId && (job.trigger !== "schedule" || job.scheduleId !== execution.scheduleId ||
+          job.scheduledFor !== execution.scheduledFor || job.action !== execution.scheduleSnapshot.action ||
+          (execution.submission && (job.revision !== execution.submission.revision ||
+            (job.archiveSha256 && job.archiveSha256 !== execution.submission.archiveSha256))))))) {
+      throw new RunnerControlError("runner reconciliation returned a different submission");
+    }
+    return job;
   }
 
   private async refreshExecutions(): Promise<void> {
     const grouped = new Map<string, RunnerScheduleExecution[]>();
     for (const execution of this.store.activeExecutions()) {
-      if (execution.status === "claimed") {
-        if (this.now() - Date.parse(execution.updatedAt) > 60_000) {
-          this.store.updateExecution(
-            execution.id,
-            "failed",
-            { reason: "scheduler restarted or lost the claim before submitting a job" },
-            this.now(),
-          );
-        }
-        continue;
-      }
-      if (!execution.jobId) continue;
+      if (execution.status === "claimed" && this.now() - Date.parse(execution.updatedAt) < 60_000) continue;
       const key = `${execution.projectId}\0${execution.workspaceId}`;
       const entries = grouped.get(key) ?? [];
       entries.push(execution);
@@ -1826,59 +2047,21 @@ export class RunnerControlPlane {
     for (const [key, executions] of grouped) {
       const [projectId, workspaceId] = key.split("\0") as [string, string];
       let jobs: RunnerJob[];
-      try {
-        jobs = await this.runner.jobs(projectId, workspaceId);
-      } catch {
-        continue;
-      }
+      try { jobs = await this.runner.jobs(projectId, workspaceId); }
+      catch { continue; }
       for (const execution of executions) {
-        const job = jobs.find((candidate) => candidate.id === execution.jobId);
-        if (!job) continue;
-        const status: RunnerScheduleExecutionStatus = job.status === "interrupted"
-          ? "failed"
-          : job.status;
-        if (status === execution.status) continue;
-        const schedule = this.store.schedule(
-          execution.scheduleId,
-          execution.projectId,
-          execution.workspaceId,
-        );
-        if (
-          deliveryConditionMatches(schedule?.deliveryCondition ?? "success", status) &&
-          (job.action === "dry-run" || job.action === "run") &&
-          (job.portalMessageCount ?? 0) > 0 &&
-          schedule
-        ) {
-          if (!(await this.deliverScheduledPortalMessages(job, schedule))) continue;
-        }
-        if (schedule && TERMINAL_EXECUTION_STATUSES.has(status)) {
-          try {
-            await this.deliverNotifications(
-              job,
-              schedule.notifications.filter((notification) =>
-                terminalNotificationKinds(job).includes(notification.when)
-              ),
-              `schedule:${schedule.id}:${execution.occurrenceKey}:${status}`,
-              schedule.updatedBy,
-            );
-          } catch (error) {
-            console.warn(`could not queue terminal notifications for schedule ${schedule.id}`, error);
+        try {
+          const job = await this.findExecutionJob(execution, jobs);
+          if (job) {
+            this.recordScheduledJob(execution, job);
+          } else if (!execution.jobId) {
+            this.store.recordExecution(execution.id, "reconciling",
+              { reason: "awaiting runner reconciliation; no automatic resubmission" },
+              [{ key: `schedule:${execution.id}:recovery-notice`, payload: this.scheduleNotice(execution,
+                `Расписание «${execution.scheduleSnapshot.name}»: после сбоя проверяем принятый запуск; новый запуск не создаётся.`) }], this.now());
           }
-        }
-        this.store.updateExecution(
-          execution.id,
-          status,
-          { reason: job.error ?? null, revision: job.revision },
-          this.now(),
-        );
-        if (TERMINAL_EXECUTION_STATUSES.has(status) && status !== "completed") {
-          if (schedule) {
-            await this.notify(
-              execution.projectId,
-              `Запуск расписания «${schedule.name}» завершился со статусом ${status}` +
-                `${job.error ? `: ${job.error}` : ""}`,
-            );
-          }
+        } catch (error) {
+          console.warn(`could not reconcile schedule execution ${execution.id}`, error);
         }
       }
     }
@@ -1901,56 +2084,77 @@ export class RunnerControlPlane {
         continue;
       }
       for (const watch of watches) {
-        const job = jobs.find((candidate) => candidate.id === watch.jobId);
+        let job = jobs.find((candidate) => candidate.id === watch.jobId);
+        if (!job) {
+          try { job = (await this.runner.findJob(projectId, workspaceId, { jobId: watch.jobId })) ?? undefined; }
+          catch { continue; }
+        }
         if (!job) continue;
         if (job.status !== watch.lastStatus) this.store.updateJobWatch(job, this.now());
         if (!MANUAL_JOB_TERMINAL_STATUSES.has(job.status)) continue;
         try {
-          await this.deliverNotifications(
-            job,
-            watch.notifications.filter((notification) =>
-              terminalNotificationKinds(job).includes(notification.when)
-            ),
-            `manual:${job.id}:${job.status}`,
-            watch.actorUserId,
-          );
-          // A failed publication can still leave a valid, captured report/video batch.
-          const reportDelivered = (
-            (job.status === "completed" || job.status === "failed") &&
-            (job.action === "dry-run" || job.action === "run") &&
-            (job.portalMessageCount ?? 0) > 0 &&
-            watch.actorUserId > 0 &&
-            await this.notifyPortalMessages(job, watch.conversationId, watch.actorUserId)
-          );
-          // Delivering an artifact must not hide the failed job from its owner.
-          if (!reportDelivered || job.status === "failed") {
-            await this.notify(projectId, manualJobNotification(job), watch.conversationId);
-          }
-          this.store.markJobWatchNotified(job.id, this.now());
+          const deliveries = this.lifecycleIntents(job, watch.notifications.filter((notification) =>
+            terminalNotificationKinds(job).includes(notification.when)), `manual:${job.id}:${job.status}`, watch.actorUserId);
+          const report = (job.status === "completed" || job.status === "failed") &&
+            (job.action === "dry-run" || job.action === "run") && (job.portalMessageCount ?? 0) > 0 && watch.actorUserId > 0;
+          if (report) deliveries.push({ key: `manual:${job.id}:report`, payload: { kind: "manual-report", job,
+            conversationId: watch.conversationId, actorUserId: watch.actorUserId } });
+          if (!report || job.status === "failed") deliveries.push({ key: `manual:${job.id}:notice`,
+            payload: { kind: "notice", projectId, workspaceId, message: manualJobNotification(job),
+              conversationId: watch.conversationId } });
+          this.store.completeJobWatch(job.id, deliveries, this.now());
         } catch (error) {
-          console.warn(`could not notify conversation about runner job ${job.id}`, error);
+          console.warn(`could not record notifications for runner job ${job.id}`, error);
         }
       }
     }
   }
 
   private async deliverNotifications(
-    job: RunnerJob,
-    notifications: RunnerLifecycleNotification[],
-    scope: string,
-    createdBy: number,
+    job: RunnerJob, notifications: RunnerLifecycleNotification[], scope: string, createdBy: number,
   ): Promise<void> {
-    for (const [index, notification] of notifications.entries()) {
-      const accepted = await this.deliverLifecycleNotification(
-        job,
-        notification,
-        idempotencyKey(scope, notification.when, String(index)),
-        createdBy,
-      );
-      if (!accepted) {
-        throw new RunnerControlError(
-          `external ${notification.when} notification was not accepted by the outbox`,
-        );
+    for (const delivery of this.lifecycleIntents(job, notifications, scope, createdBy)) {
+      this.store.queueDelivery(delivery.key, delivery.payload, this.now());
+    }
+    await this.drainDeliveries();
+  }
+
+  private deliveryDrain: Promise<void> | null = null;
+
+  private async drainDeliveries(): Promise<void> {
+    if (this.deliveryDrain) return this.deliveryDrain;
+    const drain = this.deliverDueIntents();
+    this.deliveryDrain = drain;
+    try { await drain; }
+    finally { if (this.deliveryDrain === drain) this.deliveryDrain = null; }
+  }
+
+  private async deliverDueIntents(): Promise<void> {
+    for (const intent of this.store.dueDeliveries(this.now())) {
+      try {
+        const payload = intent.payload;
+        if (payload.kind === "scheduled-report") {
+          if (!(await this.deliverScheduledPortalMessages(payload.job, payload.schedule))) {
+            throw new RunnerControlError("scheduled report was not accepted by the outbox");
+          }
+        } else if (payload.kind === "lifecycle") {
+          if (!(await this.deliverLifecycleNotification(payload.job, payload.notification, intent.key, payload.createdBy))) {
+            throw new RunnerControlError("lifecycle notification was not accepted by the outbox");
+          }
+        } else if (payload.kind === "manual-report") {
+          if (!(await this.notifyPortalMessages(payload.job, payload.conversationId, payload.actorUserId))) {
+            this.store.queueDelivery(`manual:${payload.job.id}:notice`, { kind: "notice",
+              projectId: payload.job.projectId, workspaceId: payload.job.workspaceId,
+              message: manualJobNotification(payload.job), conversationId: payload.conversationId }, this.now());
+          }
+        } else {
+          await this.notify(payload.projectId, payload.message, payload.conversationId,
+            { key: intent.key, workspaceId: payload.workspaceId });
+        }
+        this.store.acceptDelivery(intent.key, this.now());
+      } catch (error) {
+        this.store.retryDelivery(intent, error, this.now());
+        console.warn(`runner delivery ${intent.key} will retry`, error);
       }
     }
   }

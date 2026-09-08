@@ -1,3 +1,4 @@
+import { createServer } from "node:http";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -1266,6 +1267,61 @@ esac
     assert.equal(recovered.find((item) => item.name === "worker")?.current?.revision, firstRevision);
   } finally {
     await server.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runner lookup recovers jobs outside the recent page and enforces workspace scope", async () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-runner-lookup-"));
+  const dataRoot = join(root, "data");
+  const configRoot = join(root, "config");
+  mkdirSync(configRoot);
+  const server = new ProjectRunnerServer(join(root, "runner.sock"), dataRoot, configRoot,
+    join(root, "unused-docker"), Buffer.alloc(32, 11), true, [], join(root, "migration.sock"), join(root, "managed"));
+  try {
+    await server.start();
+    const client = new ProjectRunnerClient(join(root, "runner.sock"));
+    await client.registerProject("demo", ["repo", "other"]);
+    let oldest = "";
+    for (let index = 0; index < 60; index++) {
+      const id = randomUUID();
+      if (index === 0) oldest = id;
+      const directory = join(dataRoot, "projects", "demo", "runs", id);
+      mkdirSync(directory, { recursive: true });
+      writeFileSync(join(directory, "job.json"), JSON.stringify({
+        id, projectId: "demo", workspaceId: "repo", action: "run", revision: "a".repeat(40),
+        status: "completed", createdAt: new Date(index * 1000).toISOString(),
+        ...(index === 0 ? { idempotencyKey: "b".repeat(64) } : {}),
+      }));
+    }
+    assert.equal((await client.jobs("demo", "repo")).length, 50);
+    assert.equal((await client.jobs("demo", "repo")).some((job) => job.id === oldest), false);
+    assert.equal((await client.findJob("demo", "repo", { idempotencyKey: "b".repeat(64) }))?.id, oldest);
+    assert.equal((await client.findJob("demo", "repo", { jobId: oldest }))?.id, oldest);
+    assert.equal(await client.findJob("demo", "other", { jobId: oldest }), null);
+    assert.equal(await client.findJob("demo", "other", { idempotencyKey: "b".repeat(64) }), null);
+    assert.equal(await client.findJob("demo", "repo", { jobId: randomUUID() }), null);
+    await assert.rejects(client.findJob("demo", "repo", { jobId: "../other" }), /invalid runner lookup scope/);
+  } finally {
+    await server.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a truncated runner HTTP response rejects the submission instead of hanging or raising an unhandled error", async () => {
+  const root = mkdtempSync(join(tmpdir(), "summing-runner-aborted-"));
+  const socket = join(root, "runner.sock");
+  const server = createServer((_request, response) => {
+    response.writeHead(202, { "content-type": "application/json", "content-length": "10000" });
+    response.write('{"job":');
+    setImmediate(() => response.destroy());
+  });
+  try {
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socket, resolve); });
+    const client = new ProjectRunnerClient(socket);
+    await assert.rejects(client.submit("demo", "repo", "run", "a".repeat(40), Buffer.from("archive")), /aborted|reset|closed|hang up/i);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
     rmSync(root, { recursive: true, force: true });
   }
 });

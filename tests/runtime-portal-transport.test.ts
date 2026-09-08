@@ -7,6 +7,7 @@ import { ProjectConfig, RuntimeConfig, type WorkspaceConfig } from "../src/confi
 import type { RunnerJob } from "../src/project-runner-client.js";
 import type { RunnerSchedule } from "../src/runner-control.js";
 import { SummingRuntime } from "../src/runtime.js";
+import { ProjectPortalOutboxStore } from "../src/project-portal-outbox.js";
 import { StateStore } from "../src/state-store.js";
 
 function fixture(): {
@@ -34,8 +35,12 @@ function fixture(): {
     true,
     new Map([["demo", project]]),
   ));
-  Object.assign(runtime, { telegramBotId: 123, telegramUsername: "summing_bot" });
+  Object.assign(runtime, { telegramBotId: 123, telegramUsername: "summing_bot", scheduleProjectPortalOutboxDrain: () => {} });
   return { root, repository, runtime };
+}
+
+async function drain(runtime: SummingRuntime): Promise<void> {
+  await (runtime as unknown as { drainProjectPortalOutbox(): Promise<void> }).drainProjectPortalOutbox();
 }
 
 test("live runner messages deliver every native media kind through the durable Project portal transport", async () => {
@@ -133,6 +138,7 @@ test("live runner messages deliver every native media kind through the durable P
         ): Promise<boolean>;
       }
     ).sendRunnerPortalMessages(job, internal.id, 1);
+    await drain(runtime);
     assert.equal(delivered, true);
     assert.deepEqual(
       deliveries.toSorted((left, right) => left.fileName.localeCompare(right.fileName)),
@@ -212,6 +218,9 @@ test("failed live-run recovery retries artifact handoff and owner notification w
     if (++ownerAttempts === 1) throw new Error("temporary owner notification failure");
     return 80568;
   };
+  let now = Date.now();
+  Object.assign(runtime.runnerControl, { now: () => now });
+  Object.assign(runtime.projectPortalOutbox, { now: () => new Date(now) });
   try {
     runtime.runnerControl.store.watchJob({
       projectId: "demo", workspaceId: "repo", repositoryPath: repository,
@@ -219,26 +228,28 @@ test("failed live-run recovery retries artifact handoff and owner notification w
     }, { ...job, status: "queued" }, Date.now());
 
     await runtime.runnerControl.tick();
+    await drain(runtime);
     assert.equal(videoSends, 0);
-    assert.equal(runtime.runnerControl.store.jobWatch(job.id)?.notifiedAt, null);
+    assert.equal(ownerAttempts, 1, "artifact failure does not block the owner notice");
+    assert.ok(runtime.runnerControl.store.jobWatch(job.id)?.notifiedAt, "delivery intents are durable");
+    assert.equal(runtime.runnerControl.store.deliveryFailures("demo", "repo").length, 1);
 
     await runtime.runnerControl.tick();
-    assert.equal(videoSends, 1);
-    assert.equal(ownerAttempts, 1);
-    assert.equal(runtime.runnerControl.store.jobWatch(job.id)?.notifiedAt, null);
-
+    assert.equal(artifactReads, 1, "retry uses backoff");
+    now += 60_000;
     await runtime.runnerControl.tick();
+    await drain(runtime);
     await runtime.runnerControl.tick();
-    assert.equal(artifactReads, 3);
+    await drain(runtime);
+    assert.equal(artifactReads, 2);
     assert.equal(videoSends, 1);
     assert.equal(ownerAttempts, 2);
     assert.equal(runtime.runnerControl.store.jobWatch(job.id)?.lastStatus, "failed");
-    assert.ok(runtime.runnerControl.store.jobWatch(job.id)?.notifiedAt);
+    assert.equal(runtime.runnerControl.store.deliveryFailures("demo", "repo").length, 0);
     const records = runtime.projectPortalOutbox.list({ projectId: "demo" });
-    assert.equal(records.length, 1);
-    assert.equal(records[0]?.status, "sent");
-    assert.equal(records[0]?.kind, "video");
-    assert.equal(records[0]?.idempotencyKey, `runner:${job.id}:video-1`);
+    assert.equal(records.length, 2, "report and owner notice each have a durable record");
+    assert.ok(records.every((record) => record.status === "sent"));
+    assert.equal(records.find((record) => record.kind === "video")?.idempotencyKey, `runner:${job.id}:video-1`);
     assert.equal(runtime.state.resultPublicationForMessage(-100500, 9, 80567)?.jobId, job.id);
     assert.equal(job.status, "failed");
     assert.equal(job.exitCode, 1);
@@ -290,6 +301,7 @@ test("scheduled reports deliver to an observed topic without an observer binding
   });
   const schedule: RunnerSchedule = {
     id: "df4fc608-e584-4263-9712-e53d779f9bd8",
+    version: 1,
     projectId: "demo",
     workspaceId: "repo",
     name: "Утренний отчёт",
@@ -364,6 +376,9 @@ test("scheduled reports deliver to an observed topic without an observer binding
         ): Promise<boolean>;
       }
     ).sendScheduledRunnerPortalMessages(job, schedule);
+    await assert.rejects(runtime.runnerControl.deliverScheduledPortalMessages(job, { ...schedule, updatedBy: 999 }),
+      /author no longer has access/);
+    await drain(runtime);
     assert.equal(delivered, true);
     assert.deepEqual(deliveries, [{ chatId: -100700, topicId: 67800, fileName: "report.html" }]);
     assert.equal(runtime.state.byTopic(-100700, 67800), null);
@@ -977,6 +992,45 @@ test("an authorized Project agent can forward an incoming workspace attachment",
     });
     assert.equal(textDeliveries.length, 2);
   } finally {
+    runtime.state.close();
+    await runtime.telegram.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+
+test("owner notices recover partial delivery after outbox restart without duplicating another owner's message", async () => {
+  const { root, runtime } = fixture();
+  runtime.projects.owners = () => [1, 2];
+  let now = Date.now();
+  Object.assign(runtime.projectPortalOutbox, { now: () => new Date(now) });
+  const attempts: number[] = [];
+  runtime.telegram.sendMessage = async (chatId) => {
+    attempts.push(chatId);
+    if (chatId === 2 && attempts.filter((id) => id === 2).length === 1) throw new Error("temporary delivery failure");
+    return 1000 + attempts.length;
+  };
+  const queue = () => (runtime as unknown as {
+    queueRunnerNotice(projectId: string, workspaceId: string, message: string, key: string): void;
+  }).queueRunnerNotice("demo", "repo", "Schedule failed", "stable-test-notice");
+  try {
+    queue();
+    queue();
+    assert.equal(runtime.projectPortalOutbox.list({ projectId: "demo" }).length, 2);
+    await drain(runtime);
+    assert.equal(attempts.filter((id) => id === 1).length, 1);
+    assert.equal(attempts.filter((id) => id === 2).length, 1);
+    now += 60_000;
+    Object.assign(runtime, { projectPortalOutbox: new ProjectPortalOutboxStore(
+      join(root, "data"), runtime.projectPortalOutbox.maximumAttachmentBytes, () => new Date(now),
+    ) });
+    queue();
+    await drain(runtime);
+    assert.equal(attempts.filter((id) => id === 1).length, 1);
+    assert.equal(attempts.filter((id) => id === 2).length, 2);
+    assert.ok(runtime.projectPortalOutbox.list({ projectId: "demo" }).every((record) => record.status === "sent"));
+  } finally {
+    runtime.runnerControl.close();
     runtime.state.close();
     await runtime.telegram.close();
     rmSync(root, { recursive: true, force: true });

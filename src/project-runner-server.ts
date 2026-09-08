@@ -792,6 +792,22 @@ export class ProjectRunnerServer {
       json(response, 200, { job: await this.cancelJob(projectId, workspaceId, jobId) });
       return;
     }
+    if (request.method === "GET" && url.pathname === "/jobs/lookup") {
+      const projectId = url.searchParams.get("project") ?? "";
+      const workspaceId = url.searchParams.get("workspace") ?? "";
+      const jobId = url.searchParams.get("job") ?? "";
+      const key = url.searchParams.get("idempotency_key") ?? "";
+      if (!PROJECT_ID.test(projectId) || !WORKSPACE_ID.test(workspaceId) ||
+          (jobId ? !JOB_ID.test(jobId) || Boolean(key) : !IDEMPOTENCY_KEY.test(key))) {
+        throw new RunnerHttpError(400, "invalid runner lookup scope");
+      }
+      this.projectConfig(projectId, workspaceId);
+      const job = jobId
+        ? this.storedJob(projectId, jobId)
+        : this.idempotentJob(projectId, workspaceId, key);
+      json(response, 200, { job: job && job.workspaceId === workspaceId ? job : null });
+      return;
+    }
     if (request.method === "GET" && url.pathname === "/jobs") {
       const projectId = url.searchParams.get("project") ?? "";
       const workspaceId = url.searchParams.get("workspace") ?? "";

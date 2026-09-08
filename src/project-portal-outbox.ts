@@ -66,6 +66,9 @@ export type ProjectPortalOutboxContext = {
   resultId: string;
 } | {
   kind: "external-message";
+} | {
+  kind: "runner-notice";
+  conversationId: string | null;
 };
 
 export interface ProjectPortalOutboxRecord {

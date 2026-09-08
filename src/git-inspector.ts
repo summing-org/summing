@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { lstat, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve, sep } from "node:path";
+import { withRepositoryOperation } from "./repository-operation.js";
 import type {
   RepositoryDiagnosticCode,
   RepositorySshCredential,
@@ -1187,6 +1188,22 @@ export class GitInspector {
         ? `refs/remotes/origin/${target.branch}`
         : `refs/heads/${target.branch}`,
     );
+  }
+
+  async resolvePublishedDefaultRevision(): Promise<string> {
+    return withRepositoryOperation(await this.commonDirectory(), async () => {
+      const endpoints = await this.repositoryEndpoints();
+      const fetched = await this.git([
+        "fetch", "--prune", "--", endpoints.fetch, "+refs/heads/*:refs/remotes/origin/*",
+      ], { allowFailure: true, env: this.repositoryEnvironment() });
+      if (fetched.code !== 0) {
+        const diagnostic = gitDiagnostic(fetched, "read");
+        throw new GitInspectorError(diagnostic.message, diagnostic.code);
+      }
+      const target = await this.defaultRemoteBranch();
+      if (!target.published) throw new GitInspectorError("published default branch is unavailable");
+      return this.resolveRevision(`refs/remotes/origin/${target.branch}`);
+    });
   }
 
   private async removePrivateIndexEntries(env: NodeJS.ProcessEnv): Promise<void> {

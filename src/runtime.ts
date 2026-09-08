@@ -867,24 +867,10 @@ export class SummingRuntime {
       resolve(config.dataDir, "runner-control.sqlite3"),
       this.projects,
       this.viewer.runner,
-      async (projectId, message, conversationId) => {
-        if (conversationId) {
-          const conversation = this.state.get(conversationId);
-          if (conversation.projectId !== projectId) {
-            throw new Error("runner notification conversation changed project scope");
-          }
-          await this.telegram.sendMessage(
-            conversation.chatId,
-            `Раннер ${projectId}: ${message}`,
-            { topicId: conversation.topicId },
-          );
-          return;
-        }
-        await Promise.allSettled(
-          this.projects.owners(projectId).map((ownerId) =>
-            this.telegram.sendMessage(ownerId, `⚠️ Раннер ${projectId}: ${message}`),
-          ),
-        );
+      async (projectId, message, conversationId, delivery) => {
+        if (!delivery) throw new Error("runner notification requires a durable delivery key");
+        this.queueRunnerNotice(projectId, delivery.workspaceId, message, delivery.key, conversationId);
+        this.scheduleProjectPortalOutboxDrain();
       },
       Date.now,
       15_000,
@@ -911,7 +897,7 @@ export class SummingRuntime {
           notification.chatId,
           notification.topicId,
         );
-        if (!destination) return false;
+        if (!destination || !this.projects.canAccess(createdBy, job.projectId)) return false;
         this.projectPortalOutbox.enqueueTopic({
           projectId: job.projectId,
           workspaceId: job.workspaceId,
@@ -921,9 +907,13 @@ export class SummingRuntime {
           createdBy,
           context: { kind: "external-message" },
         });
-        await this.drainProjectPortalOutbox();
+        this.scheduleProjectPortalOutboxDrain();
         return true;
       },
+      async (projectId, workspaceId) => new GitInspector(
+        this.projects.project(projectId).workspace(workspaceId).path,
+        await this.viewer.repositoryCredentials.inspect(projectId, workspaceId),
+      ),
     );
     this.semaphore = new Semaphore(config.maxParallelConversations);
   }
@@ -1825,6 +1815,28 @@ export class SummingRuntime {
     }
   }
 
+  private queueRunnerNotice(
+    projectId: string, workspaceId: string, message: string, key: string, conversationId?: string,
+  ): void {
+    const conversation = conversationId ? this.state.get(conversationId) : null;
+    if (conversation && (conversation.projectId !== projectId || conversation.workspaceId !== workspaceId)) {
+      throw new Error("runner notification conversation changed scope");
+    }
+    const destinations = conversation
+      ? [{ chatId: conversation.chatId, topicId: conversation.topicId }]
+      : this.projects.owners(projectId).map((ownerId) => ({ chatId: ownerId, topicId: 0 }));
+    for (const destination of destinations) {
+      this.projectPortalOutbox.enqueueTopic({
+        projectId, workspaceId,
+        destination: { id: `runner-notice:${destination.chatId}:${destination.topicId}`, ...destination },
+        text: Array.from(`${conversation ? "" : "⚠️ "}Раннер ${projectId}: ${message}`).slice(0, 3500).join(""),
+        idempotencyKey: `runner-notice:${key}`,
+        createdBy: 0,
+        context: { kind: "runner-notice", conversationId: conversationId ?? null },
+      });
+    }
+  }
+
   private async sendRunnerPortalMessages(
     job: RunnerJob,
     conversationId: string,
@@ -1850,13 +1862,11 @@ export class SummingRuntime {
       return { message, portal };
     });
     if (missingKeys.size > 0) {
-      await this.telegram.sendMessage(
-        conversation.chatId,
+      this.queueRunnerNotice(job.projectId, job.workspaceId,
         "Runner подготовил внешние сообщения, но не найдены portal routes: " +
           `${[...missingKeys].join(", ")}. Проверьте Portal binding в Admin или настройте ` +
-          "для расписания exact deliveryTopic.",
-        { topicId: conversation.topicId },
-      );
+          "для расписания exact deliveryTopic.", `manual:${job.id}:missing-route`, conversationId);
+      this.scheduleProjectPortalOutboxDrain();
       return true;
     }
     for (const { message, portal } of resolved) {
@@ -1883,7 +1893,7 @@ export class SummingRuntime {
         context: { kind: "runner-report", jobId: job.id, scheduleId: job.scheduleId ?? null },
       });
     }
-    await this.drainProjectPortalOutbox();
+    this.scheduleProjectPortalOutboxDrain();
     return true;
   }
 
@@ -1893,6 +1903,9 @@ export class SummingRuntime {
   ): Promise<boolean> {
     if (job.projectId !== schedule.projectId || job.workspaceId !== schedule.workspaceId) {
       throw new Error("scheduled report scope no longer matches its schedule");
+    }
+    if (!this.projects.canAccess(schedule.updatedBy, job.projectId)) {
+      throw new Error("schedule author no longer has access to the project");
     }
     const batch = await this.viewer.runner.portalMessages(job.projectId, job.workspaceId, job.id);
     let originConversationId: string | null = null;
@@ -1940,23 +1953,20 @@ export class SummingRuntime {
               }
             : null,
           idempotencyKey: `runner:${job.id}:${message.id}`,
-          createdBy: schedule.createdBy,
+          createdBy: schedule.updatedBy,
           originConversationId,
           context: { kind: "runner-report", jobId: job.id, scheduleId: schedule.id },
         });
       }
-      await this.drainProjectPortalOutbox();
+      this.scheduleProjectPortalOutboxDrain();
       return true;
     }
 
     if (schedule.originConversationId) {
-      await Promise.allSettled(this.projects.owners(job.projectId).map((ownerId) =>
-        this.telegram.sendMessage(
-          ownerId,
-          `⚠️ Расписание «${schedule.name}» сформировало отчёт, но топик доставки не настроен. ` +
-            "Укажите топик по имени в основном топике проекта.",
-        )
-      ));
+      this.queueRunnerNotice(job.projectId, job.workspaceId,
+        `Расписание «${schedule.name}» сформировало отчёт, но топик доставки не настроен. ` +
+          "Укажите топик по имени в основном топике проекта.", `schedule:${job.id}:missing-destination`);
+      this.scheduleProjectPortalOutboxDrain();
       return true;
     }
 
@@ -1973,13 +1983,11 @@ export class SummingRuntime {
       return { message, portal };
     });
     if (missingKeys.size > 0) {
-      await Promise.allSettled(this.projects.owners(job.projectId).map((ownerId) =>
-        this.telegram.sendMessage(
-          ownerId,
-          `⚠️ Расписание «${schedule.name}» сформировало отчёт, но старый маршрут ` +
-            `${[...missingKeys].join(", ")} не найден. Укажите топик доставки по имени.`,
-        )
-      ));
+      this.queueRunnerNotice(job.projectId, job.workspaceId,
+        `Расписание «${schedule.name}» сформировало отчёт, но старый маршрут ` +
+          `${[...missingKeys].join(", ")} не найден. Укажите топик доставки по имени.`,
+        `schedule:${job.id}:missing-route`);
+      this.scheduleProjectPortalOutboxDrain();
       return true;
     }
     for (const { message, portal } of legacy) {
@@ -2001,12 +2009,12 @@ export class SummingRuntime {
             }
           : null,
         idempotencyKey: `runner:${job.id}:${message.id}`,
-        createdBy: schedule.createdBy,
+        createdBy: schedule.updatedBy,
         originConversationId,
         context: { kind: "runner-report", jobId: job.id, scheduleId: schedule.id },
       });
     }
-    await this.drainProjectPortalOutbox();
+    this.scheduleProjectPortalOutboxDrain();
     return true;
   }
 
@@ -6364,7 +6372,21 @@ export class SummingRuntime {
   ): Promise<void> {
     let transportAccepted = false;
     try {
-      if ((record.destinationType ?? "binding") === "topic") {
+      if ((record.context?.kind === "runner-report" || record.idempotencyKey.startsWith("runner-lifecycle:")) &&
+          !this.projects.canAccess(record.createdBy, record.projectId)) {
+        throw new Error("runner delivery author no longer has access to the project");
+      }
+      if (record.context?.kind === "runner-notice") {
+        if (record.context.conversationId) {
+          const conversation = this.state.get(record.context.conversationId);
+          if (conversation.projectId !== record.projectId || conversation.workspaceId !== record.workspaceId ||
+              conversation.chatId !== record.chatId || conversation.topicId !== record.topicId) {
+            throw new Error("runner notification conversation changed scope before delivery");
+          }
+        } else if (record.topicId !== 0 || !this.projects.owners(record.projectId).includes(record.chatId)) {
+          throw new Error("runner notification recipient is no longer a project owner");
+        }
+      } else if ((record.destinationType ?? "binding") === "topic") {
         if (
           record.context?.kind === "external-message" &&
           !this.state.projectTopicDestination(
