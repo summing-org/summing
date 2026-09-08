@@ -156,6 +156,7 @@ export const RUNNER_DYNAMIC_TOOLS: DynamicToolNamespaceSpec[] = [{
           },
           enabled: { type: "boolean" },
           misfireGraceMinutes: { type: "integer", minimum: 0, maximum: 1440 },
+          catchUp: { type: "boolean", description: "Explicitly catch up a past occurrence within grace when creating, resuming, or changing timing. Default false: future occurrences only." },
           deliveryTopic: {
             type: "string",
             minLength: 1,
@@ -212,9 +213,21 @@ export const RUNNER_DYNAMIC_TOOLS: DynamicToolNamespaceSpec[] = [{
         properties: {
           scheduleId: { type: "string" },
           enabled: { type: "boolean" },
+          catchUp: { type: "boolean", description: "Catch up the last missed occurrence on resume only if the owner explicitly requested it; default false." },
         },
         required: ["scheduleId", "enabled"],
       },
+    },
+    {
+      type: "function",
+      name: "execution_resolve",
+      description: "Inspect an exact unconfirmed execution from inspect.executions. 'check' asks the runner again and attaches a found job. 'close_unconfirmed' only on an explicit owner instruction after investigating the missing job and acknowledging that a late accepted job may still run: closes tracking and unblocks future occurrences, without submitting a new job. Never close automatically or infer this from a normal resume request.",
+      inputSchema: { ...OBJECT_SCHEMA, properties: {
+        executionId: { type: "string" },
+        resolution: { type: "string", enum: ["check", "close_unconfirmed"] },
+        reason: { type: "string", maxLength: 1000 },
+        acknowledgeDuplicateRisk: { type: "boolean" },
+      }, required: ["executionId", "resolution"] },
     },
     {
       type: "function",
@@ -444,8 +457,13 @@ export async function executeRunnerTool(
         context,
         requiredString(args, "scheduleId"),
         args.enabled,
+        args.catchUp === undefined ? false : args.catchUp as boolean,
       ));
     }
+    case "execution_resolve":
+      return result(await control.resolveExecution(context, requiredString(args, "executionId"),
+        requiredString(args, "resolution") as "check" | "close_unconfirmed",
+        typeof args.reason === "string" ? args.reason : "", args.acknowledgeDuplicateRisk === true));
     case "artifacts":
       return result(await control.artifacts(
         context,

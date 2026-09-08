@@ -220,7 +220,7 @@ export const VIEWER_JS = `
   const sessionUrl=()=>"/api/viewer/session?conversation="+encodeURIComponent(state.conversation);
   async function loadSession(){
     if(!state.conversation)throw new Error("Conversation не указан. Откройте viewer из команды /files.");
-    await waitForAuthentication();await loadOverview();
+    await waitForAuthentication();await loadOverview();void loadOperations();
     try{
       state.session=await api(sessionUrl());
       const repo=state.session.repository;

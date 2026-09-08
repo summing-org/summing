@@ -221,6 +221,14 @@ interface StoredRunnerService {
   activeDeploymentId: string | null;
   deployments: StoredServiceDeployment[];
   lastOperation?: StoredServiceOperation;
+  pendingOperation?: {
+    operation: StoredServiceOperation;
+    targetDeploymentId: string;
+    previousDeploymentId: string | null;
+    previousDesiredState: RunnerServiceDesiredState;
+    discardDeploymentId?: string;
+    phase: "prepared" | "applying" | "verifying" | "restoring";
+  };
   error?: string;
   updatedAt: string;
 }
@@ -450,7 +458,7 @@ export class ProjectRunnerServer {
     this.runtimeEnvironmentRoot = resolve(socketPath, "..", "environments");
     mkdirSync(this.runtimeEnvironmentRoot, { recursive: true, mode: 0o700 });
     for (const entry of readdirSync(this.runtimeEnvironmentRoot)) {
-      if (!/^[0-9a-f-]{36}\.env$/.test(entry)) continue;
+      if (!/^(?:service-)?[0-9a-f-]{36}\.env$/.test(entry)) continue;
       const path = resolve(this.runtimeEnvironmentRoot, entry);
       const metadata = lstatSync(path);
       if (metadata.isFile() && !metadata.isSymbolicLink()) rmSync(path);
@@ -465,6 +473,7 @@ export class ProjectRunnerServer {
 
   async start(): Promise<void> {
     if (this.server) return;
+    await this.recoverServiceOperations();
     if (existsSync(this.socketPath)) {
       const metadata = lstatSync(this.socketPath);
       if (!metadata.isSocket()) throw new Error(`refusing to replace non-socket ${this.socketPath}`);
@@ -1365,7 +1374,7 @@ export class ProjectRunnerServer {
       "deploying", "running", "stopped", "unhealthy", "failed",
     ]);
     const deploymentsValid = Array.isArray(state.deployments) &&
-      state.deployments.length <= SERVICE_DEPLOYMENT_RETENTION &&
+      state.deployments.length <= SERVICE_DEPLOYMENT_RETENTION + (state.pendingOperation ? 1 : 0) &&
       state.deployments.every((deployment) => {
         if (!deployment || typeof deployment !== "object" || Array.isArray(deployment)) return false;
         const deploymentId = String(deployment.deploymentId ?? "");
@@ -1394,20 +1403,37 @@ export class ProjectRunnerServer {
             (deployment.containerPort !== null &&
               /^\/[A-Za-z0-9._~!$&'()*+,;=:@%/-]{0,255}$/.test(deployment.healthPath))) &&
           Number.isSafeInteger(deployment.startupTimeoutSeconds) &&
-          deployment.startupTimeoutSeconds >= 5 && deployment.startupTimeoutSeconds <= 300;
+          deployment.startupTimeoutSeconds >= 5 && deployment.startupTimeoutSeconds <= 300 &&
+          (deployment.heartbeatPath === undefined ||
+            (typeof deployment.heartbeatPath === "string" && deployment.heartbeatPath.length <= 200 &&
+              /^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*$/.test(deployment.heartbeatPath) &&
+              !deployment.heartbeatPath.split("/").some((part) => part === "." || part === "..") &&
+              Number.isSafeInteger(deployment.heartbeatTimeoutSeconds) &&
+              Number(deployment.heartbeatTimeoutSeconds) >= 10 && Number(deployment.heartbeatTimeoutSeconds) <= 3600));
       });
     const operationValid = state.lastOperation === undefined ||
       (state.lastOperation !== null && typeof state.lastOperation === "object" &&
         IDEMPOTENCY_KEY.test(state.lastOperation.idempotencyKey) &&
         (state.lastOperation.action === "deploy" || SERVICE_ACTIONS.has(state.lastOperation.action)) &&
         (state.lastOperation.releaseId === undefined || JOB_ID.test(state.lastOperation.releaseId)));
+    const pending = state.pendingOperation;
+    const pendingValid = pending === undefined || (pending && typeof pending === "object" &&
+      pending.operation && IDEMPOTENCY_KEY.test(pending.operation.idempotencyKey) &&
+      (pending.operation.action === "deploy" || SERVICE_ACTIONS.has(pending.operation.action)) &&
+      (pending.operation.releaseId === undefined || JOB_ID.test(pending.operation.releaseId)) &&
+      ["prepared", "applying", "verifying", "restoring"].includes(pending.phase) &&
+      desiredStates.has(pending.previousDesiredState) && deploymentsValid &&
+      state.deployments.some((item) => item.deploymentId === pending.targetDeploymentId) &&
+      (pending.discardDeploymentId === undefined || (pending.discardDeploymentId !== pending.targetDeploymentId &&
+        state.deployments.some((item) => item.deploymentId === pending.discardDeploymentId))) &&
+      (pending.previousDeploymentId === null || state.deployments.some((item) => item.deploymentId === pending.previousDeploymentId)));
     if (state.version !== 1 || state.projectId !== projectId || state.workspaceId !== workspaceId ||
       state.name !== name || !SERVICE_NAME.test(state.name) ||
       !desiredStates.has(state.desiredState) || !statuses.has(state.status) ||
       !deploymentsValid ||
       new Set(state.deployments.map((deployment) => deployment.deploymentId)).size !==
         state.deployments.length ||
-      !operationValid || !Number.isFinite(Date.parse(state.updatedAt)) ||
+      !operationValid || !pendingValid || !Number.isFinite(Date.parse(state.updatedAt)) ||
       (state.error !== undefined && typeof state.error !== "string") ||
       (state.activeDeploymentId !== null &&
         !state.deployments.some((deployment) => deployment.deploymentId === state.activeDeploymentId))) {
@@ -1467,7 +1493,8 @@ export class ProjectRunnerServer {
   private async serviceView(state: StoredRunnerService): Promise<RunnerService> {
     const current = this.activeServiceDeployment(state);
     const previous = state.deployments.find(
-      (deployment) => deployment.deploymentId !== state.activeDeploymentId,
+      (deployment) => deployment.deploymentId !== state.activeDeploymentId &&
+        deployment.deploymentId !== state.pendingOperation?.targetDeploymentId,
     ) ?? null;
     let status = state.status;
     if (current) {
@@ -1476,8 +1503,7 @@ export class ProjectRunnerServer {
         status = running ? "failed" : "stopped";
       } else if (!running) {
         status = "failed";
-      } else if (current.healthPath && current.hostPort &&
-        !(await this.httpServiceHealthy(current.hostPort, current.healthPath))) {
+      } else if (!(await this.serviceHealthy(state, current))) {
         status = "unhealthy";
       } else {
         status = "running";
@@ -1488,12 +1514,14 @@ export class ProjectRunnerServer {
       workspaceId: state.workspaceId,
       name: state.name,
       desiredState: state.desiredState,
-      status,
+      status: state.pendingOperation ? state.status === "failed" ? "failed" : "deploying" : status,
       current: this.serviceRevision(current),
       previous: this.serviceRevision(previous),
       localEndpoint: current?.hostPort ? `http://127.0.0.1:${current.hostPort}` : null,
       ...(state.error ? { error: state.error } : {}),
       updatedAt: state.updatedAt,
+      checkedAt: new Date().toISOString(),
+      restartCount: current ? await this.serviceRestartCount(current) : null,
     };
   }
 
@@ -1631,12 +1659,34 @@ export class ProjectRunnerServer {
     });
   }
 
-  private async waitForService(deployment: StoredServiceDeployment): Promise<void> {
+  private async serviceHealthy(state: StoredRunnerService, deployment: StoredServiceDeployment): Promise<boolean> {
+    if (deployment.healthPath && deployment.hostPort &&
+        !(await this.httpServiceHealthy(deployment.hostPort, deployment.healthPath))) return false;
+    if (!deployment.heartbeatPath) return true;
+    try {
+      const project = this.projectConfig(state.projectId, state.workspaceId);
+      const root = realpathSync(resolve(project.dataPath, "services", state.workspaceId, state.name));
+      const path = resolve(root, deployment.heartbeatPath);
+      const metadata = lstatSync(path);
+      const age = Date.now() - metadata.mtimeMs;
+      return metadata.isFile() && !metadata.isSymbolicLink() && realpathSync(path).startsWith(`${root}/`) &&
+        age >= -60_000 && age <= Number(deployment.heartbeatTimeoutSeconds) * 1_000;
+    } catch { return false; }
+  }
+
+  private async serviceRestartCount(deployment: StoredServiceDeployment): Promise<number | null> {
+    const result = await run(this.dockerBinary,
+      ["container", "inspect", "--format", "{{.RestartCount}}", deployment.containerName],
+      { cwd: this.dataRoot, timeoutMs: 30_000 });
+    const value = result.output.trim();
+    return result.code === 0 && /^\d+$/.test(value) && Number.isSafeInteger(Number(value)) ? Number(value) : null;
+  }
+
+  private async waitForService(deployment: StoredServiceDeployment, state: StoredRunnerService): Promise<void> {
     const deadline = Date.now() + deployment.startupTimeoutSeconds * 1_000;
     for (;;) {
       if (await this.containerRunning(deployment.containerName)) {
-        if (!deployment.healthPath || !deployment.hostPort ||
-          await this.httpServiceHealthy(deployment.hostPort, deployment.healthPath)) return;
+        if (await this.serviceHealthy(state, deployment)) return;
       }
       if (Date.now() >= deadline) throw new Error("service did not become healthy before startup timeout");
       await new Promise((resolveWait) => setTimeout(resolveWait, 500));
@@ -1728,7 +1778,7 @@ export class ProjectRunnerServer {
         redactions: access.redactions,
       });
       if (launched.code !== 0) throw new Error(`service container start exited with code ${launched.code}`);
-      await this.waitForService(deployment);
+      await this.waitForService(deployment, state);
     } finally {
       if (access.envPath) rmSync(access.envPath, { force: true });
       access.redactions.fill("");
@@ -1744,14 +1794,142 @@ export class ProjectRunnerServer {
     if (stopped.code !== 0) throw new Error(`service container stop exited with code ${stopped.code}`);
   }
 
-  private async restoreServiceContainer(deployment: StoredServiceDeployment | null): Promise<void> {
-    if (!deployment) return;
-    const started = await run(this.dockerBinary, ["start", deployment.containerName], {
-      cwd: this.dataRoot,
-      timeoutMs: 45_000,
-    });
-    if (started.code !== 0) throw new Error("previous service container could not be restored");
-    await this.waitForService(deployment);
+  private async ensureServiceContainer(state: StoredRunnerService, deployment: StoredServiceDeployment): Promise<void> {
+    this.assertServiceFiles(state, deployment);
+    if (!(await this.containerRunning(deployment.containerName))) {
+      const started = await run(this.dockerBinary, ["start", deployment.containerName],
+        { cwd: this.dataRoot, timeoutMs: 45_000 });
+      if (started.code !== 0) {
+        const exists = await run(this.dockerBinary, ["container", "inspect", deployment.containerName],
+          { cwd: this.dataRoot, timeoutMs: 30_000 });
+        if (exists.code === 0) throw new Error("retained service container could not be started");
+        await this.launchServiceContainer(state, deployment, this.projectConfig(state.projectId, state.workspaceId));
+      }
+    }
+    await this.waitForService(deployment, state);
+  }
+
+  private assertServiceFiles(state: StoredRunnerService, deployment: StoredServiceDeployment): void {
+    const directory = this.serviceDeploymentDirectory(state.projectId, state.workspaceId, state.name, deployment.deploymentId);
+    this.assertReleaseFile(resolve(directory, "release-config.json"), deployment.configSha256);
+    if (deployment.environmentSha256) this.assertReleaseFile(resolve(directory, "environment.json"), deployment.environmentSha256);
+  }
+
+  private async recoverServiceOperations(): Promise<void> {
+    const root = resolve(this.dataRoot, "projects");
+    if (!existsSync(root)) return;
+    for (const projectId of readdirSync(root).filter((name) => PROJECT_ID.test(name))) {
+      const services = resolve(root, projectId, "services");
+      if (!existsSync(services)) continue;
+      for (const workspaceId of readdirSync(services).filter((name) => WORKSPACE_ID.test(name))) {
+        for (const name of readdirSync(resolve(services, workspaceId)).filter((entry) => SERVICE_NAME.test(entry))) {
+          try {
+            const state = this.storedService(projectId, workspaceId, name, false);
+            if (!state) continue;
+            // Older releases persisted the candidate as active before stopping the old container.
+            if (!state.pendingOperation && state.status === "deploying" && state.activeDeploymentId) {
+              const target = this.activeServiceDeployment(state)!;
+              const previous = state.deployments.find((item) => item.deploymentId !== target.deploymentId);
+              state.pendingOperation = {
+                operation: { action: "deploy", releaseId: target.releaseId,
+                  idempotencyKey: createHash("sha256").update(`legacy-service:${target.deploymentId}`).digest("hex") },
+                targetDeploymentId: target.deploymentId, previousDeploymentId: previous?.deploymentId ?? null,
+                previousDesiredState: state.desiredState, phase: "applying",
+              };
+              state.activeDeploymentId = previous?.deploymentId ?? null;
+              this.saveService(state);
+            }
+            if (state.pendingOperation) await this.performServiceOperation(state, true);
+          } catch (error) { console.warn(`could not recover service ${projectId}/${workspaceId}/${name}`, error); }
+        }
+      }
+    }
+  }
+
+  private async removeServiceDeployment(state: StoredRunnerService, deployment: StoredServiceDeployment): Promise<void> {
+    const removed = await run(this.dockerBinary, ["rm", "--force", deployment.containerName],
+      { cwd: this.dataRoot, timeoutMs: 30_000 });
+    if (removed.code !== 0 && await this.containerRunning(deployment.containerName)) {
+      throw new Error("candidate service container could not be removed");
+    }
+    rmSync(this.serviceDeploymentDirectory(state.projectId, state.workspaceId, state.name, deployment.deploymentId),
+      { recursive: true, force: true });
+  }
+
+  private async performServiceOperation(state: StoredRunnerService, recovering: boolean): Promise<void> {
+    const pending = state.pendingOperation!;
+    const target = state.deployments.find((item) => item.deploymentId === pending.targetDeploymentId)!;
+    const previous = state.deployments.find((item) => item.deploymentId === pending.previousDeploymentId) ?? null;
+    const action = pending.operation.action;
+    const touch = () => { state.updatedAt = new Date().toISOString(); this.saveService(state); };
+    try {
+      if (pending.phase === "restoring") throw new Error(state.error || "resuming interrupted rollback");
+      if (action !== "stop") this.assertServiceFiles(state, target);
+      pending.phase = "applying";
+      touch();
+      if (action === "deploy") {
+        if (recovering) {
+          if (!(await this.containerRunning(target.containerName))) throw new Error("service deployment was interrupted before startup completed");
+        } else {
+          if (previous) await this.stopServiceContainer(previous.containerName);
+          await this.launchServiceContainer(state, target, this.projectConfig(state.projectId, state.workspaceId));
+        }
+      } else if (action === "stop") {
+        for (const deployment of state.deployments) await this.stopServiceContainer(deployment.containerName);
+      } else {
+        if (action === "rollback" && previous) await this.stopServiceContainer(previous.containerName);
+        if (action === "restart" && !recovering && await this.containerRunning(target.containerName)) {
+          const restarted = await run(this.dockerBinary, ["restart", "--time", "30", target.containerName],
+            { cwd: this.dataRoot, timeoutMs: 60_000 });
+          if (restarted.code !== 0) throw new Error("service container could not be restarted");
+        }
+        await this.ensureServiceContainer(state, target);
+      }
+      pending.phase = "verifying";
+      touch();
+      if (action !== "stop") await this.waitForService(target, state);
+      const retained = [target, ...state.deployments.filter((item) => item.deploymentId !== target.deploymentId &&
+        item.deploymentId !== pending.discardDeploymentId)]
+        .slice(0, SERVICE_DEPLOYMENT_RETENTION);
+      const removed = state.deployments.filter((item) => !retained.includes(item));
+      state.activeDeploymentId = target.deploymentId;
+      state.deployments = retained;
+      state.desiredState = action === "stop" ? "stopped" : "running";
+      state.status = action === "stop" ? "stopped" : "running";
+      state.lastOperation = pending.operation;
+      delete state.pendingOperation;
+      delete state.error;
+      touch();
+      for (const stale of removed) await this.removeServiceDeployment(state, stale).catch((error) =>
+        console.warn("could not prune retained service deployment", error));
+    } catch (error) {
+      state.error = error instanceof Error ? error.message : String(error);
+      state.status = "failed";
+      // Keep the journal until compensation completes, including across another crash.
+      pending.phase = "restoring";
+      state.pendingOperation = pending;
+      touch();
+      try {
+        if (action === "deploy") await this.removeServiceDeployment(state, target);
+        else if (action === "rollback" && target !== previous) await this.stopServiceContainer(target.containerName);
+        if (previous) {
+          if (pending.previousDesiredState === "running") await this.ensureServiceContainer(state, previous);
+          else await this.stopServiceContainer(previous.containerName);
+        }
+        state.activeDeploymentId = previous?.deploymentId ?? null;
+        state.desiredState = pending.previousDesiredState;
+        if (action === "deploy") state.deployments = state.deployments.filter((item) => item !== target);
+        state.status = previous ? (state.desiredState === "running" ? "running" : "stopped") : "failed";
+        state.lastOperation = pending.operation;
+        delete state.pendingOperation;
+        touch();
+      } catch (restoreError) {
+        state.error += `; recovery: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`;
+        touch();
+        throw restoreError;
+      }
+      if (!recovering) throw new RunnerHttpError(409, `service ${action === "deploy" ? "deployment" : action} failed: ${state.error}`);
+    }
   }
 
   private async deployService(
@@ -1763,13 +1941,17 @@ export class ProjectRunnerServer {
   ): Promise<RunnerService> {
     const scope = this.serviceOperationScope(projectId, workspaceId, name);
     const operation: StoredServiceOperation = { idempotencyKey, action: "deploy", releaseId: sourceJobId };
-    const existing = this.storedService(projectId, workspaceId, name, false);
-    if (existing && this.assertServiceOperation(existing, operation)) return await this.serviceView(existing);
+    let existing = this.storedService(projectId, workspaceId, name, false);
     if (this.activeServiceOperations.has(scope)) {
       throw new RunnerHttpError(409, "another service operation is already running");
     }
     this.activeServiceOperations.add(scope);
     try {
+      if (existing?.pendingOperation) {
+        await this.performServiceOperation(existing, true);
+        existing = this.storedService(projectId, workspaceId, name, false);
+      }
+      if (existing && this.assertServiceOperation(existing, operation)) return await this.serviceView(existing);
       const project = this.projectConfig(projectId, workspaceId);
       const release = this.storedJob(projectId, sourceJobId);
       if (release.workspaceId !== workspaceId || release.status !== "completed" ||
@@ -1837,61 +2019,15 @@ export class ProjectRunnerServer {
         copyFileSync(environmentPath, resolve(deploymentDirectory, "environment.json"), constants.COPYFILE_EXCL);
         chmodSync(resolve(deploymentDirectory, "environment.json"), 0o600);
       }
-      const previousDeployments = [...state.deployments];
-      const retained = [deployment, ...previousDeployments]
-        .filter((item, index, all) =>
-          all.findIndex((candidate) => candidate.deploymentId === item.deploymentId) === index)
-        .slice(0, SERVICE_DEPLOYMENT_RETENTION);
-      const removed = previousDeployments.filter(
-        (item) => !retained.some((candidate) => candidate.deploymentId === item.deploymentId),
-      );
-      state.activeDeploymentId = deploymentId;
-      state.deployments = retained;
-      state.desiredState = "running";
+      state.pendingOperation = { operation, targetDeploymentId: deploymentId,
+        previousDeploymentId: current?.deploymentId ?? null,
+        previousDesiredState: state.desiredState, phase: "prepared" };
+      state.deployments = [deployment, ...state.deployments];
       state.status = "deploying";
       delete state.error;
       state.updatedAt = deployedAt;
       this.saveService(state);
-      try {
-        if (current) await this.stopServiceContainer(current.containerName);
-        await this.launchServiceContainer(state, deployment, project);
-      } catch (error) {
-        await run(this.dockerBinary, ["rm", "--force", deployment.containerName], {
-          cwd: this.dataRoot,
-          timeoutMs: 30_000,
-        }).catch(() => ({ code: 1, output: "" }));
-        rmSync(deploymentDirectory, { recursive: true, force: true });
-        let restored = false;
-        try {
-          await this.restoreServiceContainer(current);
-          restored = current !== null;
-        } catch {
-          restored = false;
-        }
-        state.activeDeploymentId = current?.deploymentId ?? null;
-        state.deployments = previousDeployments;
-        state.status = restored ? "running" : "failed";
-        state.error = error instanceof Error ? error.message : String(error);
-        state.updatedAt = new Date().toISOString();
-        this.saveService(state);
-        throw new RunnerHttpError(409, `service deployment failed: ${state.error}`);
-      }
-      state.desiredState = "running";
-      state.status = "running";
-      state.lastOperation = operation;
-      delete state.error;
-      state.updatedAt = new Date().toISOString();
-      this.saveService(state);
-      for (const stale of removed) {
-        await run(this.dockerBinary, ["rm", "--force", stale.containerName], {
-          cwd: this.dataRoot,
-          timeoutMs: 30_000,
-        }).catch(() => ({ code: 1, output: "" }));
-        rmSync(
-          this.serviceDeploymentDirectory(projectId, workspaceId, name, stale.deploymentId),
-          { recursive: true, force: true },
-        );
-      }
+      await this.performServiceOperation(state, false);
       return await this.serviceView(state);
     } finally {
       this.activeServiceOperations.delete(scope);
@@ -1907,64 +2043,35 @@ export class ProjectRunnerServer {
   ): Promise<RunnerService> {
     const scope = this.serviceOperationScope(projectId, workspaceId, name);
     const operation: StoredServiceOperation = { idempotencyKey, action };
-    const state = this.storedService(projectId, workspaceId, name)!;
-    if (this.assertServiceOperation(state, operation)) return await this.serviceView(state);
+    let state = this.storedService(projectId, workspaceId, name)!;
     if (this.activeServiceOperations.has(scope)) {
       throw new RunnerHttpError(409, "another service operation is already running");
     }
     this.activeServiceOperations.add(scope);
     try {
-      const current = this.activeServiceDeployment(state);
-      if (!current) throw new RunnerHttpError(409, "runner service has no deployed Release");
-      state.desiredState = action === "stop" ? "stopped" : "running";
-      if (action === "stop") {
-        await this.stopServiceContainer(current.containerName);
-        state.status = "stopped";
-      } else if (action === "start") {
-        if (!(await this.containerRunning(current.containerName))) {
-          const started = await run(this.dockerBinary, ["start", current.containerName], {
-            cwd: this.dataRoot,
-            timeoutMs: 45_000,
-          });
-          if (started.code !== 0) throw new RunnerHttpError(409, "service container could not be started");
-        }
-        await this.waitForService(current);
-        state.status = "running";
-      } else if (action === "restart") {
-        const restarted = await run(this.dockerBinary, ["restart", "--time", "30", current.containerName], {
-          cwd: this.dataRoot,
-          timeoutMs: 60_000,
-        });
-        if (restarted.code !== 0) throw new RunnerHttpError(409, "service container could not be restarted");
-        await this.waitForService(current);
-        state.status = "running";
-      } else {
-        const previous = state.deployments.find(
-          (deployment) => deployment.deploymentId !== state.activeDeploymentId,
-        );
-        if (!previous) throw new RunnerHttpError(409, "runner service has no previous Release");
-        await this.stopServiceContainer(current.containerName);
-        try {
-          await this.restoreServiceContainer(previous);
-        } catch (error) {
-          await this.restoreServiceContainer(current).catch(() => undefined);
-          throw error;
-        }
-        state.activeDeploymentId = previous.deploymentId;
-        state.deployments = [previous, current];
-        state.status = "running";
+      const interruptedCandidate = state.pendingOperation?.operation.action === "deploy"
+        ? state.pendingOperation.targetDeploymentId : undefined;
+      if (state.pendingOperation && action !== "stop") {
+        await this.performServiceOperation(state, true);
+        state = this.storedService(projectId, workspaceId, name)!;
       }
-      state.lastOperation = operation;
-      delete state.error;
+      if (this.assertServiceOperation(state, operation)) return await this.serviceView(state);
+      const current = this.activeServiceDeployment(state) ?? (action === "stop"
+        ? state.deployments.find((item) => item.deploymentId === state.pendingOperation?.targetDeploymentId) : null);
+      if (!current) throw new RunnerHttpError(409, "runner service has no deployed Release");
+      const target = action === "rollback"
+        ? state.deployments.find((item) => item.deploymentId !== current.deploymentId)
+        : current;
+      if (!target) throw new RunnerHttpError(409, "runner service has no previous Release");
+      state.pendingOperation = { operation, targetDeploymentId: target.deploymentId,
+        previousDeploymentId: current.deploymentId, previousDesiredState: state.desiredState, phase: "prepared",
+        ...(action === "stop" && interruptedCandidate && interruptedCandidate !== target.deploymentId
+          ? { discardDeploymentId: interruptedCandidate } : {}) };
+      state.status = "deploying";
       state.updatedAt = new Date().toISOString();
       this.saveService(state);
+      await this.performServiceOperation(state, false);
       return await this.serviceView(state);
-    } catch (error) {
-      state.status = "failed";
-      state.error = error instanceof Error ? error.message : String(error);
-      state.updatedAt = new Date().toISOString();
-      this.saveService(state);
-      throw error;
     } finally {
       this.activeServiceOperations.delete(scope);
     }

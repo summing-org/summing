@@ -89,6 +89,8 @@ export interface RunnerSchedule {
   updatedBy: number;
   createdAt: string;
   updatedAt: string;
+  /** Earliest occurrence eligible after creation, a timing edit, or resume. */
+  activeFrom?: string;
 }
 
 export type RunnerScheduleExecutionStatus =
@@ -145,6 +147,7 @@ interface SchedulePlanPayload {
   operation: "upsert" | "delete";
   schedule?: RunnerSchedule;
   scheduleId?: string;
+  catchUp?: boolean;
 }
 
 export interface ArtifactPlanTarget {
@@ -171,6 +174,7 @@ export interface SchedulePlanInput {
   deliveryCondition?: RunnerDeliveryCondition;
   notifications?: RunnerLifecycleNotification[];
   clearNotifications?: boolean;
+  catchUp?: boolean;
 }
 
 export interface SchedulePlan {
@@ -221,6 +225,17 @@ export interface RunnerInspection {
 export interface RunnerArtifactView {
   job: RunnerJob;
   artifacts: RunnerArtifact[];
+}
+
+export interface RunnerOperationsSnapshot {
+  checkedAt: string | null;
+  lastSuccessAt: string | null;
+  available: boolean;
+  jobs: Array<{ id: string; action: string; status: string; revision: string; createdAt: string;
+    waitSeconds: number; queueReason: string | null; initiatedBy: number | null }>;
+  services: RunnerService[];
+  executions: Array<{ id: string; name: string; status: string; scheduledFor: string; reason: string | null; jobId: string | null }>;
+  deliveryFailures: Array<{ key: string; attempts: number; error: string; nextAttemptAt: string }>;
 }
 
 interface RunnerJobWatch {
@@ -372,6 +387,7 @@ function occurrenceAt(schedule: RunnerSchedule, epochMilliseconds: number): {
   scheduledFor: string;
 } | null {
   const minute = Math.floor(epochMilliseconds / 60_000) * 60_000;
+  if (schedule.activeFrom && minute < Date.parse(schedule.activeFrom)) return null;
   const parts = scheduleParts(minute, schedule.timeZone);
   if (parts.time !== schedule.time || !schedule.weekdays.includes(parts.weekday)) return null;
   return {
@@ -460,6 +476,15 @@ export class RunnerControlStore {
       );
       CREATE INDEX IF NOT EXISTS runner_schedules_scope
         ON runner_schedules(project_id, workspace_id, enabled, name);
+      CREATE TABLE IF NOT EXISTS runner_schedule_checks (
+        schedule_id TEXT PRIMARY KEY, checked_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS runner_service_observations (
+        project_id TEXT NOT NULL, workspace_id TEXT NOT NULL, name TEXT NOT NULL,
+        status TEXT NOT NULL, reported_status TEXT, consecutive INTEGER NOT NULL,
+        sequence INTEGER NOT NULL, checked_at TEXT NOT NULL,
+        PRIMARY KEY(project_id, workspace_id, name)
+      );
       CREATE TABLE IF NOT EXISTS runner_schedule_executions (
         id TEXT PRIMARY KEY,
         schedule_id TEXT NOT NULL,
@@ -631,6 +656,10 @@ export class RunnerControlStore {
     if (!scheduleColumns.some((column) => column.name === "version")) {
       this.db.exec("ALTER TABLE runner_schedules ADD COLUMN version INTEGER NOT NULL DEFAULT 1");
     }
+    if (!scheduleColumns.some((column) => column.name === "active_from")) {
+      this.db.exec("ALTER TABLE runner_schedules ADD COLUMN active_from TEXT");
+      this.db.exec("UPDATE runner_schedules SET active_from = created_at");
+    }
     const executionColumns = this.db.prepare("PRAGMA table_info(runner_schedule_executions)").all() as Row[];
     if (!executionColumns.some((column) => column.name === "schedule_snapshot_json")) {
       this.transaction(() => {
@@ -761,6 +790,11 @@ export class RunnerControlStore {
       } else {
         if (!payload.schedule) throw new RunnerControlError("schedule plan has no schedule");
         const schedule = { ...payload.schedule, version: (payload.expectedVersion ?? 0) + 1 };
+        const timingChanged = !current || current.time !== schedule.time || current.timeZone !== schedule.timeZone ||
+          JSON.stringify(current.weekdays) !== JSON.stringify(schedule.weekdays) || (!current.enabled && schedule.enabled);
+        const activeFrom = timingChanged
+          ? iso(nowMilliseconds - (payload.catchUp ? schedule.misfireGraceMinutes * 60_000 : 0))
+          : current.activeFrom ?? current.createdAt;
         this.db.prepare(`
           INSERT INTO runner_schedules
             (id, project_id, workspace_id, name, action, local_time, time_zone,
@@ -816,6 +850,9 @@ export class RunnerControlStore {
           iso(nowMilliseconds),
           schedule.version,
         );
+        this.db.prepare("UPDATE runner_schedules SET active_from = ? WHERE id = ?").run(activeFrom, schedule.id);
+        if (timingChanged) this.db.prepare(`INSERT INTO runner_schedule_checks(schedule_id, checked_at) VALUES (?, ?)
+          ON CONFLICT(schedule_id) DO UPDATE SET checked_at = excluded.checked_at`).run(schedule.id, iso(nowMilliseconds));
         result = this.schedule(schedule.id, schedule.projectId, schedule.workspaceId);
         if (!result) throw new RunnerControlError("schedule could not be stored");
       }
@@ -905,13 +942,44 @@ export class RunnerControlStore {
     enabled: boolean,
     actorUserId: number,
     nowMilliseconds: number,
+    catchUp = false,
   ): RunnerSchedule {
+    const current = this.schedule(id, projectId, workspaceId);
+    if (!current) throw new RunnerControlError("schedule was not found");
     const updated = this.db.prepare(`
-      UPDATE runner_schedules SET enabled = ?, updated_by = ?, updated_at = ?, version = version + 1
+      UPDATE runner_schedules SET enabled = ?, updated_by = ?, updated_at = ?, version = version + 1, active_from = ?
       WHERE id = ? AND project_id = ? AND workspace_id = ?
-    `).run(enabled ? 1 : 0, actorUserId, iso(nowMilliseconds), id, projectId, workspaceId);
+    `).run(enabled ? 1 : 0, actorUserId, iso(nowMilliseconds),
+      enabled && !current.enabled ? iso(nowMilliseconds - (catchUp ? current.misfireGraceMinutes * 60_000 : 0))
+        : current.activeFrom ?? current.createdAt, id, projectId, workspaceId);
     if (Number(updated.changes) !== 1) throw new RunnerControlError("schedule was not found");
     return this.schedule(id, projectId, workspaceId)!;
+  }
+
+  recordMissedOccurrences(schedule: RunnerSchedule, nowMilliseconds: number): void {
+    const row = this.db.prepare("SELECT checked_at FROM runner_schedule_checks WHERE schedule_id = ?").get(schedule.id) as Row | undefined;
+    const previous = row ? Date.parse(String(row.checked_at)) : Date.parse(schedule.activeFrom ?? schedule.createdAt);
+    const grace = schedule.misfireGraceMinutes * 60_000;
+    // Bounded recovery of offline history; normal ticks inspect at most a minute.
+    const from = Math.max(previous - grace, nowMilliseconds - 31 * 24 * 60 * 60_000);
+    const until = Math.floor(nowMilliseconds / 60_000) * 60_000 - grace;
+    this.transaction(() => {
+      const current = this.schedule(schedule.id, schedule.projectId, schedule.workspaceId);
+      if (!current?.enabled || current.version !== schedule.version) return;
+      for (let minute = Math.floor(from / 60_000) * 60_000; minute < until; minute += 60_000) {
+        const occurrence = occurrenceAt(schedule, minute);
+        if (!occurrence) continue;
+        this.db.prepare(`INSERT OR IGNORE INTO runner_schedule_executions
+          (id, schedule_id, project_id, workspace_id, occurrence_key, scheduled_for,
+           status, reason, created_at, updated_at, schedule_snapshot_json)
+          VALUES (?, ?, ?, ?, ?, ?, 'skipped', ?, ?, ?, ?)`)
+          .run(randomUUID(), schedule.id, schedule.projectId, schedule.workspaceId, occurrence.key, occurrence.scheduledFor,
+            `Пропущено: запуск не был принят в течение ${schedule.misfireGraceMinutes} мин. после назначенного времени`,
+            iso(nowMilliseconds), iso(nowMilliseconds), JSON.stringify(schedule));
+      }
+      this.db.prepare(`INSERT INTO runner_schedule_checks(schedule_id, checked_at) VALUES (?, ?)
+        ON CONFLICT(schedule_id) DO UPDATE SET checked_at = excluded.checked_at`).run(schedule.id, iso(nowMilliseconds));
+    });
   }
 
   claimExecution(
@@ -1021,6 +1089,40 @@ export class RunnerControlStore {
       ORDER BY next_attempt_at LIMIT 50
     `).all(projectId, workspaceId) as Row[]).map((row) => ({ key: String(row.key), attempts: Number(row.attempts),
       error: String(row.last_error), nextAttemptAt: String(row.next_attempt_at) }));
+  }
+
+  observeService(service: RunnerService, nowMilliseconds: number, conversationId?: string): void {
+    this.transaction(() => {
+      const row = this.db.prepare(`SELECT * FROM runner_service_observations
+        WHERE project_id = ? AND workspace_id = ? AND name = ?`)
+        .get(service.projectId, service.workspaceId, service.name) as Row | undefined;
+      const status = service.status;
+      const unhealthy = status === "failed" || status === "unhealthy";
+      const consecutive = row?.status === status ? Number(row.consecutive) + 1 : 1;
+      let reported = row?.reported_status === null || !row ? null : String(row.reported_status);
+      let sequence = Number(row?.sequence ?? 0);
+      let message: string | null = null;
+      if (unhealthy && consecutive >= 2 && reported !== status) {
+        message = `Сервис «${service.name}» ${status === "failed" ? "не работает" : "не проходит проверку здоровья"}. Проверьте состояние и журнал сервиса.`;
+        reported = status;
+      } else if (status === "running") {
+        if (reported === "failed" || reported === "unhealthy") message = `Сервис «${service.name}» снова работает и проходит проверку здоровья.`;
+        reported = status;
+      } else if (status === "stopped") reported = status;
+      if (message) {
+        sequence++;
+        this.queueDelivery(`service-health:${service.projectId}:${service.workspaceId}:${service.name}:${sequence}`,
+          { kind: "notice", projectId: service.projectId, workspaceId: service.workspaceId, message,
+            ...(conversationId ? { conversationId } : {}) }, nowMilliseconds);
+      }
+      this.db.prepare(`INSERT INTO runner_service_observations
+        (project_id, workspace_id, name, status, reported_status, consecutive, sequence, checked_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(project_id, workspace_id, name) DO UPDATE SET status = excluded.status,
+          reported_status = excluded.reported_status, consecutive = excluded.consecutive,
+          sequence = excluded.sequence, checked_at = excluded.checked_at`)
+        .run(service.projectId, service.workspaceId, service.name, status, reported, consecutive, sequence, iso(nowMilliseconds));
+    });
   }
 
   execution(id: string): RunnerScheduleExecution | null {
@@ -1206,6 +1308,7 @@ export class RunnerControlStore {
       updatedBy: Number(row.updated_by),
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
+      activeFrom: row.active_from === null || row.active_from === undefined ? String(row.created_at) : String(row.active_from),
     };
   }
 
@@ -1234,6 +1337,12 @@ export class RunnerControlPlane {
   private timer: NodeJS.Timeout | null = null;
   private ticking = false;
   private scheduledTick: Promise<void> | null = null;
+  private monitorTimer: NodeJS.Timeout | null = null;
+  private monitoring: Promise<void> | null = null;
+  private readonly operationSnapshots = new Map<string, {
+    checkedAt: string; lastSuccessAt: string | null; available: boolean;
+    jobs: RunnerJob[]; services: RunnerService[]; health: RunnerHealth | null;
+  }>();
 
   constructor(
     storePath: string,
@@ -1276,6 +1385,7 @@ export class RunnerControlPlane {
     ) => Promise<boolean> = async () => false,
     readonly scheduleInspector: (projectId: string, workspaceId: string) => Promise<GitInspector> =
       async (projectId, workspaceId) => new GitInspector(projects.project(projectId).workspace(workspaceId).path),
+    readonly serviceNoticeConversation: (projectId: string, workspaceId: string) => string | undefined = () => undefined,
   ) {
     this.store = new RunnerControlStore(storePath);
   }
@@ -1285,6 +1395,9 @@ export class RunnerControlPlane {
     void this.runScheduledTick();
     this.timer = setInterval(() => void this.runScheduledTick(), this.intervalMilliseconds);
     this.timer.unref();
+    void this.monitor();
+    this.monitorTimer = setInterval(() => { void this.monitor(); }, 30_000);
+    this.monitorTimer.unref();
   }
 
   close(): void {
@@ -1295,11 +1408,14 @@ export class RunnerControlPlane {
   stop(): void {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    if (this.monitorTimer) clearInterval(this.monitorTimer);
+    this.monitorTimer = null;
   }
 
   async stopAndWait(): Promise<void> {
     this.stop();
     if (this.scheduledTick) await this.scheduledTick;
+    if (this.monitoring) await this.monitoring;
     if (this.deliveryDrain) await this.deliveryDrain;
   }
 
@@ -1311,6 +1427,68 @@ export class RunnerControlPlane {
       if (this.scheduledTick === pending) this.scheduledTick = null;
     });
     return pending;
+  }
+
+  async monitor(): Promise<void> {
+    if (this.monitoring) return this.monitoring;
+    const pending = this.pollOperations().catch((error) => console.warn("runner monitoring failed", error));
+    this.monitoring = pending;
+    try { await pending; } finally { this.monitoring = null; }
+  }
+
+  private async pollOperations(): Promise<void> {
+    if (typeof this.projects.all !== "function") return;
+    const health = typeof this.runner.health === "function" ? await this.runner.health().catch(() => null) : null;
+    const available = health?.ok === true || await this.runner.available().catch(() => false);
+    for (const { project } of this.projects.all()) {
+      for (const workspaceId of project.workspaces.keys()) {
+        const key = `${project.id}\0${workspaceId}`;
+        const previous = this.operationSnapshots.get(key);
+        try {
+          if (!available) throw new RunnerControlError("runner is unavailable");
+          const [jobs, services] = await Promise.all([
+            this.runner.jobs(project.id, workspaceId), this.runner.services(project.id, workspaceId),
+          ]);
+          const checkedAt = iso(this.now());
+          this.operationSnapshots.set(key, { checkedAt, lastSuccessAt: checkedAt, available: true, jobs, services, health });
+          for (const service of services) {
+            if (service.projectId !== project.id || service.workspaceId !== workspaceId) continue;
+            this.store.observeService(service, this.now(), this.serviceNoticeConversation(project.id, workspaceId));
+          }
+        } catch {
+          this.operationSnapshots.set(key, { checkedAt: iso(this.now()), lastSuccessAt: previous?.lastSuccessAt ?? null,
+            available: false, jobs: previous?.jobs ?? [], services: previous?.services ?? [], health });
+        }
+      }
+    }
+    // Delivery remains independent of both monitoring and the scheduling loop.
+    void this.drainDeliveries().catch((error) => console.warn("service notice delivery failed", error));
+  }
+
+  operationsOverview(projectId: string, workspaceId: string): RunnerOperationsSnapshot {
+    const snapshot = this.operationSnapshots.get(`${projectId}\0${workspaceId}`);
+    const activeInProject = [...this.operationSnapshots.entries()].filter(([key]) => key.startsWith(`${projectId}\0`))
+      .flatMap(([, value]) => value.jobs).find((job) => job.status === "running" || job.status === "cancelling");
+    const executions = this.store.recentExecutions(projectId, workspaceId);
+    return {
+      checkedAt: snapshot?.checkedAt ?? null, lastSuccessAt: snapshot?.lastSuccessAt ?? null,
+      available: snapshot?.available ?? false,
+      jobs: (snapshot?.jobs ?? []).slice(0, 20).map((job) => ({
+        id: job.id, action: job.action, status: job.status, revision: job.revision, createdAt: job.createdAt,
+        waitSeconds: job.status === "queued" ? Math.max(0, Math.floor((this.now() - Date.parse(job.createdAt)) / 1000)) : 0,
+        queueReason: job.status !== "queued" ? null : activeInProject
+          ? `Ожидает завершения ${activeInProject.action} (${activeInProject.id.slice(0, 8)}) в этом проекте`
+          : snapshot?.health && snapshot.health.running >= snapshot.health.maxParallelJobs
+            ? "Все места выполнения на узле заняты" : "Ожидает свободного места выполнения",
+        initiatedBy: this.store.jobWatch(job.id)?.actorUserId ||
+          executions.find((execution) => execution.jobId === job.id)?.scheduleSnapshot.updatedBy || null,
+      })),
+      services: snapshot?.services ?? [],
+      executions: executions.slice(0, 20).map((execution) => ({ id: execution.id,
+        name: execution.scheduleSnapshot.name, status: execution.status, scheduledFor: execution.scheduledFor,
+        reason: execution.reason, jobId: execution.jobId })),
+      deliveryFailures: this.store.deliveryFailures(projectId, workspaceId),
+    };
   }
 
   async inspect(context: RunnerControlContext): Promise<RunnerInspection> {
@@ -1780,6 +1958,9 @@ export class RunnerControlPlane {
     if (input.enabled !== undefined && typeof input.enabled !== "boolean") {
       throw new RunnerControlError("enabled must be a boolean");
     }
+    if (input.catchUp !== undefined && typeof input.catchUp !== "boolean") {
+      throw new RunnerControlError("catchUp must be a boolean");
+    }
     if (input.clearDeliveryTopic !== undefined && typeof input.clearDeliveryTopic !== "boolean") {
       throw new RunnerControlError("clearDeliveryTopic must be a boolean");
     }
@@ -1856,7 +2037,8 @@ export class RunnerControlPlane {
       createdAt: existing?.createdAt ?? timestamp,
       updatedAt: timestamp,
     };
-    const days = weekdays.length === 7 ? "ежедневно" : `дни ISO ${weekdays.join(",")}`;
+    const days = weekdays.length === 7 ? "ежедневно" : weekdays.map((day) =>
+      ["", "пн", "вт", "ср", "чт", "пт", "сб", "вс"][day]).join(", ");
     const deliverySummary = schedule.delivery
       ? `, отчёт → ${schedule.delivery.label} (${({
           success: "при успехе",
@@ -1864,14 +2046,40 @@ export class RunnerControlPlane {
           always: "при любом результате",
         } as const)[schedule.deliveryCondition]})`
       : "";
-    const notificationSummary = schedule.notifications.length > 0
-      ? `, внешних lifecycle-сообщений: ${schedule.notifications.length}`
+    const notificationSummary = schedule.notifications.map((notification) =>
+      `\nСообщение «${({ started: "принято в очередь", succeeded: "успех", failed: "ошибка", finished: "завершение" } as const)[notification.when]}»` +
+      ` → ${notification.chatId}/${notification.topicId}: ${notification.text}`).join("");
+    const upcoming: string[] = [];
+    const timingChanged = !existing || existing.time !== time || existing.timeZone !== timeZone ||
+      JSON.stringify(existing.weekdays) !== JSON.stringify(weekdays) || (!existing.enabled && schedule.enabled);
+    const eligibleNow = schedule.enabled ? dueScheduleOccurrence({ ...schedule,
+      activeFrom: timingChanged ? iso(nowMilliseconds - (input.catchUp ? misfireGraceMinutes * 60_000 : 0))
+        : existing.activeFrom ?? existing.createdAt,
+    }, nowMilliseconds) : null;
+    const immediateSummary = eligibleNow
+      ? `\nЕсли подтвердить сейчас, допустим также запуск за ${new Intl.DateTimeFormat("ru-RU", {
+        timeZone, dateStyle: "medium", timeStyle: "short",
+      }).format(Date.parse(eligibleNow.scheduledFor))} (${timeZone}), если этот запуск ещё не обработан.`
       : "";
+    let after = nowMilliseconds;
+    for (let index = 0; index < 3; index++) {
+      const next = nextScheduleOccurrence(schedule, after);
+      if (!next) break;
+      upcoming.push(new Intl.DateTimeFormat("ru-RU", { timeZone, dateStyle: "medium", timeStyle: "short" }).format(Date.parse(next)));
+      after = Date.parse(next);
+    }
     return this.store.savePlan(
       context,
-      { operation: "upsert", schedule, expectedVersion: existing?.version ?? null },
+      { operation: "upsert", schedule, expectedVersion: existing?.version ?? null, catchUp: input.catchUp ?? false },
       `${existing ? "Изменить" : "Создать"} расписание «${name}»: ${action}, ${days} в ${time} (${timeZone}), ` +
-        `${schedule.enabled ? "включено" : "выключено"}${deliverySummary}${notificationSummary}`,
+        `${schedule.enabled ? "включено" : "выключено"}${deliverySummary}.\n` +
+        `При включении или изменении времени: ${input.catchUp ? `догнать последний пропущенный запуск за ${misfireGraceMinutes} мин.` : "только с момента подтверждения, без прошлых запусков"}.\n` +
+        `При простое раннера: догнать в пределах ${misfireGraceMinutes} мин., затем отметить пропуск.\n` +
+        "Если прежний запуск ещё выполняется или выясняется его исход, новый будет пропущен.\n" +
+        "Код: последняя опубликованная версия основной ветки после обновления origin.\n" +
+        `${schedule.enabled ? "Следующие времена" : "Времена после включения"}: ${upcoming.join("; ")} (${timeZone}).` +
+        immediateSummary +
+        notificationSummary,
       nowMilliseconds,
     );
   }
@@ -1892,7 +2100,9 @@ export class RunnerControlPlane {
     context: RunnerControlContext,
     scheduleId: string,
     enabled: boolean,
+    catchUp = false,
   ): RunnerSchedule {
+    if (typeof catchUp !== "boolean") throw new RunnerControlError("catchUp must be a boolean");
     const schedule = this.store.setEnabled(
       scheduleId,
       context.projectId,
@@ -1900,6 +2110,7 @@ export class RunnerControlPlane {
       enabled,
       context.actorUserId,
       this.now(),
+      catchUp,
     );
     this.store.audit(
       context,
@@ -1911,12 +2122,55 @@ export class RunnerControlPlane {
     return schedule;
   }
 
+  async resolveExecution(context: RunnerControlContext, executionId: string,
+    resolution: "check" | "close_unconfirmed", reason = "", acknowledgeDuplicateRisk = false): Promise<RunnerScheduleExecution> {
+    if (resolution !== "check" && resolution !== "close_unconfirmed") throw new RunnerControlError("invalid execution resolution");
+    if (this.ticking) throw new RunnerControlError("scheduler is processing a tick; retry shortly");
+    this.ticking = true;
+    try {
+      const execution = this.store.execution(executionId);
+      if (!execution || execution.projectId !== context.projectId || execution.workspaceId !== context.workspaceId) {
+        throw new RunnerControlError("execution was not found in this project workspace");
+      }
+      if (!["claimed", "reconciling"].includes(execution.status) || execution.jobId) {
+        throw new RunnerControlError("only an unconfirmed execution without a job can be resolved");
+      }
+      if (!(await this.runner.available())) throw new RunnerControlError("runner must be available before resolving an execution");
+      const job = await this.findExecutionJob(execution, await this.runner.jobs(context.projectId, context.workspaceId));
+      if (job) {
+        this.recordScheduledJob(execution, job);
+        this.store.audit(context, "execution.reconcile", executionId, { jobId: job.id }, this.now());
+        return this.store.execution(executionId)!;
+      }
+      if (resolution === "check") return execution;
+      if (!acknowledgeDuplicateRisk || !reason.trim() || reason.length > 1000) {
+        throw new RunnerControlError("closing requires the owner's explicit acknowledgement of duplicate risk and a reason (1-1000 characters)");
+      }
+      if (this.now() - Date.parse(execution.createdAt) < 120_000) {
+        throw new RunnerControlError("wait at least two minutes for the original submission before closing it");
+      }
+      const current = this.store.execution(executionId)!;
+      if (current.jobId || current.status !== execution.status || current.updatedAt !== execution.updatedAt) {
+        throw new RunnerControlError("execution changed during verification; inspect it again");
+      }
+      const explanation = `Закрыт владельцем ${context.actorUserId} после проверки раннера: ${reason.trim()}. ` +
+        "Принятие не подтверждено; риск позднего выполнения принят владельцем. Повторная job не создана.";
+      this.store.recordExecution(executionId, "failed", { reason: explanation }, [], this.now());
+      this.store.audit(context, "execution.close_unconfirmed", executionId, { reason: reason.trim(), acknowledgeDuplicateRisk }, this.now());
+      return this.store.execution(executionId)!;
+    } finally { this.ticking = false; }
+  }
+
   async tick(waitForDeliveries = true): Promise<void> {
     if (this.ticking) return;
     this.ticking = true;
     try {
       await this.refreshExecutions();
       await this.refreshWatchedJobs();
+      for (const schedule of this.store.enabledSchedules()) {
+        try { this.store.recordMissedOccurrences(schedule, this.now()); }
+        catch (error) { console.warn(`could not record missed occurrences for ${schedule.id}`, error); }
+      }
       if (await this.runner.available()) {
         for (const schedule of this.store.enabledSchedules()) {
           try {

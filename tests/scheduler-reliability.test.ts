@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import type { ProjectCatalog } from "../src/project-catalog.js";
-import { ProjectRunnerClientError, type ProjectRunnerClient, type RunnerJob, type RunnerSubmissionMetadata } from "../src/project-runner-client.js";
+import { ProjectRunnerClientError, type ProjectRunnerClient, type RunnerJob, type RunnerSubmissionMetadata, type RunnerService } from "../src/project-runner-client.js";
 import { RunnerControlPlane, RunnerControlStore, type RunnerControlContext, type RunnerSchedule, type SchedulePlanInput } from "../src/runner-control.js";
 
 function fixture() {
@@ -371,5 +371,133 @@ test("manual started notifications survive restart before handoff and are not re
     await f.control.tick();
     assert.equal(f.notifications.length, 1);
     assert.equal(f.notices.length, 1);
+  } finally { f.close(); }
+});
+
+test("new and resumed schedules run future occurrences unless catch-up is explicitly selected", async () => {
+  const f = fixture();
+  try {
+    f.advance(10 * 60_000);
+    f.add({ enabled: true });
+    await f.control.tick();
+    assert.equal(f.submissions.length, 0, "creation at 08:10 must not launch 08:00");
+    const paused = f.add({ enabled: false });
+    f.control.setScheduleEnabled(f.ctx("resume"), paused.id, true);
+    await f.control.tick();
+    assert.equal(f.submissions.length, 0, "resume must not launch a past occurrence");
+    f.control.setScheduleEnabled(f.ctx("pause"), paused.id, false);
+    f.control.setScheduleEnabled(f.ctx("explicit-catch-up"), paused.id, true, true);
+    await f.control.tick();
+    assert.equal(f.submissions.length, 1);
+    assert.equal(f.submissions[0]?.scheduledFor, "2026-09-08T08:00:00.000Z");
+    const plan = f.control.planSchedule(f.ctx("preview"), { operation: "upsert", name: "Preview",
+      action: "run", time: "09:00", timeZone: "UTC", weekdays: [1, 3], notifications: [
+        { chatId: -100500, topicId: 77, when: "finished", text: "Exact report text" },
+      ] });
+    assert.match(plan.summary, /пн, ср/);
+    assert.match(plan.summary, /Следующие времена/);
+    assert.match(plan.summary, /без прошлых запусков/);
+    assert.match(plan.summary, /Exact report text/);
+    assert.match(plan.summary, /-100500\/77/);
+    const catchUpPlan = f.control.planSchedule(f.ctx("catch-up-preview"), { operation: "upsert", name: "Catch up",
+      action: "run", time: "08:00", timeZone: "UTC", catchUp: true });
+    assert.match(catchUpPlan.summary, /допустим также запуск за .*08:00/);
+    assert.doesNotMatch(plan.summary, /допустим также/);
+  } finally { f.close(); }
+});
+
+test("offline occurrences outside grace are recorded once and survive restart", async () => {
+  const f = fixture();
+  try {
+    const schedule = f.add({ enabled: true });
+    Object.assign(f.runner, { available: async () => false });
+    f.advance(2 * 60 * 60_000);
+    await f.control.tick();
+    assert.equal(f.control.store.lastExecution(schedule.id)?.status, "skipped");
+    assert.match(f.control.store.lastExecution(schedule.id)?.reason ?? "", /30 мин/);
+    f.reopen();
+    await f.control.tick();
+    assert.equal(f.control.store.recentExecutions("demo", "repo").length, 1);
+    assert.equal(f.submissions.length, 0);
+  } finally { f.close(); }
+});
+
+test("an operator can close an unconfirmed occurrence only after an online check and explicit risk acknowledgement", async () => {
+  const f = fixture();
+  try {
+    const schedule = f.add({ enabled: true });
+    const execution = f.claim(schedule);
+    await assert.rejects(f.control.resolveExecution({ ...f.ctx("wrong-scope"), workspaceId: "other" }, execution.id, "check"), /not found/);
+    await assert.rejects(f.control.resolveExecution(f.ctx("too-early"), execution.id, "close_unconfirmed", "Investigated", true), /two minutes/);
+    f.advance(121_000);
+    await f.control.tick();
+    await assert.rejects(f.control.resolveExecution(f.ctx("no-ack"), execution.id, "close_unconfirmed", "Investigated"), /acknowledgement/);
+    Object.assign(f.runner, { available: async () => false });
+    await assert.rejects(f.control.resolveExecution(f.ctx("offline"), execution.id, "close_unconfirmed", "Investigated", true), /available/);
+    Object.assign(f.runner, { available: async () => true });
+    assert.equal((await f.control.resolveExecution(f.ctx("check"), execution.id, "check")).status, "reconciling");
+    const closed = await f.control.resolveExecution(f.ctx("close", 43), execution.id, "close_unconfirmed", "Проверил журнал раннера", true);
+    assert.equal(closed.status, "failed");
+    assert.match(closed.reason ?? "", /43.*Проверил журнал/);
+    assert.equal(f.submissions.length, 0);
+    f.advance(24 * 60 * 60_000);
+    await f.control.tick();
+    assert.equal(f.submissions.length, 1, "future occurrences are unblocked without replaying the original");
+  } finally { f.close(); }
+});
+
+test("operator resolution attaches a found job instead of closing it", async () => {
+  const f = fixture();
+  try {
+    const schedule = f.add();
+    const execution = f.claim(schedule);
+    f.advance(121_000);
+    await f.control.tick();
+    const accepted = f.job({ trigger: "schedule", scheduleId: schedule.id, scheduledFor: execution.scheduledFor,
+      idempotencyKey: f.lookups[0]!.idempotencyKey!, status: "running" });
+    const found = await f.control.resolveExecution(f.ctx("close"), execution.id, "close_unconfirmed", "Investigated", true);
+    assert.equal(found.jobId, accepted.id);
+    assert.equal(found.status, "running");
+    assert.equal(f.submissions.length, 0);
+  } finally { f.close(); }
+});
+
+test("service monitoring reports sustained failures and recovery once, persists across restart, and preserves offline snapshots", async () => {
+  const f = fixture();
+  let status: RunnerService["status"] = "running";
+  try {
+    Object.assign(f.control.projects, { all: () => [{ project: { id: "demo", workspaces: new Map([["repo", {}]]) } }] });
+    Object.assign(f.runner, { services: async (): Promise<RunnerService[]> => [{ projectId: "demo", workspaceId: "repo",
+      name: "worker", desiredState: "running", status, current: null, previous: null, localEndpoint: null,
+      updatedAt: new Date(f.now).toISOString(), restartCount: 3 }] });
+    const job = f.job({ status: "queued", portalMessageCount: 0 });
+    f.control.store.watchJob(f.ctx("queued", 43), job, f.now);
+    f.advance(120_000);
+    await f.control.monitor(); await f.control.tick();
+    assert.equal(f.notices.length, 0);
+    const snapshot = f.control.operationsOverview("demo", "repo");
+    assert.equal(snapshot.jobs[0]?.initiatedBy, 43);
+    assert.equal(snapshot.jobs[0]?.waitSeconds, 120);
+    assert.equal(snapshot.services[0]?.restartCount, 3);
+    status = "failed";
+    await f.control.monitor(); await f.control.tick();
+    assert.equal(f.notices.length, 0, "a single failed sample must not alert");
+    f.advance(30_000);
+    await f.control.monitor(); await f.control.tick();
+    assert.equal(f.notices.length, 1);
+    f.reopen();
+    await f.control.monitor(); await f.control.tick();
+    assert.equal(f.notices.length, 1, "restart must not repeat an unchanged failure");
+    status = "running";
+    await f.control.monitor(); await f.control.tick();
+    assert.equal(f.notices.length, 2);
+    assert.match(f.notices[1]!, /снова работает/);
+    Object.assign(f.runner, { available: async () => false });
+    await f.control.monitor();
+    const offline = f.control.operationsOverview("demo", "repo");
+    assert.equal(offline.available, false);
+    assert.ok(offline.lastSuccessAt);
+    assert.equal(offline.services.length, 1);
+    assert.equal(f.control.operationsOverview("other", "repo").services.length, 0);
   } finally { f.close(); }
 });

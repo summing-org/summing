@@ -1,3 +1,4 @@
+import type { RunnerOperationsSnapshot } from "./runner-control.js";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { withRepositoryOperation } from "./repository-operation.js";
 import { ConfigError, type RuntimeConfig } from "./config.js";
@@ -216,6 +217,7 @@ export class ProjectViewerServer {
       set: (conversationId: string, model: string | null, effort?: string) => Promise<unknown>;
     },
     readonly upcomingSchedules?: (projectId: string, workspaceId: string) => ViewerSchedule[],
+    readonly runnerOperations?: (projectId: string, workspaceId: string) => RunnerOperationsSnapshot,
   ) {
     this.auth = new ViewerAuthenticator(
       config.telegramToken,
@@ -899,6 +901,11 @@ export class ProjectViewerServer {
         ? ""
         : queryValue(url, "conversation");
 
+    if (request.method === "GET" && url.pathname === "/api/viewer/operations") {
+      const conversation = this.authorizedConversation(conversationId, telegramUser);
+      json(response, 200, this.runnerOperations?.(conversation.projectId, conversation.workspaceId) ?? null);
+      return;
+    }
     if (request.method === "GET" && url.pathname === "/api/viewer/overview") {
       // No Git or runner I/O: project activity stays available while either is busy/offline.
       const conversation = this.authorizedConversation(conversationId, telegramUser);

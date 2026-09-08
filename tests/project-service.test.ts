@@ -54,3 +54,14 @@ test("service manifest defines bounded named long-running workloads", () => {
     /service worker command must contain/,
   );
 });
+
+test("worker heartbeat uses only a bounded relative data path and explicit time limit", () => {
+  const definition = (fields: Record<string, unknown>) => serviceDefinition(JSON.stringify({ version: 1, services: { worker: fields } }), "worker");
+  assert.equal(definition({ heartbeatPath: "health/heartbeat" }).heartbeatTimeoutSeconds, 180);
+  assert.equal(definition({ heartbeatPath: "heartbeat", heartbeatTimeoutSeconds: 30 }).heartbeatTimeoutSeconds, 30);
+  for (const path of ["/etc/passwd", "../heartbeat", "health/../heartbeat", ".", "health//heartbeat"]) {
+    assert.throws(() => definition({ heartbeatPath: path }), /safe relative path/);
+  }
+  assert.throws(() => definition({ heartbeatTimeoutSeconds: 30 }), /requires heartbeatPath/);
+  assert.throws(() => definition({ heartbeatPath: "heartbeat", heartbeatTimeoutSeconds: 1 }), /10 to 3600/);
+});

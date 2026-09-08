@@ -790,7 +790,7 @@ test("owners control projects while group participants get read-only Q&A", async
     assert.equal(typeof writeOptions.dynamicToolHandler, "function");
     assert.equal(
       runtime.state.get(bound.id).codexThreadCapability,
-      "runner-repository-result-context-external-message-memory-v10",
+      "runner-repository-result-context-external-message-memory-v11",
     );
     assert.equal(runtime.state.get(bound.id).previousCodexThreadId, "thr-legacy");
 

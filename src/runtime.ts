@@ -229,7 +229,7 @@ const UNBOUND_TURN_TIMEOUT_MILLISECONDS = 120_000;
 const TEAM_UNDERSTANDING_TURN_TIMEOUT_MILLISECONDS = 120_000;
 const MAX_TELEGRAM_REPLY_CONTEXT_LENGTH = 4_000;
 const MAX_TELEGRAM_REPLY_CHAIN_DEPTH = 8;
-const HOST_TOOL_CAPABILITY = "runner-repository-result-context-external-message-memory-v10";
+const HOST_TOOL_CAPABILITY = "runner-repository-result-context-external-message-memory-v11";
 const WRITE_DYNAMIC_TOOLS = [
   ...RUNNER_DYNAMIC_TOOLS,
   ...REPOSITORY_DYNAMIC_TOOLS,
@@ -862,6 +862,7 @@ export class SummingRuntime {
             }] : [];
           });
       },
+      (projectId, workspaceId) => this.runnerControl.operationsOverview(projectId, workspaceId),
     );
     this.runnerControl = new RunnerControlPlane(
       resolve(config.dataDir, "runner-control.sqlite3"),
@@ -914,6 +915,9 @@ export class SummingRuntime {
         this.projects.project(projectId).workspace(workspaceId).path,
         await this.viewer.repositoryCredentials.inspect(projectId, workspaceId),
       ),
+      (projectId, workspaceId) => this.state.listConversations().find((conversation) =>
+        conversation.projectId === projectId && conversation.workspaceId === workspaceId &&
+        conversation.role === "primary" && conversation.isPrimary)?.id,
     );
     this.semaphore = new Semaphore(config.maxParallelConversations);
   }

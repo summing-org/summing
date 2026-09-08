@@ -25,20 +25,38 @@ function fixture() {
     (project, workspace) => {
       assert.equal(project, "alpha"); assert.equal(workspace, "repo");
       return [{ name: "Публикация", nextRunAt: "2026-09-09T06:00:00.000Z", timeZone: "Europe/Moscow", destination: "Отчёты" }];
+    }, (project, workspace) => {
+      assert.equal(project, "alpha"); assert.equal(workspace, "repo");
+      return { checkedAt: "2026-09-08T08:00:00Z", lastSuccessAt: "2026-09-08T08:00:00Z", available: true,
+        jobs: [], services: [], executions: [], deliveryFailures: [] };
     });
   viewer.runner.available = async () => { throw new Error("overview must not depend on runner I/O"); };
   const route = (viewer as unknown as { route(request: IncomingMessage, response: ServerResponse): Promise<void> }).route.bind(viewer);
   const auth = new URLSearchParams({ auth_date: String(Math.floor(Date.now() / 1000)), user: JSON.stringify({ id: 222 }) });
   const check = [...auth.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) => `${key}=${value}`).join("\n");
   auth.set("hash", createHmac("sha256", createHmac("sha256", "WebAppData").update("token").digest()).update(check).digest("hex"));
-  const get = async (id: string) => {
+  const get = async (id: string, endpoint = "overview") => {
     let body = "";
-    await route({ method: "GET", url: `/api/viewer/overview?conversation=${id}`, headers: { "x-telegram-init-data": auth.toString() } } as unknown as IncomingMessage,
+    await route({ method: "GET", url: `/api/viewer/${endpoint}?conversation=${id}`, headers: { "x-telegram-init-data": auth.toString() } } as unknown as IncomingMessage,
       { writeHead: () => {}, end: (data: string) => { body = data; } } as unknown as ServerResponse);
     return JSON.parse(body);
   };
   return { state, busy, get, revoke: () => { allowed = false; }, close: () => { state.close(); rmSync(root, { recursive: true, force: true }); } };
 }
+
+test("operations snapshots enforce workspace access on every read without runner or Git I/O", async () => {
+  const f = fixture();
+  try {
+    const main = f.state.bind(-10012345, 1, "alpha", "repo");
+    const other = f.state.bind(-10012345, 2, "beta", "repo");
+    const snapshot = await f.get(main.id, "operations");
+    assert.equal(snapshot.available, true);
+    assert.deepEqual(snapshot.executions, []);
+    await assert.rejects(f.get(other.id, "operations"), /access denied/);
+    f.revoke();
+    await assert.rejects(f.get(main.id, "operations"), /access denied/);
+  } finally { f.close(); }
+});
 
 test("overview shows all editable topics in one workspace without Git or runner access", async () => {
   const f = fixture();

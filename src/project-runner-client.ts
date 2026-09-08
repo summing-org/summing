@@ -141,6 +141,7 @@ export class ProjectRunnerClient {
     path: string,
     body?: Buffer,
     contentType = "application/json",
+    timeoutMilliseconds = 120_000,
   ): Promise<T> {
     return new Promise((resolveCall, reject) => {
       const requestHandle = request(
@@ -152,7 +153,7 @@ export class ProjectRunnerClient {
           headers: body
             ? { "content-type": contentType, "content-length": String(body.length) }
             : {},
-          timeout: 120_000,
+          timeout: timeoutMilliseconds,
         },
         (response) => {
           response.once("aborted", () => reject(new ProjectRunnerClientError("runner response was aborted")));
@@ -381,6 +382,8 @@ export class ProjectRunnerClient {
       "POST",
       `/services/deploy?${query.toString()}`,
       body,
+      "application/json",
+      420_000,
     );
     return result.service;
   }
@@ -398,6 +401,8 @@ export class ProjectRunnerClient {
       "POST",
       `/services/action?${query.toString()}`,
       body,
+      "application/json",
+      420_000,
     );
     return result.service;
   }

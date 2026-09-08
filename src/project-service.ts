@@ -29,6 +29,8 @@ export interface RunnerService {
   localEndpoint: string | null;
   error?: string;
   updatedAt: string;
+  checkedAt?: string;
+  restartCount?: number | null;
 }
 
 export interface RunnerServiceDefinition {
@@ -36,6 +38,8 @@ export interface RunnerServiceDefinition {
   containerPort: number | null;
   healthPath: string | null;
   startupTimeoutSeconds: number;
+  heartbeatPath?: string;
+  heartbeatTimeoutSeconds?: number;
 }
 
 function record(value: unknown, message: string): Record<string, unknown> {
@@ -52,7 +56,7 @@ function parseServiceDefinition(name: string, value: unknown): RunnerServiceDefi
   const definition = record(value, `service ${name} must contain an object`);
   exactKeys(
     definition,
-    ["command", "containerPort", "healthPath", "startupTimeoutSeconds"],
+    ["command", "containerPort", "healthPath", "startupTimeoutSeconds", "heartbeatPath", "heartbeatTimeoutSeconds"],
     `service ${name} contains unsupported fields`,
   );
   let command: string[] = [];
@@ -85,7 +89,19 @@ function parseServiceDefinition(name: string, value: unknown): RunnerServiceDefi
     startupTimeoutSeconds < 5 || startupTimeoutSeconds > 300) {
     throw new Error(`service ${name} startupTimeoutSeconds must be an integer from 5 to 300`);
   }
-  return { command, containerPort, healthPath, startupTimeoutSeconds };
+  const heartbeatPath = definition.heartbeatPath;
+  if (heartbeatPath !== undefined && (typeof heartbeatPath !== "string" ||
+      !/^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*$/.test(heartbeatPath) ||
+      heartbeatPath.length > 200 || heartbeatPath.split("/").some((part) => part === "." || part === ".."))) {
+    throw new Error(`service ${name} heartbeatPath must be a safe relative path in the service data directory`);
+  }
+  const heartbeatTimeoutSeconds = Number(definition.heartbeatTimeoutSeconds ?? 180);
+  if (!Number.isSafeInteger(heartbeatTimeoutSeconds) || heartbeatTimeoutSeconds < 10 || heartbeatTimeoutSeconds > 3600 ||
+      (definition.heartbeatTimeoutSeconds !== undefined && heartbeatPath === undefined)) {
+    throw new Error(`service ${name} heartbeatTimeoutSeconds requires heartbeatPath and must be from 10 to 3600`);
+  }
+  return { command, containerPort, healthPath, startupTimeoutSeconds,
+    ...(heartbeatPath === undefined ? {} : { heartbeatPath, heartbeatTimeoutSeconds }) };
 }
 
 export function serviceDefinitions(
