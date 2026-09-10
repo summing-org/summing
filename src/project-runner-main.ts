@@ -23,6 +23,10 @@ async function main(): Promise<void> {
     throw new Error("SUMMING_RUNNER_RUN_TIMEOUT_HOURS must be an integer between 1 and 168");
   }
   const servicePortStart = Number(process.env.SUMMING_RUNNER_SERVICE_PORT_START ?? "20000");
+  const dryRunTimeoutSeconds = Number(process.env.SUMMING_RUNNER_DRY_RUN_TIMEOUT_SECONDS ?? "900");
+  if (!Number.isSafeInteger(dryRunTimeoutSeconds) || dryRunTimeoutSeconds < 1 || dryRunTimeoutSeconds > 7_200) {
+    throw new Error("SUMMING_RUNNER_DRY_RUN_TIMEOUT_SECONDS must be an integer between 1 and 7200");
+  }
   const servicePortEnd = Number(process.env.SUMMING_RUNNER_SERVICE_PORT_END ?? "29999");
   if (!Number.isSafeInteger(servicePortStart) || !Number.isSafeInteger(servicePortEnd) ||
     servicePortStart < 1_024 || servicePortEnd > 65_535 || servicePortStart > servicePortEnd ||
@@ -53,6 +57,7 @@ async function main(): Promise<void> {
     runTimeoutHours,
     servicePortStart,
     servicePortEnd,
+    dryRunTimeoutSeconds,
   );
   let resolveSignal!: () => void;
   const signal = new Promise<void>((resolveSignalPromise) => {

@@ -501,3 +501,21 @@ test("service monitoring reports sustained failures and recovery once, persists 
     assert.equal(f.control.operationsOverview("other", "repo").services.length, 0);
   } finally { f.close(); }
 });
+
+test("operations overview explains a cleanup block even when execution slots are free", async () => {
+  const f = fixture();
+  try {
+    Object.assign(f.control.projects, { all: () => [{ project: { id: "demo", workspaces: new Map([["repo", {}]]) } }] });
+    let blockedProjects = ["demo"];
+    Object.assign(f.runner, {
+      services: async () => [],
+      health: async () => ({ ok: true, running: 0, maxParallelJobs: 2, blockedProjects }),
+    });
+    f.job({ status: "queued" });
+    await f.control.monitor();
+    assert.match(f.control.operationsOverview("demo", "repo").jobs[0]?.queueReason ?? "", /остановки предыдущего контейнера/);
+    blockedProjects = [];
+    await f.control.monitor();
+    assert.doesNotMatch(f.control.operationsOverview("demo", "repo").jobs[0]?.queueReason ?? "", /предыдущего контейнера/);
+  } finally { f.close(); }
+});

@@ -100,6 +100,7 @@ const ARTIFACTS = new Map([
   ["sources.jsonl", "application/x-ndjson"],
   ["candidates.json", "application/json"],
   ["editorial-plan.json", "application/json"],
+  ["scenario-generation.json", "application/json"],
   ["errors.json", "application/json"],
   ["report.html", "text/html"],
   ["portal-messages.json", "application/json"],
@@ -241,6 +242,14 @@ class RunnerHttpError extends Error {
 
 class RunnerCommandCancelledError extends Error {}
 
+class RunnerCommandTimeoutError extends Error {
+  readonly timedOutAt = new Date().toISOString();
+
+  constructor(readonly timeoutMs: number) {
+    super(`runner command timed out after ${timeoutMs} ms`);
+  }
+}
+
 function json(response: ServerResponse, status: number, value: unknown): void {
   const body = JSON.stringify(value);
   response.writeHead(status, {
@@ -323,7 +332,7 @@ function run(
       ? createWriteStream(options.logPath, { flags: "a", mode: 0o600 })
       : null;
     const secrets = (options.redactions ?? []).filter(Boolean).sort((left, right) => right.length - left.length);
-    let cancelled = false;
+    let termination: RunnerCommandCancelledError | RunnerCommandTimeoutError | null = null;
     let forceKillTimer: NodeJS.Timeout | null = null;
     let pendingLog = "";
     const redact = (value: string): string => {
@@ -361,8 +370,8 @@ function run(
     child.stdout.on("data", record);
     child.stderr.on("data", record);
     const cancel = (): void => {
-      if (cancelled) return;
-      cancelled = true;
+      if (termination) return;
+      termination = new RunnerCommandCancelledError("runner command cancelled");
       child.kill("SIGTERM");
       forceKillTimer = setTimeout(() => child.kill("SIGKILL"), 5_000);
       forceKillTimer.unref();
@@ -373,7 +382,11 @@ function run(
       if (forceKillTimer) clearTimeout(forceKillTimer);
     };
     const timer = setTimeout(
-      () => child.kill("SIGKILL"),
+      () => {
+        if (termination) return;
+        termination = new RunnerCommandTimeoutError(options.timeoutMs ?? 600_000);
+        child.kill("SIGKILL");
+      },
       options.timeoutMs ?? 600_000,
     );
     child.once("error", (error) => {
@@ -381,15 +394,15 @@ function run(
       cleanup();
       if (pendingLog) emit(pendingLog);
       log?.end();
-      reject(cancelled ? new RunnerCommandCancelledError("runner command cancelled") : error);
+      reject(termination ?? error);
     });
     child.once("close", (code) => {
       clearTimeout(timer);
       cleanup();
       if (pendingLog) emit(pendingLog);
       log?.end();
-      if (cancelled) {
-        reject(new RunnerCommandCancelledError("runner command cancelled"));
+      if (termination) {
+        reject(termination);
       } else {
         resolveRun({ code: code ?? 1, output: output.join("") });
       }
@@ -413,6 +426,9 @@ export class ProjectRunnerServer {
   private readonly migrationImports = new Map<string, Promise<EnvironmentMigrationMarker>>();
   private readonly pendingSubmissions = new Map<string, Promise<RunnerJob>>();
   private readonly activeServiceOperations = new Set<string>();
+  private readonly pendingContainerCleanup = new Map<string, RunnerJob>();
+  private readonly cleanupAttempts = new Map<string, Promise<void>>();
+  private cleanupTimer: NodeJS.Timeout | null = null;
 
   constructor(
     readonly socketPath: string,
@@ -429,6 +445,7 @@ export class ProjectRunnerServer {
     readonly runTimeoutHours = 12,
     readonly servicePortStart = 20_000,
     readonly servicePortEnd = 29_999,
+    readonly dryRunTimeoutSeconds = 900,
   ) {
     if (!isAbsolute(socketPath) || basename(socketPath) !== "runner.sock") {
       throw new Error("runner socket must be an absolute runner.sock path");
@@ -442,6 +459,10 @@ export class ProjectRunnerServer {
     }
     if (!Number.isSafeInteger(runTimeoutHours) || runTimeoutHours < 1 || runTimeoutHours > 168) {
       throw new Error("runner run timeout must be an integer between 1 and 168 hours");
+    }
+    if (!Number.isSafeInteger(dryRunTimeoutSeconds) || dryRunTimeoutSeconds < 1 ||
+      dryRunTimeoutSeconds > 7_200) {
+      throw new Error("runner dry-run timeout must be an integer between 1 and 7200 seconds");
     }
     if (!Number.isSafeInteger(servicePortStart) || !Number.isSafeInteger(servicePortEnd) ||
       servicePortStart < 1_024 || servicePortEnd > 65_535 || servicePortStart > servicePortEnd ||
@@ -491,9 +512,14 @@ export class ProjectRunnerServer {
         resolveStart();
       });
     });
+    this.cleanupTimer = setInterval(() => this.retryContainerCleanup(), 30_000);
+    this.cleanupTimer.unref();
+    this.retryContainerCleanup();
   }
 
   async close(): Promise<void> {
+    if (this.cleanupTimer) clearInterval(this.cleanupTimer);
+    this.cleanupTimer = null;
     const server = this.server;
     this.server = null;
     if (!server) return;
@@ -503,6 +529,7 @@ export class ProjectRunnerServer {
       });
     }
     if (existsSync(this.socketPath) && lstatSync(this.socketPath).isSocket()) rmSync(this.socketPath);
+    await Promise.allSettled(this.cleanupAttempts.values());
   }
 
   private async route(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -516,6 +543,9 @@ export class ProjectRunnerServer {
         running: this.activeJobs.size,
         maxParallelJobs: this.maxParallelJobs,
         runTimeoutHours: this.runTimeoutHours,
+        dryRunTimeoutSeconds: this.dryRunTimeoutSeconds,
+        blockedProjects: [...new Set([...this.pendingContainerCleanup.values()]
+          .filter((job) => !this.activeJobs.has(job.id)).map((job) => job.projectId))].sort(),
         servicePortRange: [this.servicePortStart, this.servicePortEnd],
       });
       return;
@@ -2237,6 +2267,11 @@ export class ProjectRunnerServer {
       .has(stored.status)) {
       throw new RunnerHttpError(409, "runner job status is malformed");
     }
+    if (stored.containerCleanupPending) {
+      const pending = this.pendingContainerCleanup.get(stored.id) ?? stored;
+      await this.retryJobContainerCleanup(pending);
+      return pending;
+    }
     if (stored.status === "cancelled") return stored;
     if (
       stored.status === "completed" ||
@@ -2246,12 +2281,8 @@ export class ProjectRunnerServer {
       throw new RunnerHttpError(409, `runner job is already ${stored.status}`);
     }
     if (stored.status === "running" || stored.status === "cancelling") {
-      const containerName = `summing-${stored.projectId}-${stored.id.slice(0, 8)}`;
-      await run(this.dockerBinary, ["rm", "--force", containerName], {
-        cwd: this.dataRoot,
-        logPath: resolve(this.jobDirectory(projectId, jobId), "job.log"),
-        timeoutMs: 30_000,
-      });
+      this.markContainerCleanupPending(stored);
+      await this.cleanupJobContainer(stored);
     }
     return this.finishCancelledJob(stored);
   }
@@ -2262,6 +2293,7 @@ export class ProjectRunnerServer {
     job.cancelRequestedAt ??= completedAt;
     job.completedAt = completedAt;
     job.error = "cancelled by user";
+    job.terminationReason = "cancelled";
     const directory = this.jobDirectory(job.projectId, job.id);
     writeFileSync(
       resolve(directory, "job.log"),
@@ -2346,6 +2378,9 @@ export class ProjectRunnerServer {
     ) {
       throw new RunnerHttpError(404, "job artifacts are not available for this job");
     }
+    if (job.containerCleanupPending) {
+      throw new RunnerHttpError(409, "job artifacts are awaiting container cleanup and redaction");
+    }
     return { projectId, jobId, project, job };
   }
 
@@ -2416,8 +2451,10 @@ export class ProjectRunnerServer {
   }
 
   private processQueue(): void {
+    if (!this.server) return;
     const activeScopes = new Set(
-      [...this.activeJobs.values()].map(({ job }) => this.jobScope(job)),
+      [...[...this.activeJobs.values()].map(({ job }) => this.jobScope(job)),
+        ...[...this.pendingContainerCleanup.values()].map((job) => this.jobScope(job))],
     );
     while (this.activeJobs.size < this.maxParallelJobs) {
       const index = this.queue.findIndex((job) => !activeScopes.has(this.jobScope(job)));
@@ -2436,6 +2473,136 @@ export class ProjectRunnerServer {
 
   private jobScope(job: Pick<RunnerJob, "projectId">): string {
     return job.projectId;
+  }
+
+  private markContainerCleanupPending(job: RunnerJob): void {
+    job.containerCleanupPending = true;
+    this.pendingContainerCleanup.set(job.id, job);
+    this.saveJob(job);
+  }
+
+  private recordTermination(job: RunnerJob, error: unknown): void {
+    if (job.terminationReason) return;
+    job.error = error instanceof Error ? error.message : String(error);
+    if (error instanceof RunnerCommandTimeoutError) {
+      job.terminationReason = "timeout";
+      job.timeoutMs = error.timeoutMs;
+      job.timedOutAt = error.timedOutAt;
+    } else {
+      job.terminationReason = error instanceof RunnerCommandCancelledError ? "cancelled" : "runner_error";
+    }
+  }
+
+  private async cleanupJobContainer(job: RunnerJob, redactions?: string[]): Promise<void> {
+    const name = `summing-${job.projectId}-${job.id.slice(0, 8)}`;
+    const logPath = resolve(this.jobDirectory(job.projectId, job.id), "job.log");
+    const commandOptions = { cwd: this.dataRoot, logPath, timeoutMs: 30_000 };
+    try {
+      if (!job.containerStoppedAt) {
+        writeFileSync(logPath, `[${new Date().toISOString()}] stopping container ${name}\n`, { flag: "a" });
+        // The Docker client can exit while its container is still running. Do not
+        // release the project lock until Docker confirms removal or absence.
+        try {
+          await run(this.dockerBinary, ["stop", "--time", "10", name], {
+            ...commandOptions, timeoutMs: 15_000,
+          });
+        } catch {
+          // A failed/timed-out graceful stop still needs a forced removal.
+        }
+        const removed = await run(this.dockerBinary, ["rm", "--force", name], commandOptions);
+        if (removed.code !== 0 && !removed.output.includes(`No such container: ${name}`)) {
+          throw new Error(`container removal was not confirmed (exit ${removed.code})`);
+        }
+        job.containerStoppedAt = new Date().toISOString();
+        this.saveJob(job);
+        writeFileSync(logPath, `[${job.containerStoppedAt}] container removal confirmed\n`, { flag: "a" });
+      }
+      // After a runner restart, reconstruct redactions from the retained encrypted
+      // snapshot, without creating another runtime env file or submitting work.
+      const secrets = redactions ?? this.jobRedactions(job);
+      try {
+        if (job.action === "dry-run" || job.action === "run") {
+          this.redactArtifacts(job, this.projectConfig(job.projectId), secrets);
+        }
+      } finally {
+        if (!redactions) secrets.fill("");
+      }
+      job.containerCleanupPending = false;
+      delete job.containerCleanupError;
+      this.saveJob(job);
+      this.pendingContainerCleanup.delete(job.id);
+    } catch (error) {
+      job.containerCleanupPending = true;
+      job.containerCleanupError = error instanceof Error ? error.message : String(error);
+      this.pendingContainerCleanup.set(job.id, job);
+      this.saveJob(job);
+      writeFileSync(logPath, `[${new Date().toISOString()}] CLEANUP PENDING ${job.containerCleanupError}; project queue blocked\n`, { flag: "a" });
+      throw error;
+    }
+  }
+
+  private retryContainerCleanup(): void {
+    for (const job of this.pendingContainerCleanup.values()) {
+      if (!this.activeJobs.has(job.id)) {
+        void this.retryJobContainerCleanup(job).catch(() => {
+          // Keep the durable project lock and retry on the next tick/restart.
+        });
+      }
+    }
+  }
+
+  private retryJobContainerCleanup(job: RunnerJob): Promise<void> {
+    const active = this.cleanupAttempts.get(job.id);
+    if (active) return active;
+    const attempt = (async () => {
+      await this.cleanupJobContainer(job);
+      this.collectJobArtifacts(job);
+      this.saveJob(job);
+      if (job.action === "provision") this.removeProvisionPayload(job);
+      this.pruneJobDirectories(job.projectId);
+    })().finally(() => {
+      this.cleanupAttempts.delete(job.id);
+      this.processQueue();
+    });
+    this.cleanupAttempts.set(job.id, attempt);
+    return attempt;
+  }
+
+  private collectJobArtifacts(job: RunnerJob): void {
+    if (job.containerCleanupPending || (job.action !== "dry-run" && job.action !== "run")) return;
+    try {
+      const project = this.projectConfig(job.projectId);
+      const artifactDirectory = this.safeArtifactDirectory(project, job.id);
+      const artifacts = this.listArtifacts(job.id, project);
+      job.artifactCount = artifacts.length;
+      if (artifactDirectory) {
+        const batch = this.portalMessages.capture({
+          projectId: job.projectId,
+          workspaceId: job.workspaceId,
+          jobId: job.id,
+          artifactDirectory,
+          allowedArtifacts: new Map(artifacts.filter((artifact) => artifact.name !== "portal-messages.json")
+            .map((artifact) => [artifact.name, artifact.contentType])),
+        });
+        if (batch) job.portalMessageCount = batch.messages.length;
+      }
+      this.pruneJobArtifacts(job.projectId, project);
+    } catch (error) {
+      const detail = `artifact collection failed: ${error instanceof Error ? error.message : String(error)}`;
+      job.error = job.error ? `${job.error}; ${detail}` : detail;
+      if (job.status === "completed") {
+        job.status = "failed";
+        job.terminationReason = "runner_error";
+      }
+    }
+  }
+
+  private removeProvisionPayload(job: RunnerJob): void {
+    const directory = this.jobDirectory(job.projectId, job.id);
+    rmSync(resolve(directory, "provisioning"), { recursive: true, force: true });
+    for (const file of ["source.tar", "environment.json", "release-config.json"]) {
+      rmSync(resolve(directory, file), { force: true });
+    }
   }
 
   private async execute(job: RunnerJob, signal: AbortSignal): Promise<void> {
@@ -2519,51 +2686,32 @@ export class ProjectRunnerServer {
         : await this.runImage(job, project, configPath!, logPath, signal, provisionProfile);
       job.exitCode = result.code;
       if (signal.aborted) throw new RunnerCommandCancelledError("runner job cancelled");
-      if (job.action === "dry-run" || job.action === "run") {
-        const project = this.projectConfig(job.projectId, job.workspaceId);
-        const artifactDirectory = this.safeArtifactDirectory(project, job.id);
-        if (artifactDirectory) {
-          const allowedArtifacts = new Map(
-            this.listArtifacts(job.id, project)
-              .filter((artifact) => artifact.name !== "portal-messages.json")
-              .map((artifact) => [artifact.name, artifact.contentType]),
-          );
-          const batch = this.portalMessages.capture({
-            projectId: job.projectId,
-            workspaceId: job.workspaceId,
-            jobId: job.id,
-            artifactDirectory,
-            allowedArtifacts,
-          });
-          if (batch) job.portalMessageCount = batch.messages.length;
-        }
+      if (result.code !== 0) {
+        job.terminationReason = "exit_code";
+        throw new Error(`${job.action} exited with code ${result.code}`);
       }
-      if (result.code !== 0) throw new Error(`${job.action} exited with code ${result.code}`);
       job.status = "completed";
     } catch (error) {
-      if (signal.aborted || error instanceof RunnerCommandCancelledError) {
+      this.recordTermination(job, error);
+      if (job.terminationReason === "cancelled") {
         job.status = "cancelled";
         job.error = "cancelled by user";
         writeFileSync(logPath, `[${new Date().toISOString()}] CANCELLED by user\n`, { flag: "a" });
       } else {
         job.status = "failed";
         job.error = error instanceof Error ? error.message : String(error);
-        writeFileSync(logPath, `[${new Date().toISOString()}] ERROR ${job.error}\n`, { flag: "a" });
+        const label = job.terminationReason === "timeout" ? "TIMEOUT" : "ERROR";
+        writeFileSync(logPath, `[${new Date().toISOString()}] ${label} ${job.error}\n`, { flag: "a" });
       }
     } finally {
-      if (job.action === "dry-run" || job.action === "run") {
-        const project = this.projectConfig(job.projectId);
-        job.artifactCount = this.listArtifacts(job.id, project).length;
-        this.pruneJobArtifacts(job.projectId, project);
+      if (job.containerCleanupPending) {
+        job.status = "failed";
       }
+      this.collectJobArtifacts(job);
       job.completedAt = new Date().toISOString();
       this.saveJob(job);
       rmSync(resolve(directory, "source"), { recursive: true, force: true });
-      if (job.action === "provision") {
-        for (const file of ["source.tar", "environment.json", "release-config.json"]) {
-          rmSync(resolve(directory, file), { force: true });
-        }
-      }
+      if (job.action === "provision" && !job.containerCleanupPending) this.removeProvisionPayload(job);
       this.pruneJobDirectories(job.projectId);
     }
   }
@@ -2713,36 +2861,45 @@ export class ProjectRunnerServer {
       }
       args.push(job.imageId || this.image(job));
       if (job.action === "validate") args.push("node", "dist/src/main.js", "--validate");
-      const result = await run(this.dockerBinary, args, {
-        cwd: this.dataRoot,
-        logPath,
-        timeoutMs: job.action === "run" ? this.runTimeoutHours * 3_600_000 : 900_000,
-        redactions: access.redactions,
-        suppressOutput: job.action === "provision",
-        signal,
-      });
-      if (job.action === "provision") {
+      this.markContainerCleanupPending(job);
+      let result: CommandResult;
+      try {
+        result = await run(this.dockerBinary, args, {
+          cwd: this.dataRoot,
+          logPath,
+          timeoutMs: job.action === "run" ? this.runTimeoutHours * 3_600_000
+            : job.action === "dry-run" ? this.dryRunTimeoutSeconds * 1_000 : 900_000,
+          redactions: access.redactions,
+          suppressOutput: job.action === "provision",
+          signal,
+        });
         job.exitCode = result.code;
-        if (result.code === 0) {
-          this.completeProvision(job, provisionProfile!, provisionDirectory!, logPath);
+        if (result.code !== 0) job.terminationReason = "exit_code";
+      } catch (error) {
+        this.recordTermination(job, error);
+        this.saveJob(job);
+        throw error;
+      } finally {
+        try {
+          await this.cleanupJobContainer(job, access.redactions);
+        } catch (error) {
+          // Preserve the original timeout/cancellation instead of replacing it
+          // with the error from the subsequent cleanup command.
+          if (!job.terminationReason) {
+            throw new Error(`container cleanup did not finish: ${job.containerCleanupError}`, { cause: error });
+          }
         }
+      }
+      if (job.action === "provision" && result.code === 0) {
+        this.completeProvision(job, provisionProfile!, provisionDirectory!, logPath);
       }
       return { code: result.code };
     } finally {
-      try {
-        if (signal.aborted) {
-          await run(this.dockerBinary, ["rm", "--force", containerName], {
-            cwd: this.dataRoot,
-            logPath,
-            timeoutMs: 30_000,
-          });
-        }
-        this.redactArtifacts(job, project, access.redactions);
-      } finally {
-        if (access.envPath) rmSync(access.envPath, { force: true });
-        if (provisionDirectory) rmSync(provisionDirectory, { recursive: true, force: true });
-        access.redactions.fill("");
+      if (access.envPath) rmSync(access.envPath, { force: true });
+      if (provisionDirectory && !job.containerCleanupPending) {
+        rmSync(provisionDirectory, { recursive: true, force: true });
       }
+      access.redactions.fill("");
     }
   }
 
@@ -2824,6 +2981,17 @@ export class ProjectRunnerServer {
     return { envPath, redactions };
   }
 
+  private jobRedactions(job: RunnerJob): string[] {
+    const snapshotPath = resolve(this.jobDirectory(job.projectId, job.id), "environment.json");
+    if (!existsSync(snapshotPath)) {
+      if (job.environmentSha256) throw new Error("cleanup environment snapshot is missing");
+      return [];
+    }
+    return environmentRedactions(this.environments.readJobSnapshot(
+      job.projectId, job.workspaceId, job.releaseId ?? job.id, snapshotPath,
+    ).values);
+  }
+
   private redactArtifacts(job: RunnerJob, project: RunnerProjectConfig, secrets: string[]): void {
     if ((job.action !== "dry-run" && job.action !== "run") || secrets.length === 0) return;
     const directory = this.safeArtifactDirectory(project, job.id);
@@ -2853,6 +3021,9 @@ export class ProjectRunnerServer {
         .slice(0, JOB_ARTIFACT_RETENTION)
         .map((job) => job.id),
     );
+    for (const job of this.pendingContainerCleanup.values()) {
+      if (job.projectId === projectId) keep.add(job.id);
+    }
     for (const entry of readdirSync(root)) {
       if (JOB_ID.test(entry) && !keep.has(entry)) {
         rmSync(resolve(root, entry), { recursive: true, force: true });
@@ -2871,6 +3042,7 @@ export class ProjectRunnerServer {
           if (
             job.id !== entry ||
             job.projectId !== projectId ||
+            job.containerCleanupPending ||
             (job.status !== "completed" &&
               job.status !== "failed" &&
               job.status !== "cancelled" &&
@@ -2921,20 +3093,25 @@ export class ProjectRunnerServer {
       for (const entry of readdirSync(runs)) {
         if (!JOB_ID.test(entry)) continue;
         const directory = resolve(runs, entry);
-        rmSync(resolve(directory, "provisioning"), { recursive: true, force: true });
         const metadataPath = resolve(directory, "job.json");
         try {
           const job = JSON.parse(readFileSync(metadataPath, "utf8")) as RunnerJob;
           if (
             job.id !== entry ||
-            job.projectId !== projectId ||
-            !new Set(["queued", "running", "cancelling"]).has(job.status)
+            job.projectId !== projectId
           ) {
             continue;
           }
+          if (job.containerCleanupPending) this.pendingContainerCleanup.set(job.id, job);
+          if (!new Set(["queued", "running", "cancelling"]).has(job.status)) continue;
+          if (job.status !== "queued" && job.action !== "build" &&
+            job.containerCleanupPending === undefined) {
+            this.markContainerCleanupPending(job);
+          }
           job.status = "interrupted";
+          job.terminationReason ??= "interrupted";
           job.completedAt = completedAt;
-          job.error = "runner restarted before the job completed";
+          job.error ??= "runner restarted before the job completed";
           this.saveJob(job);
           writeFileSync(
             resolve(directory, "job.log"),
@@ -2942,11 +3119,7 @@ export class ProjectRunnerServer {
             { flag: "a", mode: 0o600 },
           );
           rmSync(resolve(directory, "source"), { recursive: true, force: true });
-          if (job.action === "provision") {
-            for (const file of ["source.tar", "environment.json", "release-config.json"]) {
-              rmSync(resolve(directory, file), { force: true });
-            }
-          }
+          if (job.action === "provision" && !job.containerCleanupPending) this.removeProvisionPayload(job);
         } catch {
           // Preserve malformed operator-recovery state for manual inspection.
         }

@@ -58,6 +58,12 @@ export interface RunnerJob {
   completedAt?: string;
   exitCode?: number;
   error?: string;
+  terminationReason?: "timeout" | "cancelled" | "exit_code" | "runner_error" | "interrupted";
+  timeoutMs?: number;
+  timedOutAt?: string;
+  containerCleanupPending?: boolean;
+  containerCleanupError?: string;
+  containerStoppedAt?: string;
   artifactCount?: number;
   portalMessageCount?: number;
   environmentRevision?: number;
@@ -124,6 +130,8 @@ export interface RunnerHealth {
   running: number;
   maxParallelJobs: number;
   runTimeoutHours: number;
+  dryRunTimeoutSeconds?: number;
+  blockedProjects?: string[];
   servicePortRange: [number, number];
 }
 

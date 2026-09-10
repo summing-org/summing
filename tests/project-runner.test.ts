@@ -242,6 +242,8 @@ exit 0
       running: 0,
       maxParallelJobs: 2,
       runTimeoutHours: 12,
+      dryRunTimeoutSeconds: 900,
+      blockedProjects: [],
       servicePortRange: [20_000, 29_999],
     });
 
@@ -839,6 +841,10 @@ exit 0
     const cancelled = await completedJob(client, "demo", "repo", running.id);
     assert.equal(cancelled.status, "cancelled");
     assert.equal(cancelled.error, "cancelled by user");
+    assert.equal(cancelled.terminationReason, "cancelled");
+    assert.equal(cancelled.containerCleanupPending, false);
+    assert.ok(cancelled.containerStoppedAt);
+    assert.equal(cancelled.timedOutAt, undefined);
     assert.ok(cancelled.cancelRequestedAt);
     assert.ok(cancelled.completedAt);
     assert.match(await client.log("demo", running.id), /cancellation requested/);

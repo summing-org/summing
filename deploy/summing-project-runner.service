@@ -22,6 +22,7 @@ Environment=SUMMING_RUNNER_ENV_KEY=/etc/summing-project-runner/environment.key
 Environment=SUMMING_RUNNER_MANAGED_DATA=/var/lib/summing-project-runs
 Environment=SUMMING_RUNNER_MAX_PARALLEL_JOBS=2
 Environment=SUMMING_RUNNER_RUN_TIMEOUT_HOURS=12
+Environment=SUMMING_RUNNER_DRY_RUN_TIMEOUT_SECONDS=900
 Environment=SUMMING_RUNNER_SERVICE_PORT_START=20000
 Environment=SUMMING_RUNNER_SERVICE_PORT_END=29999
 ExecStartPre=/usr/bin/test -S /run/user/PROJECT_RUNNER_UID/docker.sock

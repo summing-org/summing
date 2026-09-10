@@ -1476,7 +1476,9 @@ export class RunnerControlPlane {
       jobs: (snapshot?.jobs ?? []).slice(0, 20).map((job) => ({
         id: job.id, action: job.action, status: job.status, revision: job.revision, createdAt: job.createdAt,
         waitSeconds: job.status === "queued" ? Math.max(0, Math.floor((this.now() - Date.parse(job.createdAt)) / 1000)) : 0,
-        queueReason: job.status !== "queued" ? null : activeInProject
+        queueReason: job.status !== "queued" ? null : snapshot?.health?.blockedProjects?.includes(projectId)
+          ? "Ожидает остановки предыдущего контейнера и сохранения его артефактов"
+          : activeInProject
           ? `Ожидает завершения ${activeInProject.action} (${activeInProject.id.slice(0, 8)}) в этом проекте`
           : snapshot?.health && snapshot.health.running >= snapshot.health.maxParallelJobs
             ? "Все места выполнения на узле заняты" : "Ожидает свободного места выполнения",
